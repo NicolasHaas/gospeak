@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: Build Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build all binaries via container
+        run: |
+          docker build --target builder -t gospeak-builder -f Containerfile .
+          mkdir -p ./bin
+          CONTAINER_ID=$(docker create gospeak-builder)
+          docker cp "$CONTAINER_ID:/out/gospeak-server" ./bin/gospeak-server
+          docker cp "$CONTAINER_ID:/out/gospeak-server-win.exe" ./bin/gospeak-server-win.exe
+          docker cp "$CONTAINER_ID:/out/gospeak-client-lin" ./bin/gospeak-client-lin
+          docker cp "$CONTAINER_ID:/out/gospeak-client-win.exe" ./bin/gospeak-client-win.exe
+          docker rm "$CONTAINER_ID"
+
+      - name: Generate checksums
+        run: |
+          cd bin
+          sha256sum * > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            bin/gospeak-server
+            bin/gospeak-server-win.exe
+            bin/gospeak-client-lin
+            bin/gospeak-client-win.exe
+            bin/checksums-sha256.txt
+
+  container:
+    name: Publish Container Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version tag and image name
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push server image
+        run: |
+          docker build --target server -t ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }} -f Containerfile .
+          docker tag ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.image }}:latest
+          docker push ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+          docker push ${{ steps.meta.outputs.image }}:latest
+
+      - name: Trivy scan published image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

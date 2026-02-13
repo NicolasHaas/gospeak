@@ -1,0 +1,138 @@
+# GoSpeak Docker Compose
+#
+# Usage:
+#   podman compose up                                       — run the server
+#   podman compose up --build                               — rebuild and run
+#   podman compose --profile build     run --build builder      — all binaries → ./bin/
+#   podman compose --profile build-win run --build builder-win  — Windows only → ./bin/
+#   podman compose --profile build-lin run --build builder-lin  — Linux only   → ./bin/
+#   podman compose --profile dev       run --build lint         — golangci-lint
+#   podman compose --profile monitor   up -d                   — Prometheus + Grafana
+#
+# NOTE: always use --build on "run" to ensure the latest source is compiled.
+#
+# Works with: Docker Compose v2, Podman Compose, podman-compose
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: server
+    image: gospeak-server
+    container_name: gospeak-server
+    ports:
+      - "9600:9600"      # TCP/TLS control plane
+      - "9601:9601/udp"  # UDP voice plane
+      - "9602:9602"      # Prometheus /metrics HTTP
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # One-shot service to extract ALL cross-compiled binaries.
+  builder:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: builder
+    image: gospeak-builder
+    profiles:
+      - build
+    volumes:
+      - ./bin:/export
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /out/gospeak-server /export/ && \
+        cp /out/gospeak-server-win.exe /export/ && \
+        cp /out/gospeak-client-lin /export/ && \
+        cp /out/gospeak-client-win.exe /export/ && \
+        echo "All binaries exported to ./bin/"
+
+  # One-shot: Windows binaries only (faster for local dev).
+  builder-win:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: builder-win
+    image: gospeak-builder-win
+    profiles:
+      - build-win
+    volumes:
+      - ./bin:/export
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /out/gospeak-server-win.exe /export/ && \
+        cp /out/gospeak-client-win.exe /export/ && \
+        echo "Windows binaries exported to ./bin/"
+
+  # One-shot: Linux binaries only (faster for local dev).
+  builder-lin:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: builder-lin
+    image: gospeak-builder-lin
+    profiles:
+      - build-lin
+    volumes:
+      - ./bin:/export
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /out/gospeak-server /export/ && \
+        cp /out/gospeak-client-lin /export/ && \
+        echo "Linux binaries exported to ./bin/"
+
+  # One-shot: run golangci-lint inside the build container.
+  lint:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: builder
+    image: gospeak-lint
+    profiles:
+      - dev
+    working_dir: /build
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && \
+        golangci-lint run ./...
+
+  # --- Monitoring stack (activate with --profile monitor) ---
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gospeak-prometheus
+    profiles:
+      - monitor
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gospeak-grafana
+    profiles:
+      - monitor
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: gospeak
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/gospeak.json
+    volumes:
+      - ./deploy/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./docs/grafana-dashboard.json:/var/lib/grafana/dashboards/gospeak.json:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

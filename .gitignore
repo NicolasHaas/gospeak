@@ -1,0 +1,35 @@
+# Binaries
+/bin/
+/server
+/server.exe
+/gospeak-server
+/gospeak-server.exe
+/gospeak-client
+/gospeak-client.exe
+
+# Data directory (server runtime)
+/data/
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# TLS certs (auto-generated)
+server.crt
+server.key
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Settings / local config
+settings.yaml
+bookmarks.yaml

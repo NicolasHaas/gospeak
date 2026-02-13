@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package gospeak;
+
+option go_package = "github.com/nicolascb/gospeak/pkg/protocol/pb";
+
+// ----- Envelope -----
+
+// ControlMessage wraps all control plane messages in a single type.
+message ControlMessage {
+  oneof payload {
+    // Auth
+    AuthRequest         auth_request          = 1;
+    AuthResponse        auth_response         = 2;
+
+    // Channels
+    ChannelListRequest  channel_list_request  = 10;
+    ChannelListResponse channel_list_response = 11;
+    JoinChannelRequest  join_channel_request  = 12;
+    LeaveChannelRequest leave_channel_request = 13;
+
+    // Events
+    ChannelJoinedEvent  channel_joined_event  = 20;
+    ChannelLeftEvent    channel_left_event    = 21;
+    UserStateUpdate     user_state_update     = 22;
+    ServerStateEvent    server_state_event    = 23;
+
+    // Admin
+    CreateChannelRequest  create_channel_request  = 30;
+    DeleteChannelRequest  delete_channel_request  = 31;
+    CreateTokenRequest    create_token_request    = 32;
+    CreateTokenResponse   create_token_response   = 33;
+    KickUserRequest       kick_user_request       = 34;
+    BanUserRequest        ban_user_request        = 35;
+
+    // Generic
+    ErrorResponse       error_response        = 50;
+    Ping                ping                  = 51;
+    Pong                pong                  = 52;
+  }
+}
+
+// ----- Auth -----
+
+message AuthRequest {
+  string token    = 1; // invite token
+  string username = 2; // desired display name
+}
+
+message AuthResponse {
+  uint32 session_id     = 1;
+  string username       = 2;
+  string role           = 3; // "admin", "moderator", "user"
+  bytes  encryption_key = 4; // AES-128 key for voice UDP
+  repeated ChannelInfo channels = 5; // initial channel list
+}
+
+// ----- Channels -----
+
+message ChannelInfo {
+  int64  id          = 1;
+  string name        = 2;
+  string description = 3;
+  int32  max_users   = 4;
+  repeated UserInfo users = 5; // users currently in channel
+}
+
+message UserInfo {
+  int64  id       = 1;
+  string username = 2;
+  string role     = 3;
+  bool   muted    = 4;
+  bool   deafened = 5;
+}
+
+message ChannelListRequest {}
+
+message ChannelListResponse {
+  repeated ChannelInfo channels = 1;
+}
+
+message JoinChannelRequest {
+  int64 channel_id = 1;
+}
+
+message LeaveChannelRequest {}
+
+// ----- Events -----
+
+message ChannelJoinedEvent {
+  int64    channel_id = 1;
+  UserInfo user       = 2;
+}
+
+message ChannelLeftEvent {
+  int64  channel_id = 1;
+  int64  user_id    = 2;
+  string username   = 3;
+}
+
+message UserStateUpdate {
+  bool muted    = 1;
+  bool deafened = 2;
+}
+
+message ServerStateEvent {
+  repeated ChannelInfo channels = 1;
+}
+
+// ----- Admin -----
+
+message CreateChannelRequest {
+  string name        = 1;
+  string description = 2;
+  int32  max_users   = 3;
+}
+
+message DeleteChannelRequest {
+  int64 channel_id = 1;
+}
+
+message CreateTokenRequest {
+  string role       = 1; // "admin", "moderator", "user"
+  int64  channel_scope = 2; // 0 = server-wide
+  int32  max_uses   = 3; // 0 = unlimited
+  int64  expires_in_seconds = 4; // 0 = never
+}
+
+message CreateTokenResponse {
+  string token = 1; // raw token to share
+}
+
+message KickUserRequest {
+  int64  user_id = 1;
+  string reason  = 2;
+}
+
+message BanUserRequest {
+  int64  user_id    = 1;
+  string reason     = 2;
+  int64  duration_seconds = 3; // 0 = permanent
+}
+
+// ----- Generic -----
+
+message ErrorResponse {
+  int32  code    = 1;
+  string message = 2;
+}
+
+message Ping {
+  int64 timestamp = 1;
+}
+
+message Pong {
+  int64 timestamp = 1;
+}

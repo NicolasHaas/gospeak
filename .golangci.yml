@@ -1,0 +1,53 @@
+version: "2"
+
+run:
+  timeout: 30m
+  build-tags:
+    - nolibopusfile
+
+linters:
+  default: none
+  enable:
+    # Core quality
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+
+    # Style & simplification
+
+    # Bug detection
+    - bodyclose
+    - durationcheck
+    - nilerr
+    - noctx
+
+    # Security
+    - gosec
+
+    # Performance
+    - prealloc
+
+  exclusions:
+    rules:
+      # Allow unchecked errors on Close() and Write() in deferred calls
+      - linters:
+          - errcheck
+        text: "Error return value of .*(Close|Write|Flush)"
+
+      # Allow unsafe in hotkeys (Windows syscall usage)
+      - path: hotkeys_windows\.go
+        linters:
+          - gosec
+
+      # Ignore "G402: TLS InsecureSkipVerify" in client (self-signed certs)
+      - path: pkg/client/
+        linters:
+          - gosec
+        text: "G402"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
