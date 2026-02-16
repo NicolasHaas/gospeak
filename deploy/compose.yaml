@@ -1,0 +1,21 @@
+# GoSpeak Server example Docker Compose
+# Usage: docker compose up -d
+#
+# On first run, check logs for your admin token:
+#   docker compose logs gospeak
+
+services:
+  gospeak:
+    image: ghcr.io/nicolashaas/gospeak:latest
+    container_name: gospeak
+    ports:
+      - "9600:9600"       # TCP/TLS control plane
+      - "9601:9601/udp"   # UDP encrypted voice
+      - "9602:9602"       # Prometheus /metrics (optional, remove if not needed)
+    volumes:
+      - gospeak-data:/data
+    restart: unless-stopped
+    command: ["-open"]
+
+volumes:
+  gospeak-data:
