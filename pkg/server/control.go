@@ -765,15 +765,7 @@ func isClosedErr(err error) bool {
 
 // isValidUsername checks that a username is 1-32 alphanumeric/underscore/hyphen characters.
 func isValidUsername(name string) bool {
-	if len(name) == 0 || len(name) > 32 {
-		return false
-	}
-	for _, r := range name {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
-			return false
-		}
-	}
-	return true
+	return model.ValidateUsername(name) == nil
 }
 
 // sanitizeText strips control characters (except newline) from user-supplied text

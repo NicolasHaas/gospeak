@@ -2,6 +2,8 @@
 package model
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"time"
 )
@@ -38,6 +40,43 @@ func ParseRole(s string) Role {
 	default:
 		return RoleUser
 	}
+}
+
+// Valid returns true if the role is a recognised value (User, Moderator, or Admin).
+func (r Role) Valid() bool {
+	return r >= RoleUser && r <= RoleAdmin
+}
+
+// MaxUsernameLength is the maximum allowed length for a username in bytes.
+const MaxUsernameLength = 32
+
+// ErrUsernameEmpty is returned when a username is blank.
+var ErrUsernameEmpty = errors.New("username must not be empty")
+
+// ErrUsernameTooLong is returned when a username exceeds MaxUsernameLength.
+var ErrUsernameTooLong = fmt.Errorf("username must not exceed %d characters", MaxUsernameLength)
+
+// ErrUsernameInvalidChars is returned when a username contains disallowed characters.
+var ErrUsernameInvalidChars = errors.New("username must contain only alphanumeric characters, underscores, or hyphens")
+
+// ErrInvalidRole is returned when a role value is not recognised.
+var ErrInvalidRole = errors.New("invalid role: must be user (0), moderator (1), or admin (2)")
+
+// ValidateUsername checks that a username is 1-32 ASCII alphanumeric, underscore,
+// or hyphen characters. Returns nil on success or a descriptive error.
+func ValidateUsername(name string) error {
+	if len(name) == 0 {
+		return ErrUsernameEmpty
+	}
+	if len(name) > MaxUsernameLength {
+		return ErrUsernameTooLong
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return ErrUsernameInvalidChars
+		}
+	}
+	return nil
 }
 
 // Permission represents a specific action that can be checked against a role.

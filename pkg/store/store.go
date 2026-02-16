@@ -63,8 +63,8 @@ func (s *Store) migrate() error {
 	const schema = `
 	CREATE TABLE IF NOT EXISTS users (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		username   TEXT    NOT NULL UNIQUE,
-		role       INTEGER NOT NULL DEFAULT 0,
+		username   TEXT    NOT NULL UNIQUE CHECK(length(username) > 0 AND length(username) <= 32),
+		role       INTEGER NOT NULL DEFAULT 0 CHECK(role >= 0 AND role <= 2),
 		created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 	);
 
@@ -122,7 +122,14 @@ func (s *Store) migrate() error {
 // ---- Users ----
 
 // CreateUser creates a new user and returns it with the assigned ID.
+// It validates the username format and role before inserting.
 func (s *Store) CreateUser(username string, role model.Role) (*model.User, error) {
+	if err := model.ValidateUsername(username); err != nil {
+		return nil, fmt.Errorf("store: create user: %w", err)
+	}
+	if !role.Valid() {
+		return nil, fmt.Errorf("store: create user: %w", model.ErrInvalidRole)
+	}
 	res, err := s.db.ExecContext(context.Background(), "INSERT INTO users (username, role) VALUES (?, ?)", username, int(role))
 	if err != nil {
 		return nil, fmt.Errorf("store: create user: %w", err)
@@ -174,6 +181,9 @@ func (s *Store) GetUserByID(id int64) (*model.User, error) {
 
 // UpdateUserRole changes a user's role.
 func (s *Store) UpdateUserRole(userID int64, role model.Role) error {
+	if !role.Valid() {
+		return fmt.Errorf("store: update user role: %w", model.ErrInvalidRole)
+	}
 	_, err := s.db.ExecContext(context.Background(), "UPDATE users SET role = ? WHERE id = ?", int(role), userID)
 	if err != nil {
 		return fmt.Errorf("store: update user role: %w", err)

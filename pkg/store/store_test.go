@@ -61,10 +61,10 @@ func TestCreateUser(t *testing.T) {
 			role:      model.RoleUser,
 			expectErr: false,
 		},
-		"injection_username": {
+		"injection_username": { // SQL injection contains invalid chars (quotes, spaces, equals)
 			username:  "' OR '1'='1",
 			role:      model.RoleAdmin,
-			expectErr: false,
+			expectErr: true,
 		},
 		"empty_username": { // Empty username should not be allowed
 			username:  "",
