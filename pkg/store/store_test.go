@@ -16,26 +16,67 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
+type storeFactory struct {
+	name string
+	new  func(t *testing.T) (store.DataStore, func())
+}
+
+var storeFactories = []storeFactory{
+	{
+		name: "sqlite",
+		new: func(t *testing.T) (store.DataStore, func()) {
+			t.Helper()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "test.db")
+			st, err := store.New(dbPath)
+			if err != nil {
+				t.Fatalf("store_test: failed to open db: %v", err)
+			}
+			return st, func() {
+				if err := st.Close(); err != nil {
+					fmt.Printf("Error closing database: %v\n", err)
+				}
+			}
+		},
+	},
+	{
+		name: "memory",
+		new: func(t *testing.T) (store.DataStore, func()) {
+			t.Helper()
+			return store.NewMemory(), func() {}
+		},
+	},
+}
+
+func withStores(t *testing.T, fn func(t *testing.T, st store.DataStore)) {
+	for _, factory := range storeFactories {
+		factory := factory
+		t.Run(factory.name, func(t *testing.T) {
+			st, cleanup := factory.new(t)
+			t.Cleanup(cleanup)
+			fn(t, st)
+		})
+	}
+}
+
 func NewTestSqlConn(t *testing.T) (*store.Store, error) {
 	t.Helper()
 
-	// Creates a temporary in-memory datastore
-	// with a unique name per-test
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
-	store, err := store.New(dbPath)
+	st, err := store.New(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("store_test: failed to open db: %w", err)
 	}
 
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
+		if err := st.Close(); err != nil {
 			fmt.Printf("Error closing database: %v\n", err)
 		}
 	})
 
-	return store, nil
+	return st, nil
 }
 
 func generateRandomSafeString(t *testing.T, byteLength int) string {
