@@ -83,7 +83,7 @@ pkg/
   protocol/pb/     Message type definitions
   rbac/            Role-based access control
   server/          Server core (control, voice, config)
-  store/           DataStore interface + SQLite implementation
+  store/           DataStore interface + SQLite and in-memory implementations
 ui/                Fyne desktop GUI
 docs/              Documentation with Mermaid diagrams
 ```
@@ -95,6 +95,12 @@ GoSpeak follows an **onion architecture**, the server and client depend on inter
 e.g. **`store.DataStore`**, the server uses this interface for all persistence. The default implementation is SQLite, but alternative backends (PostgreSQL, in-memory for tests) can be added by implementing the interface. See [`pkg/store/interface.go`](pkg/store/interface.go).
 
 When contributing new features, prefer depending on interfaces rather than concrete types.
+
+## Testing Architecture
+
+- Use `store.NewMemory()` for fast, deterministic tests that require persistence.
+- Keep tests backend-agnostic when possible by coding against `store.DataStore`.
+- Server tests can construct `server.Dependencies{Store: store.NewMemory()}` to avoid external DB setup.
 
 ## Areas for Contribution
 

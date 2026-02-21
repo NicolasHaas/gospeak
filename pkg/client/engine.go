@@ -128,14 +128,14 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 	)
 
 	// Set up voice connection
-	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey)
+	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.Encryption)
 	if err != nil {
 		_ = ctrl.Close()
 		e.setState(StateDisconnected)
 		return err
 	}
 
-	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.EncryptionKey)
+	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.Encryption)
 	if err != nil {
 		_ = ctrl.Close()
 		_ = voice.Close()

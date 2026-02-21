@@ -15,6 +15,18 @@ type SessionManager struct {
 	sessions map[uint32]*model.Session // sessionID -> session
 }
 
+// SessionSnapshot is an immutable view of a session.
+type SessionSnapshot struct {
+	ID        uint32
+	UserID    int64
+	Username  string
+	Role      model.Role
+	ChannelID int64
+	UDPAddr   *net.UDPAddr
+	Muted     bool
+	Deafened  bool
+}
+
 // NewSessionManager creates a new session manager.
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
@@ -52,23 +64,45 @@ func (sm *SessionManager) Create(userID int64, username string, role model.Role)
 	return sess
 }
 
-// Get retrieves a session by ID.
-func (sm *SessionManager) Get(id uint32) *model.Session {
+// GetSnapshot returns an immutable snapshot of the session by session ID.
+func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.sessions[id]
+	s, ok := sm.sessions[sessionID]
+	if !ok {
+		return SessionSnapshot{}, false
+	}
+	return SessionSnapshot{
+		ID:        s.ID,
+		UserID:    s.UserID,
+		Username:  s.Username,
+		Role:      s.Role,
+		ChannelID: s.ChannelID,
+		UDPAddr:   cloneUDPAddr(s.UDPAddr),
+		Muted:     s.Muted,
+		Deafened:  s.Deafened,
+	}, true
 }
 
-// GetByUserID retrieves a session by user ID.
-func (sm *SessionManager) GetByUserID(userID int64) *model.Session {
+// GetByUserIDSnapshot retrieves a session snapshot by user ID.
+func (sm *SessionManager) GetByUserIDSnapshot(userID int64) (SessionSnapshot, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	for _, s := range sm.sessions {
 		if s.UserID == userID {
-			return s
+			return SessionSnapshot{
+				ID:        s.ID,
+				UserID:    s.UserID,
+				Username:  s.Username,
+				Role:      s.Role,
+				ChannelID: s.ChannelID,
+				UDPAddr:   cloneUDPAddr(s.UDPAddr),
+				Muted:     s.Muted,
+				Deafened:  s.Deafened,
+			}, true
 		}
 	}
-	return nil
+	return SessionSnapshot{}, false
 }
 
 // Remove removes a session.
@@ -83,7 +117,35 @@ func (sm *SessionManager) SetUDPAddr(id uint32, addr *net.UDPAddr) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if s, ok := sm.sessions[id]; ok {
-		s.UDPAddr = addr
+		s.UDPAddr = cloneUDPAddr(addr)
+	}
+}
+
+// UpdateUserState updates muted/deafened for a session.
+func (sm *SessionManager) UpdateUserState(id uint32, muted, deafened bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if s, ok := sm.sessions[id]; ok {
+		s.Muted = muted
+		s.Deafened = deafened
+	}
+}
+
+// SetChannel sets the channel ID for a session.
+func (sm *SessionManager) SetChannel(id uint32, channelID int64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if s, ok := sm.sessions[id]; ok {
+		s.ChannelID = channelID
+	}
+}
+
+// UpdateRole updates the role for a session.
+func (sm *SessionManager) UpdateRole(id uint32, role model.Role) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if s, ok := sm.sessions[id]; ok {
+		s.Role = role
 	}
 }
 
@@ -94,13 +156,13 @@ func (sm *SessionManager) Count() int {
 	return len(sm.sessions)
 }
 
-// All returns all active sessions (snapshot).
-func (sm *SessionManager) All() []*model.Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	result := make([]*model.Session, 0, len(sm.sessions))
-	for _, s := range sm.sessions {
-		result = append(result, s)
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
 	}
-	return result
+	clone := *addr
+	if addr.IP != nil {
+		clone.IP = append([]byte(nil), addr.IP...)
+	}
+	return &clone
 }

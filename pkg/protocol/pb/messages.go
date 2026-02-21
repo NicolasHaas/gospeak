@@ -41,14 +41,26 @@ type AuthRequest struct {
 	Token    string `json:"token"` // empty = token-less join (if server allows)
 	Username string `json:"username"`
 }
+type EncryptionMethod uint32
+
+const (
+	AES128   EncryptionMethod = 1
+	AES256   EncryptionMethod = 2
+	CHACHA20 EncryptionMethod = 3
+)
+
+type EncryptionInfo struct {
+	Key              []byte           `json:"encryption_key"`
+	EncryptionMethod EncryptionMethod `json:"encryption_method"`
+}
 
 type AuthResponse struct {
-	SessionID     uint32        `json:"session_id"`
-	Username      string        `json:"username"`
-	Role          string        `json:"role"`
-	EncryptionKey []byte        `json:"encryption_key"`
-	Channels      []ChannelInfo `json:"channels"`
-	AutoToken     string        `json:"auto_token,omitempty"` // set when server generated a token for this user
+	SessionID  uint32         `json:"session_id"`
+	Username   string         `json:"username"`
+	Role       string         `json:"role"`
+	Encryption EncryptionInfo `json:"encryption_info"`
+	Channels   []ChannelInfo  `json:"channels"`
+	AutoToken  string         `json:"auto_token,omitempty"` // set when server generated a token for this user
 }
 
 // ----- Channels -----

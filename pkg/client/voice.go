@@ -8,6 +8,7 @@ import (
 
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
+	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
 // VoiceClient manages the UDP voice connection.
@@ -27,7 +28,7 @@ type VoiceClient struct {
 }
 
 // NewVoiceClient creates a new UDP voice client.
-func NewVoiceClient(serverAddr string, sessionID uint32, encKey []byte) (*VoiceClient, error) {
+func NewVoiceClient(serverAddr string, sessionID uint32, encryption pb.EncryptionInfo) (*VoiceClient, error) {
 	addr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("client: resolve voice addr: %w", err)
@@ -38,7 +39,7 @@ func NewVoiceClient(serverAddr string, sessionID uint32, encKey []byte) (*VoiceC
 		return nil, fmt.Errorf("client: dial voice: %w", err)
 	}
 
-	cipher, err := gospeakCrypto.NewVoiceCipher(encKey)
+	cipher, err := gospeakCrypto.NewVoiceCipher(encryption)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: voice cipher: %w", err)

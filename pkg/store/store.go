@@ -12,6 +12,8 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/model"
 )
 
+const dbTimeLayout = "2006-01-02 15:04:05"
+
 // Store provides database access for all GoSpeak entities.
 type Store struct {
 	db *sql.DB
@@ -102,21 +104,97 @@ func (s *Store) migrate() error {
 	);
 	`
 	ctx := context.Background()
-	_, err := s.db.ExecContext(ctx, schema)
+	if err := s.ensureSchemaMigrations(ctx); err != nil {
+		return err
+	}
+	currentVersion, err := s.getSchemaVersion(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Auto-migrate: add new columns if missing (for existing databases)
-	migrations := []string{
-		"ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0",
+	migrations := []struct {
+		version      int
+		statements   []string
+		ignoreErrors bool
+	}{
+		{
+			version:    1,
+			statements: []string{schema},
+		},
+		{
+			version: 2,
+			statements: []string{
+				"ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0",
+				"ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0",
+				"ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0",
+			},
+			ignoreErrors: true,
+		},
 	}
+
 	for _, m := range migrations {
-		_, _ = s.db.ExecContext(ctx, m) // ignore errors (column already exists)
+		if m.version <= currentVersion {
+			continue
+		}
+		for _, stmt := range m.statements {
+			if err := s.execMigration(ctx, stmt, m.ignoreErrors); err != nil {
+				return err
+			}
+		}
+		if err := s.setSchemaVersion(ctx, m.version); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (s *Store) ensureSchemaMigrations(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER NOT NULL)"); err != nil {
+		return fmt.Errorf("store: create schema_migrations: %w", err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+		return fmt.Errorf("store: check schema_migrations: %w", err)
+	}
+	if count == 0 {
+		if _, err := s.db.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (0)"); err != nil {
+			return fmt.Errorf("store: init schema_migrations: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) getSchemaVersion(ctx context.Context) (int, error) {
+	var version int
+	if err := s.db.QueryRowContext(ctx, "SELECT version FROM schema_migrations LIMIT 1").Scan(&version); err != nil {
+		return 0, fmt.Errorf("store: read schema version: %w", err)
+	}
+	return version, nil
+}
+
+func (s *Store) setSchemaVersion(ctx context.Context, version int) error {
+	if _, err := s.db.ExecContext(ctx, "UPDATE schema_migrations SET version = ?", version); err != nil {
+		return fmt.Errorf("store: update schema version: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) execMigration(ctx context.Context, stmt string, ignoreErrors bool) error {
+	if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if ignoreErrors {
+			return nil
+		}
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+	return nil
+}
+
+func formatDBTime(t time.Time) string {
+	return t.UTC().Format(dbTimeLayout)
+}
+
+func parseDBTime(value string) (time.Time, error) {
+	return time.ParseInLocation(dbTimeLayout, value, time.UTC)
 }
 
 // ---- Users ----
@@ -139,7 +217,7 @@ func (s *Store) CreateUser(username string, role model.Role) (*model.User, error
 		ID:        id,
 		Username:  username,
 		Role:      role,
-		CreatedAt: time.Now(),
+		CreatedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -157,7 +235,11 @@ func (s *Store) GetUserByUsername(username string) (*model.User, error) {
 		return nil, fmt.Errorf("store: get user: %w", err)
 	}
 	u.Role = model.Role(roleInt)
-	u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	parsed, err := parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user: %w", err)
+	}
+	u.CreatedAt = parsed
 	return u, nil
 }
 
@@ -175,7 +257,11 @@ func (s *Store) GetUserByID(id int64) (*model.User, error) {
 		return nil, fmt.Errorf("store: get user: %w", err)
 	}
 	u.Role = model.Role(roleInt)
-	u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	parsed, err := parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user: %w", err)
+	}
+	u.CreatedAt = parsed
 	return u, nil
 }
 
@@ -208,7 +294,11 @@ func (s *Store) ListUsers() ([]model.User, error) {
 			return nil, fmt.Errorf("store: scan user: %w", err)
 		}
 		u.Role = model.Role(roleInt)
-		u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		parsed, err := parseDBTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan user: %w", err)
+		}
+		u.CreatedAt = parsed
 		users = append(users, u)
 	}
 	return users, rows.Err()
@@ -244,7 +334,7 @@ func (s *Store) CreateChannel(channel *model.Channel) error {
 		return fmt.Errorf("store: create channel: %w", err)
 	}
 	channel.ID, _ = res.LastInsertId()
-	channel.CreatedAt = time.Now()
+	channel.CreatedAt = time.Now().UTC()
 
 	return nil
 }
@@ -276,7 +366,11 @@ func (s *Store) ListChannels() ([]model.Channel, error) {
 		}
 		ch.IsTemp = isTempInt != 0
 		ch.AllowSubChannels = allowSubInt != 0
-		ch.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		parsed, err := parseDBTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan channel: %w", err)
+		}
+		ch.CreatedAt = parsed
 		channels = append(channels, ch)
 	}
 	return channels, rows.Err()
@@ -297,7 +391,11 @@ func (s *Store) GetChannel(id int64) (*model.Channel, error) {
 	}
 	ch.IsTemp = isTempInt != 0
 	ch.AllowSubChannels = allowSubInt != 0
-	ch.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	parsed, err := parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get channel: %w", err)
+	}
+	ch.CreatedAt = parsed
 	return ch, nil
 }
 
@@ -316,7 +414,11 @@ func (s *Store) GetChannelByNameAndParent(name string, parentID int64) (*model.C
 	}
 	ch.IsTemp = isTempInt != 0
 	ch.AllowSubChannels = allowSubInt != 0
-	ch.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	parsed, err := parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get channel by name: %w", err)
+	}
+	ch.CreatedAt = parsed
 	return ch, nil
 }
 
@@ -336,7 +438,7 @@ func (s *Store) HasTokens() (bool, error) {
 func (s *Store) CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error {
 	var expStr *string
 	if !expiresAt.IsZero() {
-		s := expiresAt.UTC().Format("2006-01-02 15:04:05")
+		s := formatDBTime(expiresAt)
 		expStr = &s
 	}
 	_, err := s.db.ExecContext(context.Background(),
@@ -373,7 +475,10 @@ func (s *Store) ValidateToken(hash string) (model.Role, error) {
 
 	// Check expiration
 	if expiresAt != nil {
-		exp, _ := time.Parse("2006-01-02 15:04:05", *expiresAt)
+		exp, err := parseDBTime(*expiresAt)
+		if err != nil {
+			return 0, fmt.Errorf("store: validate token: %w", err)
+		}
 		if time.Now().After(exp) {
 			return 0, fmt.Errorf("store: token expired")
 		}
@@ -402,7 +507,7 @@ func (s *Store) ValidateToken(hash string) (model.Role, error) {
 func (s *Store) CreateBan(userID int64, ip, reason string, bannedBy int64, expiresAt time.Time) error {
 	var expStr *string
 	if !expiresAt.IsZero() {
-		es := expiresAt.UTC().Format("2006-01-02 15:04:05")
+		es := formatDBTime(expiresAt)
 		expStr = &es
 	}
 	_, err := s.db.ExecContext(context.Background(),

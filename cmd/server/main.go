@@ -23,6 +23,7 @@ func main() {
 	flag.BoolVar(&cfg.AllowNoToken, "open", false, "Allow users to join without a token (open server)")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for Prometheus /metrics (empty to disable)")
+	flag.StringVar(&cfg.EncryptionMethod, "encryption", cfg.EncryptionMethod, "Encryption method used for Voip communication, supports aes128, aes256, and chacha20")
 	flag.BoolVar(&cfg.ExportUsers, "export-users", false, "Export all users as YAML and exit")
 	flag.BoolVar(&cfg.ExportChannels, "export-channels", false, "Export all channels as YAML and exit")
 
@@ -68,7 +69,13 @@ func main() {
 		return
 	}
 
-	srv := server.New(cfg)
+	st, err := store.New(cfg.DBPath)
+	if err != nil {
+		slog.Error("open database", "err", err)
+		os.Exit(1)
+	}
+
+	srv := server.New(cfg, server.Dependencies{Store: st})
 	if err := srv.Run(); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)

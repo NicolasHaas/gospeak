@@ -89,12 +89,14 @@ graph LR
 | `pkg/crypto` | AES-128-GCM voice encryption, key generation, token hashing (SHA-256), password hashing (Argon2id) |
 | `pkg/model` | Core domain types: User, Channel, Token, Ban, Session, Role, Permission |
 | `pkg/rbac` | Role-based access control — permission matrix for User/Moderator/Admin |
-| `pkg/store` | `DataStore` interface + SQLite implementation with auto-migration |
+| `pkg/store` | `DataStore` interface + SQLite and in-memory implementations |
 | `ui` | Fyne v2 desktop GUI with channel tree, chat, settings, admin tools |
 
 ## Onion Architecture
 
 GoSpeak follows an **onion (hexagonal) architecture** core business logic depends on interfaces. This allows swapping backends without touching the server or client logic.
+
+The server receives its dependencies (notably `store.DataStore`) from `cmd/server` via `server.Dependencies`. This keeps `pkg/server` free of concrete implementations and makes tests easy to write with the in-memory store.
 
 ## Server Lifecycle
 
@@ -102,14 +104,13 @@ GoSpeak follows an **onion (hexagonal) architecture** core business logic depend
 sequenceDiagram
     participant Main as cmd/server
     participant Srv as Server
-    participant Store as SQLite
+    participant Store as DataStore
     participant TLS as TLS Listener
     participant UDP as UDP Listener
 
-    Main->>Srv: New(config)
+    Main->>Store: Open database
+    Main->>Srv: New(config, deps)
     Main->>Srv: Run()
-    Srv->>Store: Open database
-    Srv->>Store: Auto-migrate schema
     Srv->>Srv: GenerateKey() → shared AES-128 voice key
     Srv->>Store: Ensure "Lobby" channel exists
     Srv->>Store: Load channels from YAML (if configured)

@@ -73,8 +73,8 @@ func (s *Server) voiceLoop() {
 		}
 
 		// Look up sender session
-		session := s.sessions.Get(pkt.SessionID)
-		if session == nil {
+		session, ok := s.sessions.GetSnapshot(pkt.SessionID)
+		if !ok {
 			s.metrics.VoicePacketsDropped.Add(1)
 			continue // unknown session, discard
 		}
@@ -111,8 +111,8 @@ func (s *Server) voiceLoop() {
 				continue // don't echo back to sender
 			}
 
-			memberSession := s.sessions.Get(memberSID)
-			if memberSession == nil || memberSession.UDPAddr == nil {
+			memberSession, ok := s.sessions.GetSnapshot(memberSID)
+			if !ok || memberSession.UDPAddr == nil {
 				continue
 			}
 			if memberSession.Deafened {

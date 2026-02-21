@@ -6,14 +6,16 @@ import (
 
 // ChannelManager manages voice channels and their members.
 type ChannelManager struct {
-	mu      sync.RWMutex
-	members map[int64]map[uint32]bool // channelID -> set of sessionIDs
+	mu               sync.RWMutex
+	members          map[int64]map[uint32]bool // channelID -> set of sessionIDs
+	sessionToChannel map[uint32]int64
 }
 
 // NewChannelManager creates a new channel manager.
 func NewChannelManager() *ChannelManager {
 	return &ChannelManager{
-		members: make(map[int64]map[uint32]bool),
+		members:          make(map[int64]map[uint32]bool),
+		sessionToChannel: make(map[uint32]int64),
 	}
 }
 
@@ -23,15 +25,14 @@ func (cm *ChannelManager) Join(sessionID uint32, channelID int64) (prevChannelID
 	defer cm.mu.Unlock()
 
 	// Remove from current channel if any
-	for chID, sessions := range cm.members {
-		if sessions[sessionID] {
+	if current, ok := cm.sessionToChannel[sessionID]; ok {
+		if sessions, found := cm.members[current]; found {
 			delete(sessions, sessionID)
-			prevChannelID = chID
 			if len(sessions) == 0 {
-				delete(cm.members, chID)
+				delete(cm.members, current)
 			}
-			break
 		}
+		prevChannelID = current
 	}
 
 	// Add to new channel
@@ -39,6 +40,7 @@ func (cm *ChannelManager) Join(sessionID uint32, channelID int64) (prevChannelID
 		cm.members[channelID] = make(map[uint32]bool)
 	}
 	cm.members[channelID][sessionID] = true
+	cm.sessionToChannel[sessionID] = channelID
 	return prevChannelID
 }
 
@@ -47,16 +49,18 @@ func (cm *ChannelManager) Leave(sessionID uint32) (channelID int64) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	for chID, sessions := range cm.members {
-		if sessions[sessionID] {
-			delete(sessions, sessionID)
-			if len(sessions) == 0 {
-				delete(cm.members, chID)
-			}
-			return chID
+	current, ok := cm.sessionToChannel[sessionID]
+	if !ok {
+		return 0
+	}
+	delete(cm.sessionToChannel, sessionID)
+	if sessions, found := cm.members[current]; found {
+		delete(sessions, sessionID)
+		if len(sessions) == 0 {
+			delete(cm.members, current)
 		}
 	}
-	return 0
+	return current
 }
 
 // Members returns all session IDs in a channel.
@@ -76,13 +80,7 @@ func (cm *ChannelManager) Members(channelID int64) []uint32 {
 func (cm *ChannelManager) ChannelOf(sessionID uint32) int64 {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-
-	for chID, sessions := range cm.members {
-		if sessions[sessionID] {
-			return chID
-		}
-	}
-	return 0
+	return cm.sessionToChannel[sessionID]
 }
 
 // MembersCount returns how many users are in a channel.
