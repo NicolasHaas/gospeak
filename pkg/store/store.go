@@ -140,6 +140,13 @@ func (s *Store) migrate() error {
 			},
 			ignoreErrors: true,
 		},
+		{
+			version: 4,
+			statements: []string{
+				"CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)",
+			},
+			ignoreErrors: true,
+		},
 	}
 
 	for _, m := range migrations {
@@ -288,6 +295,33 @@ func (s *Store) GetUserByID(id int64) (*model.User, error) {
 	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("store: get user: %w", err)
+	}
+	return u, nil
+}
+
+// GetUserByPersonalTokenHash retrieves a user by personal token hash.
+func (s *Store) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	u := &model.User{}
+	var roleInt int
+	var createdAt string
+	var personalTokenCreatedAt string
+	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE personal_token_hash = ?", hash).
+		Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get user by token: %w", err)
+	}
+	u.Role = model.Role(roleInt)
+	parsed, err := parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user by token: %w", err)
+	}
+	u.CreatedAt = parsed
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user by token: %w", err)
 	}
 	return u, nil
 }

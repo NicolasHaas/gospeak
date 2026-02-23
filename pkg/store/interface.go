@@ -27,6 +27,9 @@ type DataStore interface {
 	// GetUserByID retrieves a user by ID. Returns (nil, nil) if not found.
 	GetUserByID(id int64) (*model.User, error)
 
+	// GetUserByPersonalTokenHash retrieves a user by personal token hash. Returns (nil, nil) if not found.
+	GetUserByPersonalTokenHash(hash string) (*model.User, error)
+
 	// UpdateUserRole changes a user's role.
 	UpdateUserRole(userID int64, role model.Role) error
 

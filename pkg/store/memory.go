@@ -128,6 +128,19 @@ func (s *MemoryStore) GetUserByID(id int64) (*model.User, error) {
 	return &copyUser, nil
 }
 
+// GetUserByPersonalTokenHash retrieves a user by personal token hash.
+func (s *MemoryStore) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, user := range s.usersByID {
+		if user.PersonalTokenHash == hash {
+			copyUser := *user
+			return &copyUser, nil
+		}
+	}
+	return nil, nil
+}
+
 // UpdateUserRole changes a user's role.
 func (s *MemoryStore) UpdateUserRole(userID int64, role model.Role) error {
 	if !role.Valid() {

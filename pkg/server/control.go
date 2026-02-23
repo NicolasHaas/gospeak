@@ -138,82 +138,98 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 
 	authReq := msg.AuthRequest
 
-	// Validate username
-	if !isValidUsername(authReq.Username) {
-		sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
-		return
-	}
-
-	// Create or get user — existing users keep their stored role
-	user, err := st.GetUserByUsername(authReq.Username)
-	if err != nil {
-		sendError(conn, 3, "internal error")
-		return
-	}
-
-	var tokenRole model.Role
-	var autoToken string // set when server generates a personal token
 	var tokenHash string
 	if authReq.Token != "" {
 		tokenHash = crypto.HashToken(authReq.Token)
 	}
 
+	var tokenRole model.Role
+	var autoToken string // set when server generates a personal token
 	var sessionRole model.Role
-	if user == nil {
-		// New user: role comes from the token or open join
-		if authReq.Token == "" {
-			// Token-less join
-			if !s.cfg.AllowNoToken {
-				s.metrics.FailedAuths.Add(1)
-				sendError(conn, 2, "authentication failed: token required")
-				return
-			}
-			tokenRole = model.RoleUser
-		} else {
-			var err error
-			tokenRole, err = st.ValidateToken(tokenHash)
-			if err != nil {
-				s.metrics.FailedAuths.Add(1)
-				sendError(conn, 2, "authentication failed: "+err.Error())
-				return
-			}
-		}
 
-		user, err = st.CreateUser(authReq.Username, tokenRole)
+	var user *model.User
+	if tokenHash != "" {
+		var err error
+		user, err = st.GetUserByPersonalTokenHash(tokenHash)
 		if err != nil {
-			sendError(conn, 3, "failed to create user: "+err.Error())
+			sendError(conn, 3, "internal error")
 			return
 		}
-		sessionRole = tokenRole
+	}
 
-		rawToken, err := crypto.GenerateToken()
-		if err != nil {
-			sendError(conn, 3, "failed to generate personal token")
-			return
-		}
-		if err := st.UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
-			sendError(conn, 3, "failed to store personal token")
-			return
-		}
-		autoToken = rawToken
-	} else {
-		// Existing user: require personal token
-		if user.PersonalTokenHash == "" {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: personal token required")
-			return
-		}
-		if authReq.Token == "" {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: personal token required")
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(tokenHash), []byte(user.PersonalTokenHash)) != 1 {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: invalid personal token")
-			return
-		}
+	if user != nil {
 		sessionRole = user.Role
+	} else {
+		// Validate username for non-token-identification flows
+		if !isValidUsername(authReq.Username) {
+			sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
+			return
+		}
+
+		// Create or get user — existing users keep their stored role
+		var err error
+		user, err = st.GetUserByUsername(authReq.Username)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+
+		if user == nil {
+			// New user: role comes from the token or open join
+			if authReq.Token == "" {
+				// Token-less join
+				if !s.cfg.AllowNoToken {
+					s.metrics.FailedAuths.Add(1)
+					sendError(conn, 2, "authentication failed: token required")
+					return
+				}
+				tokenRole = model.RoleUser
+			} else {
+				var err error
+				tokenRole, err = st.ValidateToken(tokenHash)
+				if err != nil {
+					s.metrics.FailedAuths.Add(1)
+					sendError(conn, 2, "authentication failed: "+err.Error())
+					return
+				}
+			}
+
+			user, err = st.CreateUser(authReq.Username, tokenRole)
+			if err != nil {
+				sendError(conn, 3, "failed to create user: "+err.Error())
+				return
+			}
+			sessionRole = tokenRole
+
+			rawToken, err := crypto.GenerateToken()
+			if err != nil {
+				sendError(conn, 3, "failed to generate personal token")
+				return
+			}
+			if err := st.UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
+				sendError(conn, 3, "failed to store personal token")
+				return
+			}
+			autoToken = rawToken
+		} else {
+			// Existing user: require personal token
+			if user.PersonalTokenHash == "" {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: personal token required")
+				return
+			}
+			if authReq.Token == "" {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: personal token required")
+				return
+			}
+			if subtle.ConstantTimeCompare([]byte(tokenHash), []byte(user.PersonalTokenHash)) != 1 {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: invalid personal token")
+				return
+			}
+			sessionRole = user.Role
+		}
 	}
 
 	// Check ban
