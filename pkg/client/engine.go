@@ -742,6 +742,13 @@ func (e *Engine) GetChannels() []pb.ChannelInfo {
 	return result
 }
 
+// GetChannelID returns the current channel ID (0 if none).
+func (e *Engine) GetChannelID() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.channelID
+}
+
 // IsMuted returns whether the client is muted.
 func (e *Engine) IsMuted() bool {
 	e.mu.RLock()
@@ -764,6 +771,8 @@ func (e *Engine) handleDisconnect(reason string) {
 	}
 	e.state = StateDisconnected
 	e.channelID = 0
+	e.muted = false
+	e.deafened = false
 
 	ctrl := e.control
 	voice := e.voice
