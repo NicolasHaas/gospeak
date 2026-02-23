@@ -57,7 +57,7 @@ Download the appropriate binary for your platform from [Releases](https://github
 ./bin/gospeak-client-lin       # Linux
 ```
 
-Enter the server address, your username, and (optionally) a token to connect.
+Enter the server address, your username, and (optionally) an invite token to connect. On first login the server issues a personal token; keep it to reconnect with the same username.
 
 ## Architecture
 

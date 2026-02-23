@@ -124,13 +124,13 @@ graph TB
 ```
 
 - Tokens are 256-bit random values (64 hex characters)
-- Only the SHA-256 hash is stored in the database
+- Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
 - Tokens can have: role assignment, channel scope, max uses, expiration
 - On first server run, an admin token is automatically generated and logged
 
 ### Open Server Mode
 
-When `AllowNoToken` is enabled, clients can connect without a token and receive the `user` role. The server auto-generates a token internally for tracking purposes.
+When `AllowNoToken` is enabled, clients can connect without an invite token and receive the `user` role. The server issues a **personal token** on first login; that personal token is required for future logins with the same username.
 
 ## Role-Based Access Control (RBAC)
 
@@ -162,7 +162,7 @@ graph TB
     MOD --> P3
 ```
 
-Every admin operation is checked server-side via `rbac.HasPermission()` before execution. The client's role is determined by the token used during authentication.
+Every admin operation is checked server-side via `rbac.HasPermission()` before execution. The client's role is determined by the stored user role, and logins require the user's personal token.
 
 ## Password Hashing
 
