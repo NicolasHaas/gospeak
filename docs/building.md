@@ -111,7 +111,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-data` | `.` | Directory for auto-generated TLS certs |
 | `-cert` | *(auto)* | Custom TLS certificate path |
 | `-key` | *(auto)* | Custom TLS private key path |
-| `-open` | `false` | Allow connections without a token |
+| `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
 | `-channels-file` | *(none)* | YAML file defining channels to create on startup |
 | `-metrics` | `:9602` | HTTP bind address for Prometheus /metrics (empty to disable) |
 | `-export-users` | `false` | Export all users as YAML and exit |
