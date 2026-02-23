@@ -104,18 +104,6 @@ func (s *MemoryStore) CreateUser(username string, role model.Role) (*model.User,
 	return &copyUser, nil
 }
 
-// GetUserByUsername retrieves a user by username.
-func (s *MemoryStore) GetUserByUsername(username string) (*model.User, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	user, ok := s.usersByUsername[username]
-	if !ok {
-		return nil, nil
-	}
-	copyUser := *user
-	return &copyUser, nil
-}
-
 // GetUserByID retrieves a user by ID.
 func (s *MemoryStore) GetUserByID(id int64) (*model.User, error) {
 	s.mu.RLock()

@@ -21,9 +21,6 @@ type DataStore interface {
 	// CreateUser creates a new user and returns it with the assigned ID.
 	CreateUser(username string, role model.Role) (*model.User, error)
 
-	// GetUserByUsername retrieves a user by username. Returns (nil, nil) if not found.
-	GetUserByUsername(username string) (*model.User, error)
-
 	// GetUserByID retrieves a user by ID. Returns (nil, nil) if not found.
 	GetUserByID(id int64) (*model.User, error)
 

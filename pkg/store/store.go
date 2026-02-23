@@ -245,33 +245,6 @@ func (s *Store) CreateUser(username string, role model.Role) (*model.User, error
 	}, nil
 }
 
-// GetUserByUsername retrieves a user by username.
-func (s *Store) GetUserByUsername(username string) (*model.User, error) {
-	u := &model.User{}
-	var roleInt int
-	var createdAt string
-	var personalTokenCreatedAt string
-	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE username = ?", username).
-		Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: get user: %w", err)
-	}
-	u.Role = model.Role(roleInt)
-	parsed, err := parseDBTime(createdAt)
-	if err != nil {
-		return nil, fmt.Errorf("store: get user: %w", err)
-	}
-	u.CreatedAt = parsed
-	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("store: get user: %w", err)
-	}
-	return u, nil
-}
-
 // GetUserByID retrieves a user by ID.
 func (s *Store) GetUserByID(id int64) (*model.User, error) {
 	u := &model.User{}

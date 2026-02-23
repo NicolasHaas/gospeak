@@ -19,12 +19,12 @@ func TestStoreBasicFlow(t *testing.T) {
 			t.Fatalf("CreateUser: expected non-zero ID")
 		}
 
-		fetched, err := st.GetUserByUsername("johndoe")
+		fetched, err := st.GetUserByID(user.ID)
 		if err != nil {
-			t.Fatalf("GetUserByUsername: unexpected error: %v", err)
+			t.Fatalf("GetUserByID: unexpected error: %v", err)
 		}
 		if fetched == nil || fetched.ID != user.ID {
-			t.Fatalf("GetUserByUsername: expected user with ID %d", user.ID)
+			t.Fatalf("GetUserByID: expected user with ID %d", user.ID)
 		}
 
 		rawToken, err := crypto.GenerateToken()
