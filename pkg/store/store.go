@@ -67,6 +67,8 @@ func (s *Store) migrate() error {
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		username   TEXT    NOT NULL UNIQUE CHECK(length(username) > 0 AND length(username) <= 32),
 		role       INTEGER NOT NULL DEFAULT 0 CHECK(role >= 0 AND role <= 2),
+		personal_token_hash TEXT NOT NULL DEFAULT '',
+		personal_token_created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 	);
 
@@ -127,6 +129,14 @@ func (s *Store) migrate() error {
 				"ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0",
 				"ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0",
 				"ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0",
+			},
+			ignoreErrors: true,
+		},
+		{
+			version: 3,
+			statements: []string{
+				"ALTER TABLE users ADD COLUMN personal_token_hash TEXT NOT NULL DEFAULT ''",
+				"ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT (datetime('now'))",
 			},
 			ignoreErrors: true,
 		},
@@ -197,6 +207,13 @@ func parseDBTime(value string) (time.Time, error) {
 	return time.ParseInLocation(dbTimeLayout, value, time.UTC)
 }
 
+func parseDBTimePtr(value sql.NullString) (time.Time, error) {
+	if !value.Valid || value.String == "" {
+		return time.Time{}, nil
+	}
+	return parseDBTime(value.String)
+}
+
 // ---- Users ----
 
 // CreateUser creates a new user and returns it with the assigned ID.
@@ -208,7 +225,7 @@ func (s *Store) CreateUser(username string, role model.Role) (*model.User, error
 	if !role.Valid() {
 		return nil, fmt.Errorf("store: create user: %w", model.ErrInvalidRole)
 	}
-	res, err := s.db.ExecContext(context.Background(), "INSERT INTO users (username, role) VALUES (?, ?)", username, int(role))
+	res, err := s.db.ExecContext(context.Background(), "INSERT INTO users (username, role, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?)", username, int(role), "", formatDBTime(time.Now().UTC()))
 	if err != nil {
 		return nil, fmt.Errorf("store: create user: %w", err)
 	}
@@ -226,8 +243,9 @@ func (s *Store) GetUserByUsername(username string) (*model.User, error) {
 	u := &model.User{}
 	var roleInt int
 	var createdAt string
-	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, created_at FROM users WHERE username = ?", username).
-		Scan(&u.ID, &u.Username, &roleInt, &createdAt)
+	var personalTokenCreatedAt string
+	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE username = ?", username).
+		Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -240,6 +258,10 @@ func (s *Store) GetUserByUsername(username string) (*model.User, error) {
 		return nil, fmt.Errorf("store: get user: %w", err)
 	}
 	u.CreatedAt = parsed
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user: %w", err)
+	}
 	return u, nil
 }
 
@@ -248,8 +270,9 @@ func (s *Store) GetUserByID(id int64) (*model.User, error) {
 	u := &model.User{}
 	var roleInt int
 	var createdAt string
-	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, created_at FROM users WHERE id = ?", id).
-		Scan(&u.ID, &u.Username, &roleInt, &createdAt)
+	var personalTokenCreatedAt string
+	err := s.db.QueryRowContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE id = ?", id).
+		Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -262,6 +285,10 @@ func (s *Store) GetUserByID(id int64) (*model.User, error) {
 		return nil, fmt.Errorf("store: get user: %w", err)
 	}
 	u.CreatedAt = parsed
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: get user: %w", err)
+	}
 	return u, nil
 }
 
@@ -277,9 +304,23 @@ func (s *Store) UpdateUserRole(userID int64, role model.Role) error {
 	return nil
 }
 
+// UpdateUserPersonalToken sets the personal token hash and timestamp for a user.
+func (s *Store) UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error {
+	var createdAtStr *string
+	if !createdAt.IsZero() {
+		value := formatDBTime(createdAt)
+		createdAtStr = &value
+	}
+	_, err := s.db.ExecContext(context.Background(), "UPDATE users SET personal_token_hash = ?, personal_token_created_at = ? WHERE id = ?", hash, createdAtStr, userID)
+	if err != nil {
+		return fmt.Errorf("store: update personal token: %w", err)
+	}
+	return nil
+}
+
 // ListUsers returns all users.
 func (s *Store) ListUsers() ([]model.User, error) {
-	rows, err := s.db.QueryContext(context.Background(), "SELECT id, username, role, created_at FROM users ORDER BY id")
+	rows, err := s.db.QueryContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("store: list users: %w", err)
 	}
@@ -290,7 +331,8 @@ func (s *Store) ListUsers() ([]model.User, error) {
 		var u model.User
 		var roleInt int
 		var createdAt string
-		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &createdAt); err != nil {
+		var personalTokenCreatedAt string
+		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan user: %w", err)
 		}
 		u.Role = model.Role(roleInt)
@@ -299,6 +341,10 @@ func (s *Store) ListUsers() ([]model.User, error) {
 			return nil, fmt.Errorf("store: scan user: %w", err)
 		}
 		u.CreatedAt = parsed
+		u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan user: %w", err)
+		}
 		users = append(users, u)
 	}
 	return users, rows.Err()

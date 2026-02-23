@@ -30,6 +30,9 @@ type DataStore interface {
 	// UpdateUserRole changes a user's role.
 	UpdateUserRole(userID int64, role model.Role) error
 
+	// UpdateUserPersonalToken sets the personal token hash and timestamp for a user.
+	UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error
+
 	// ListUsers returns all users.
 	ListUsers() ([]model.User, error)
 

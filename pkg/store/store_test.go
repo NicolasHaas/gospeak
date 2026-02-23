@@ -164,7 +164,7 @@ func TestCreateUser(t *testing.T) {
 				Role:     tc.role,
 			}
 
-			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt", "PersonalTokenHash", "PersonalTokenCreatedAt")); diff != "" {
 				t.Errorf("store.CreateUser mismatch (-want +got):\\n%s", diff)
 			}
 		}
@@ -234,7 +234,7 @@ func TestGetUserByUsername(t *testing.T) {
 				Role:     tc.role,
 			}
 
-			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt", "PersonalTokenHash", "PersonalTokenCreatedAt")); diff != "" {
 				t.Fatalf("GetUserByUsername mismatch (-want +got):\n%s", diff)
 			}
 
@@ -369,7 +369,7 @@ func TestListUsers(t *testing.T) {
 				t.Fatalf("ListUsers: unexpected error: %v", err)
 			}
 
-			if diff := cmp.Diff(tc.users, users, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(tc.users, users, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt", "PersonalTokenHash", "PersonalTokenCreatedAt")); diff != "" {
 				t.Fatalf("ListUsers mismatch (-want +got):\n%s", diff)
 			}
 		})

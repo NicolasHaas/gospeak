@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -135,35 +136,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 		return
 	}
 
-	// Validate token
 	authReq := msg.AuthRequest
 
 	// Validate username
 	if !isValidUsername(authReq.Username) {
 		sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
 		return
-	}
-
-	var tokenRole model.Role
-	var autoToken string // set when server generates a token for token-less join
-
-	if authReq.Token == "" {
-		// Token-less join
-		if !s.cfg.AllowNoToken {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: token required")
-			return
-		}
-		tokenRole = model.RoleUser
-	} else {
-		tokenHash := crypto.HashToken(authReq.Token)
-		var err error
-		tokenRole, err = st.ValidateToken(tokenHash)
-		if err != nil {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: "+err.Error())
-			return
-		}
 	}
 
 	// Create or get user — existing users keep their stored role
@@ -173,9 +151,34 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 		return
 	}
 
+	var tokenRole model.Role
+	var autoToken string // set when server generates a personal token
+	var tokenHash string
+	if authReq.Token != "" {
+		tokenHash = crypto.HashToken(authReq.Token)
+	}
+
 	var sessionRole model.Role
 	if user == nil {
-		// New user: role comes from the token
+		// New user: role comes from the token or open join
+		if authReq.Token == "" {
+			// Token-less join
+			if !s.cfg.AllowNoToken {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: token required")
+				return
+			}
+			tokenRole = model.RoleUser
+		} else {
+			var err error
+			tokenRole, err = st.ValidateToken(tokenHash)
+			if err != nil {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: "+err.Error())
+				return
+			}
+		}
+
 		user, err = st.CreateUser(authReq.Username, tokenRole)
 		if err != nil {
 			sendError(conn, 3, "failed to create user: "+err.Error())
@@ -183,18 +186,33 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 		}
 		sessionRole = tokenRole
 
-		// Auto-generate a personal token for identification (token-less join)
-		if authReq.Token == "" {
-			rawToken, err := crypto.GenerateToken()
-			if err == nil {
-				hash := crypto.HashToken(rawToken)
-				_ = st.CreateToken(hash, model.RoleUser, 0, 0, 0, st.ZeroTime()) // unlimited, no expiry
-				autoToken = rawToken
-				slog.Debug("auto-generated token for token-less user", "user", user.Username)
-			}
+		rawToken, err := crypto.GenerateToken()
+		if err != nil {
+			sendError(conn, 3, "failed to generate personal token")
+			return
 		}
+		if err := st.UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
+			sendError(conn, 3, "failed to store personal token")
+			return
+		}
+		autoToken = rawToken
 	} else {
-		// Existing user: use their stored/persisted role (honors SetUserRole changes)
+		// Existing user: require personal token
+		if user.PersonalTokenHash == "" {
+			s.metrics.FailedAuths.Add(1)
+			sendError(conn, 2, "authentication failed: personal token required")
+			return
+		}
+		if authReq.Token == "" {
+			s.metrics.FailedAuths.Add(1)
+			sendError(conn, 2, "authentication failed: personal token required")
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(tokenHash), []byte(user.PersonalTokenHash)) != 1 {
+			s.metrics.FailedAuths.Add(1)
+			sendError(conn, 2, "authentication failed: invalid personal token")
+			return
+		}
 		sessionRole = user.Role
 	}
 

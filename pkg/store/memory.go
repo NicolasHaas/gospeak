@@ -90,10 +90,12 @@ func (s *MemoryStore) CreateUser(username string, role model.Role) (*model.User,
 	}
 	createdAt := s.now().UTC()
 	user := &model.User{
-		ID:        s.nextUserID,
-		Username:  username,
-		Role:      role,
-		CreatedAt: createdAt,
+		ID:                     s.nextUserID,
+		Username:               username,
+		Role:                   role,
+		PersonalTokenHash:      "",
+		PersonalTokenCreatedAt: time.Time{},
+		CreatedAt:              createdAt,
 	}
 	s.nextUserID++
 	copyUser := *user
@@ -138,6 +140,23 @@ func (s *MemoryStore) UpdateUserRole(userID int64, role model.Role) error {
 		return nil
 	}
 	user.Role = role
+	return nil
+}
+
+// UpdateUserPersonalToken sets the personal token hash and timestamp for a user.
+func (s *MemoryStore) UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.usersByID[userID]
+	if !ok {
+		return nil
+	}
+	user.PersonalTokenHash = hash
+	if createdAt.IsZero() {
+		user.PersonalTokenCreatedAt = time.Time{}
+	} else {
+		user.PersonalTokenCreatedAt = createdAt.UTC()
+	}
 	return nil
 }
 

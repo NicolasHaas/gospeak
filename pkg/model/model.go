@@ -96,10 +96,12 @@ const (
 
 // User represents a registered user.
 type User struct {
-	ID        int64     `json:"id"`
-	Username  string    `json:"username"`
-	Role      Role      `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                     int64     `json:"id"`
+	Username               string    `json:"username"`
+	Role                   Role      `json:"role"`
+	PersonalTokenHash      string    `json:"-"`
+	PersonalTokenCreatedAt time.Time `json:"-"`
+	CreatedAt              time.Time `json:"created_at"`
 }
 
 const (
