@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/model"
@@ -62,11 +61,10 @@ func (s *Server) Run() error {
 		"voice", s.cfg.VoiceAddr,
 	)
 
-	// Start Prometheus metrics HTTP endpoint
-	s.StartMetricsHTTP()
-
-	// Start periodic metrics logging (every 60s)
-	s.metrics.StartPeriodicLog(60*time.Second, s.ctx.Done())
+	if s.cfg.MetricsAddr != "" {
+		// Start Prometheus metrics HTTP endpoint
+		s.StartMetricsHTTP()
+	}
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
