@@ -374,7 +374,7 @@ func (a *App) bindEvents() {
 			entry.SetText(token)
 			entry.Disable()
 			copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-				a.window.Clipboard().SetContent(token)
+				a.fyneApp.Clipboard().SetContent(token)
 			})
 			copyBtn.Importance = widget.LowImportance
 
@@ -482,7 +482,7 @@ func (a *App) showConnectDialog() {
 	tokenEntry := widget.NewPasswordEntry()
 	tokenEntry.SetPlaceHolder("Invite token (optional for open servers)")
 	pasteTokenBtn := widget.NewButton("Paste", func() {
-		content := a.window.Clipboard().Content()
+		content := a.fyneApp.Clipboard().Content()
 		if content != "" {
 			tokenEntry.SetText(content)
 		}

@@ -214,13 +214,6 @@ func parseDBTime(value string) (time.Time, error) {
 	return time.ParseInLocation(dbTimeLayout, value, time.UTC)
 }
 
-func parseDBTimePtr(value sql.NullString) (time.Time, error) {
-	if !value.Valid || value.String == "" {
-		return time.Time{}, nil
-	}
-	return parseDBTime(value.String)
-}
-
 // ---- Users ----
 
 // CreateUser creates a new user and returns it with the assigned ID.
