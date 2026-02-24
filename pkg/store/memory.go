@@ -90,27 +90,17 @@ func (s *MemoryStore) CreateUser(username string, role model.Role) (*model.User,
 	}
 	createdAt := s.now().UTC()
 	user := &model.User{
-		ID:        s.nextUserID,
-		Username:  username,
-		Role:      role,
-		CreatedAt: createdAt,
+		ID:                     s.nextUserID,
+		Username:               username,
+		Role:                   role,
+		PersonalTokenHash:      "",
+		PersonalTokenCreatedAt: time.Time{},
+		CreatedAt:              createdAt,
 	}
 	s.nextUserID++
 	copyUser := *user
 	s.usersByID[user.ID] = user
 	s.usersByUsername[username] = user
-	return &copyUser, nil
-}
-
-// GetUserByUsername retrieves a user by username.
-func (s *MemoryStore) GetUserByUsername(username string) (*model.User, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	user, ok := s.usersByUsername[username]
-	if !ok {
-		return nil, nil
-	}
-	copyUser := *user
 	return &copyUser, nil
 }
 
@@ -126,6 +116,19 @@ func (s *MemoryStore) GetUserByID(id int64) (*model.User, error) {
 	return &copyUser, nil
 }
 
+// GetUserByPersonalTokenHash retrieves a user by personal token hash.
+func (s *MemoryStore) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, user := range s.usersByID {
+		if user.PersonalTokenHash == hash {
+			copyUser := *user
+			return &copyUser, nil
+		}
+	}
+	return nil, nil
+}
+
 // UpdateUserRole changes a user's role.
 func (s *MemoryStore) UpdateUserRole(userID int64, role model.Role) error {
 	if !role.Valid() {
@@ -138,6 +141,23 @@ func (s *MemoryStore) UpdateUserRole(userID int64, role model.Role) error {
 		return nil
 	}
 	user.Role = role
+	return nil
+}
+
+// UpdateUserPersonalToken sets the personal token hash and timestamp for a user.
+func (s *MemoryStore) UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.usersByID[userID]
+	if !ok {
+		return nil
+	}
+	user.PersonalTokenHash = hash
+	if createdAt.IsZero() {
+		user.PersonalTokenCreatedAt = time.Time{}
+	} else {
+		user.PersonalTokenCreatedAt = createdAt.UTC()
+	}
 	return nil
 }
 

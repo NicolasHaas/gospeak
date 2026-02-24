@@ -52,13 +52,19 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    C->>S: AuthRequest{token, username}
-    alt Token valid (or open server)
-        S->>S: Find/create user in SQLite
+    C->>S: AuthRequest{token?, username}
+    alt New user (invite or open server)
+        S->>S: Validate invite token or allow open join
+        S->>S: Create user + personal token
+        S->>S: Check bans
+        S->>S: Generate session
+        S->>C: AuthResponse{sessionID, role, encryptionKey, channels, autoToken}
+        Note over C: Store personal token for reconnect
+    else Existing user
+        S->>S: Require personal token
         S->>S: Check bans
         S->>S: Generate session
         S->>C: AuthResponse{sessionID, role, encryptionKey, channels}
-        Note over C: Client stores AES-128 key for voice encryption
     else Invalid token / banned
         S->>C: ErrorResponse{code, message}
         S->>S: Close connection

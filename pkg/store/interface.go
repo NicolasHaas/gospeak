@@ -21,14 +21,17 @@ type DataStore interface {
 	// CreateUser creates a new user and returns it with the assigned ID.
 	CreateUser(username string, role model.Role) (*model.User, error)
 
-	// GetUserByUsername retrieves a user by username. Returns (nil, nil) if not found.
-	GetUserByUsername(username string) (*model.User, error)
-
 	// GetUserByID retrieves a user by ID. Returns (nil, nil) if not found.
 	GetUserByID(id int64) (*model.User, error)
 
+	// GetUserByPersonalTokenHash retrieves a user by personal token hash. Returns (nil, nil) if not found.
+	GetUserByPersonalTokenHash(hash string) (*model.User, error)
+
 	// UpdateUserRole changes a user's role.
 	UpdateUserRole(userID int64, role model.Role) error
+
+	// UpdateUserPersonalToken sets the personal token hash and timestamp for a user.
+	UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error
 
 	// ListUsers returns all users.
 	ListUsers() ([]model.User, error)

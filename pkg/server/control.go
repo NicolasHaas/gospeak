@@ -135,67 +135,78 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 		return
 	}
 
-	// Validate token
 	authReq := msg.AuthRequest
 
-	// Validate username
-	if !isValidUsername(authReq.Username) {
-		sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
-		return
+	var tokenHash string
+	if authReq.Token != "" {
+		tokenHash = crypto.HashToken(authReq.Token)
 	}
 
 	var tokenRole model.Role
-	var autoToken string // set when server generates a token for token-less join
-
-	if authReq.Token == "" {
-		// Token-less join
-		if !s.cfg.AllowNoToken {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: token required")
-			return
-		}
-		tokenRole = model.RoleUser
-	} else {
-		tokenHash := crypto.HashToken(authReq.Token)
-		var err error
-		tokenRole, err = st.ValidateToken(tokenHash)
-		if err != nil {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: "+err.Error())
-			return
-		}
-	}
-
-	// Create or get user — existing users keep their stored role
-	user, err := st.GetUserByUsername(authReq.Username)
-	if err != nil {
-		sendError(conn, 3, "internal error")
-		return
-	}
-
+	var autoToken string // set when server generates a personal token
 	var sessionRole model.Role
-	if user == nil {
-		// New user: role comes from the token
+
+	var user *model.User
+	if tokenHash != "" {
+		var err error
+		user, err = st.GetUserByPersonalTokenHash(tokenHash)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
+
+	if user != nil {
+		sessionRole = user.Role
+	} else {
+		// Validate username for non-token-identification flows
+		if !isValidUsername(authReq.Username) {
+			sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
+			return
+		}
+
+		// New user: role comes from the token or open join
+		if authReq.Token == "" {
+			// Token-less join
+			if !s.cfg.AllowNoToken {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: token required")
+				return
+			}
+			tokenRole = model.RoleUser
+		} else {
+			var err error
+			tokenRole, err = st.ValidateToken(tokenHash)
+			if err != nil {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: "+err.Error())
+				return
+			}
+		}
+
+		var err error
 		user, err = st.CreateUser(authReq.Username, tokenRole)
 		if err != nil {
+			if isUsernameTakenErr(err) {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: personal token required")
+				return
+			}
 			sendError(conn, 3, "failed to create user: "+err.Error())
 			return
 		}
 		sessionRole = tokenRole
 
-		// Auto-generate a personal token for identification (token-less join)
-		if authReq.Token == "" {
-			rawToken, err := crypto.GenerateToken()
-			if err == nil {
-				hash := crypto.HashToken(rawToken)
-				_ = st.CreateToken(hash, model.RoleUser, 0, 0, 0, st.ZeroTime()) // unlimited, no expiry
-				autoToken = rawToken
-				slog.Debug("auto-generated token for token-less user", "user", user.Username)
-			}
+		rawToken, err := crypto.GenerateToken()
+		if err != nil {
+			sendError(conn, 3, "failed to generate personal token")
+			return
 		}
-	} else {
-		// Existing user: use their stored/persisted role (honors SetUserRole changes)
-		sessionRole = user.Role
+		if err := st.UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
+			sendError(conn, 3, "failed to store personal token")
+			return
+		}
+		autoToken = rawToken
 	}
 
 	// Check ban
@@ -814,6 +825,13 @@ func isClosedErr(err error) bool {
 // isValidUsername checks that a username is 1-32 alphanumeric/underscore/hyphen characters.
 func isValidUsername(name string) bool {
 	return model.ValidateUsername(name) == nil
+}
+
+func isUsernameTakenErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: users.username")
 }
 
 // sanitizeText strips control characters (except newline) from user-supplied text

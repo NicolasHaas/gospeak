@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"image/color"
 	"log/slog"
+	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -234,6 +236,7 @@ func (a *App) bindEvents() {
 				a.disconnectBtn.Disable()
 				a.muteBtn.Disable()
 				a.deafenBtn.Disable()
+				a.updateMuteButtons()
 				a.serverBtn.Hide()
 				a.chatEntry.Disable()
 				a.channels = nil
@@ -247,6 +250,7 @@ func (a *App) bindEvents() {
 				a.disconnectBtn.Enable()
 				a.muteBtn.Enable()
 				a.deafenBtn.Enable()
+				a.updateMuteButtons()
 				a.chatEntry.Enable()
 				role := a.engine.GetRole()
 				if role == "admin" || role == "moderator" {
@@ -356,13 +360,31 @@ func (a *App) bindEvents() {
 		fyne.Do(func() {
 			if a.serverSaved {
 				a.saveCurrentBookmark(a.engine.GetUsername())
-			} else {
-				dialog.ShowInformation("Token Generated",
-					"The server generated a personal token for you.\n"+
-						"Enable 'Save Server' in the connect dialog to keep it.\n"+
-						"Without it, you will lose your identity on reconnect.",
-					a.window)
 			}
+
+			message := "The server generated a personal token for you.\n"
+			if a.serverSaved {
+				message += "This server is saved, so the token is stored in your bookmark.\n"
+			} else {
+				message += "Save this token or enable 'Save Server' to keep it.\n"
+			}
+			message += "Without it, you will lose your identity on reconnect."
+
+			entry := widget.NewEntry()
+			entry.SetText(token)
+			entry.Disable()
+			copyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+				a.fyneApp.Clipboard().SetContent(token)
+			})
+			copyBtn.Importance = widget.LowImportance
+
+			content := container.NewVBox(
+				widget.NewLabel(message),
+				container.NewBorder(nil, nil, nil, copyBtn, entry),
+			)
+			d := dialog.NewCustom("Personal Token", "Close", content, a.window)
+			d.Resize(fyne.NewSize(520, 180))
+			d.Show()
 		})
 	}
 
@@ -402,107 +424,233 @@ func (a *App) startGlobalHotkeys() {
 	a.hotkeys.Start()
 }
 
+const (
+	defaultServerHost  = "gospeak.haas-nicolas.ch"
+	defaultControlPort = "9600"
+	defaultVoicePort   = "9601"
+)
+
+func normalizeAddr(input, defaultPort string) (string, string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", fmt.Errorf("address is required")
+	}
+
+	host, port, err := net.SplitHostPort(input)
+	if err == nil {
+		return net.JoinHostPort(host, port), host, nil
+	}
+
+	if strings.Count(input, ":") > 1 {
+		trimmed := strings.Trim(input, "[]")
+		return net.JoinHostPort(trimmed, defaultPort), trimmed, nil
+	}
+
+	return net.JoinHostPort(input, defaultPort), input, nil
+}
+
+func displayControlInput(controlAddr string) string {
+	host, port, err := net.SplitHostPort(controlAddr)
+	if err != nil {
+		return controlAddr
+	}
+	if port == defaultControlPort {
+		return host
+	}
+	return controlAddr
+}
+
+func deriveVoiceAddr(controlAddr string) string {
+	host, _, err := net.SplitHostPort(controlAddr)
+	if err != nil || host == "" {
+		return controlAddr
+	}
+	return net.JoinHostPort(host, defaultVoicePort)
+}
+
 func (a *App) showConnectDialog() {
 	serverEntry := widget.NewEntry()
-	serverEntry.SetPlaceHolder("localhost:9600")
-	serverEntry.SetText("localhost:9600")
+	serverEntry.SetPlaceHolder(defaultServerHost)
+	serverEntry.SetText(defaultServerHost)
 
 	voiceEntry := widget.NewEntry()
-	voiceEntry.SetPlaceHolder("localhost:9601")
-	voiceEntry.SetText("localhost:9601")
+	voiceEntry.SetPlaceHolder(fmt.Sprintf("%s:%s", defaultServerHost, defaultVoicePort))
 
 	usernameEntry := widget.NewEntry()
 	usernameEntry.SetPlaceHolder("Your display name")
 
 	tokenEntry := widget.NewPasswordEntry()
 	tokenEntry.SetPlaceHolder("Invite token (optional for open servers)")
+	pasteTokenBtn := widget.NewButton("Paste", func() {
+		content := a.fyneApp.Clipboard().Content()
+		if content != "" {
+			tokenEntry.SetText(content)
+		}
+	})
+	pasteTokenBtn.Importance = widget.LowImportance
+	pasteTokenBtn.Hide()
+
+	updatePasteVisibility := func() {
+		if strings.TrimSpace(tokenEntry.Text) == "" {
+			pasteTokenBtn.Show()
+		} else {
+			pasteTokenBtn.Hide()
+		}
+	}
+
+	tokenEntry.OnChanged = func(_ string) {
+		updatePasteVisibility()
+	}
+	updatePasteVisibility()
 
 	saveCheck := widget.NewCheck("Save server (bookmark)", nil)
 
-	// Saved servers dropdown
-	savedNames := make([]string, 0, len(a.bookmarks.Bookmarks)+1)
+	advancedContainer := container.NewVBox(
+		widget.NewLabel("Voice (optional)"),
+		voiceEntry,
+	)
+	advancedAccordion := widget.NewAccordion(widget.NewAccordionItem("Advanced", advancedContainer))
+
+	sortedBookmarks := make([]client.Bookmark, len(a.bookmarks.Bookmarks))
+	copy(sortedBookmarks, a.bookmarks.Bookmarks)
+	sort.Slice(sortedBookmarks, func(i, j int) bool {
+		if sortedBookmarks[i].LastUsed == sortedBookmarks[j].LastUsed {
+			return sortedBookmarks[i].Name < sortedBookmarks[j].Name
+		}
+		return sortedBookmarks[i].LastUsed > sortedBookmarks[j].LastUsed
+	})
+
+	labelToBookmark := make(map[string]client.Bookmark, len(sortedBookmarks))
+	savedNames := make([]string, 0, len(sortedBookmarks)+1)
 	savedNames = append(savedNames, "(New Server)")
-	for _, b := range a.bookmarks.Bookmarks {
-		savedNames = append(savedNames, fmt.Sprintf("%s (%s)", b.Name, b.ControlAddr))
+	for _, b := range sortedBookmarks {
+		label := fmt.Sprintf("%s (%s)", b.Name, displayControlInput(b.ControlAddr))
+		savedNames = append(savedNames, label)
+		labelToBookmark[label] = b
 	}
-	savedSelect := widget.NewSelect(savedNames, func(selected string) {
-		if selected == "(New Server)" {
-			serverEntry.SetText("localhost:9600")
-			voiceEntry.SetText("localhost:9601")
-			usernameEntry.SetText("")
-			tokenEntry.SetText("")
-			saveCheck.SetChecked(false)
+
+	var selectedBookmark *client.Bookmark
+	resetToNew := func() {
+		selectedBookmark = nil
+		serverEntry.SetText(defaultServerHost)
+		voiceEntry.SetText("")
+		usernameEntry.SetText("")
+		tokenEntry.SetText("")
+		saveCheck.SetChecked(false)
+		advancedAccordion.Close(0)
+	}
+	applyBookmark := func(b client.Bookmark) {
+		selectedBookmark = &b
+		serverEntry.SetText(displayControlInput(b.ControlAddr))
+		usernameEntry.SetText(b.Username)
+		tokenEntry.SetText(b.Token)
+		saveCheck.SetChecked(true)
+
+		derivedVoice := deriveVoiceAddr(b.ControlAddr)
+		if b.VoiceAddr != "" && b.VoiceAddr != derivedVoice {
+			voiceEntry.SetText(b.VoiceAddr)
+			advancedAccordion.Open(0)
 			return
 		}
-		for _, b := range a.bookmarks.Bookmarks {
-			label := fmt.Sprintf("%s (%s)", b.Name, b.ControlAddr)
-			if label == selected {
-				serverEntry.SetText(b.ControlAddr)
-				voiceEntry.SetText(b.VoiceAddr)
-				usernameEntry.SetText(b.Username)
-				tokenEntry.SetText(b.Token)
-				saveCheck.SetChecked(true)
-				break
-			}
+		voiceEntry.SetText("")
+		advancedAccordion.Close(0)
+	}
+
+	savedSelect := widget.NewSelect(savedNames, func(selected string) {
+		if selected == "(New Server)" {
+			resetToNew()
+			return
+		}
+		if b, ok := labelToBookmark[selected]; ok {
+			applyBookmark(b)
 		}
 	})
-	savedSelect.SetSelected("(New Server)")
 
-	form := dialog.NewForm(
+	if len(sortedBookmarks) > 0 {
+		savedSelect.SetSelected(savedNames[1])
+	} else {
+		savedSelect.SetSelected("(New Server)")
+	}
+
+	tokenRow := container.NewBorder(nil, nil, nil, pasteTokenBtn, tokenEntry)
+
+	content := container.NewVBox(
+		widget.NewLabel("Saved"),
+		savedSelect,
+		widget.NewSeparator(),
+		widget.NewLabel("Server"),
+		serverEntry,
+		advancedAccordion,
+		widget.NewSeparator(),
+		widget.NewLabel("Username"),
+		usernameEntry,
+		widget.NewLabel("Token"),
+		tokenRow,
+		saveCheck,
+	)
+
+	d := dialog.NewCustomConfirm(
 		"Connect to Server",
 		"Connect",
 		"Cancel",
-		[]*widget.FormItem{
-			widget.NewFormItem("Saved", savedSelect),
-			widget.NewFormItem("Server", serverEntry),
-			widget.NewFormItem("Voice", voiceEntry),
-			widget.NewFormItem("Username", usernameEntry),
-			widget.NewFormItem("Token", tokenEntry),
-			widget.NewFormItem("", saveCheck),
-		},
+		content,
 		func(ok bool) {
 			if !ok {
 				return
 			}
-			server := serverEntry.Text
-			voice := voiceEntry.Text
-			username := usernameEntry.Text
-			token := tokenEntry.Text
-
-			if server == "" || username == "" {
+			controlAddr, controlHost, err := normalizeAddr(serverEntry.Text, defaultControlPort)
+			if err != nil {
+				dialog.ShowError(err, a.window)
+				return
+			}
+			username := strings.TrimSpace(usernameEntry.Text)
+			if controlHost == "" || username == "" {
 				dialog.ShowError(fmt.Errorf("server and username are required"), a.window)
 				return
 			}
-			if voice == "" {
-				parts := strings.Split(server, ":")
-				if len(parts) == 2 {
-					voice = parts[0] + ":9601"
+
+			voiceAddr := ""
+			if strings.TrimSpace(voiceEntry.Text) != "" {
+				voiceAddr, _, err = normalizeAddr(voiceEntry.Text, defaultVoicePort)
+				if err != nil {
+					dialog.ShowError(err, a.window)
+					return
 				}
+			} else {
+				voiceAddr = net.JoinHostPort(controlHost, defaultVoicePort)
 			}
 
+			token := tokenEntry.Text
 			a.serverSaved = saveCheck.Checked
 			a.connectToken = token
-			a.connectServer = server
-			a.connectVoice = voice
+			a.connectServer = controlAddr
+			a.connectVoice = voiceAddr
 
 			go func() {
-				if err := a.engine.Connect(server, voice, token, username); err != nil {
+				if err := a.engine.Connect(controlAddr, voiceAddr, token, username); err != nil {
 					slog.Error("connect failed", "err", err)
 					fyne.Do(func() {
 						dialog.ShowError(fmt.Errorf("connection failed: %v", err), a.window)
 					})
 					return
 				}
-				// Save bookmark after successful connect if checkbox is on
 				if saveCheck.Checked {
 					a.saveCurrentBookmark(username)
+					return
+				}
+				if selectedBookmark != nil {
+					if a.bookmarks.Touch(selectedBookmark.ControlAddr, selectedBookmark.Username, time.Now().Unix()) {
+						if err := a.bookmarks.Save(); err != nil {
+							slog.Error("failed to save bookmark", "err", err)
+						}
+					}
 				}
 			}()
 		},
 		a.window,
 	)
-	form.Resize(fyne.NewSize(400, 300))
-	form.Show()
+	d.Resize(fyne.NewSize(420, 420))
+	d.Show()
 }
 
 // ----- Admin / Settings dialogs -----
@@ -800,6 +948,8 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 	gearBtn := box.Objects[4].(*widget.Button)
 
 	item := a.getItem(id)
+	currentChannelID := a.engine.GetChannelID()
+	currentUser := a.engine.GetUsername()
 	indent.SetMinSize(fyne.NewSize(float32(item.depth)*20, 1))
 	indent.Refresh()
 
@@ -814,8 +964,13 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		if item.channel.IsTemp {
 			name = "~ " + name
 		}
+		if item.channelID == currentChannelID {
+			name = "▶ " + name
+			label.TextStyle = fyne.TextStyle{Bold: true, Italic: true}
+		} else {
+			label.TextStyle = fyne.TextStyle{Bold: true}
+		}
 		label.SetText(fmt.Sprintf("%s (%d)", name, userCount))
-		label.TextStyle = fyne.TextStyle{Bold: true}
 
 		// Show gear icon when user has channel actions available
 		role := a.engine.GetRole()
@@ -846,8 +1001,14 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		case "moderator":
 			roleTag = " +"
 		}
-		label.SetText(fmt.Sprintf("%s%s%s", item.user.Username, roleTag, status))
-		label.TextStyle = fyne.TextStyle{}
+		labelText := fmt.Sprintf("%s%s%s", item.user.Username, roleTag, status)
+		if item.user.Username == currentUser && item.channelID == currentChannelID {
+			labelText += " (you)"
+			label.TextStyle = fyne.TextStyle{Italic: true}
+		} else {
+			label.TextStyle = fyne.TextStyle{}
+		}
+		label.SetText(labelText)
 		gearBtn.Hide()
 	}
 	label.Refresh()
@@ -1047,6 +1208,7 @@ func (a *App) saveCurrentBookmark(username string) {
 		VoiceAddr:   a.connectVoice,
 		Username:    username,
 		Token:       a.connectToken,
+		LastUsed:    time.Now().Unix(),
 	})
 	if err := a.bookmarks.Save(); err != nil {
 		slog.Error("failed to save bookmark", "err", err)

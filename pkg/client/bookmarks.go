@@ -14,6 +14,7 @@ type Bookmark struct {
 	VoiceAddr   string `yaml:"voice_addr"`
 	Username    string `yaml:"username"`
 	Token       string `yaml:"token"`
+	LastUsed    int64  `yaml:"last_used,omitempty"`
 }
 
 // BookmarkStore manages server bookmarks stored next to the binary.
@@ -66,6 +67,17 @@ func (bs *BookmarkStore) Add(b Bookmark) bool {
 	}
 	bs.Bookmarks = append(bs.Bookmarks, b)
 	return true
+}
+
+// Touch updates LastUsed for an existing bookmark.
+func (bs *BookmarkStore) Touch(controlAddr, username string, ts int64) bool {
+	for i := range bs.Bookmarks {
+		if bs.Bookmarks[i].ControlAddr == controlAddr && bs.Bookmarks[i].Username == username {
+			bs.Bookmarks[i].LastUsed = ts
+			return true
+		}
+	}
+	return false
 }
 
 // FindByAddr returns a bookmark matching the given control address, or nil.
