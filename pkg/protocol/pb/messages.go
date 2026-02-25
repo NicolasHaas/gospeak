@@ -3,6 +3,8 @@
 
 package pb
 
+import gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
+
 // ControlMessage wraps all control plane messages.
 type ControlMessage struct {
 	// Only one of these fields should be set.
@@ -41,17 +43,10 @@ type AuthRequest struct {
 	Token    string `json:"token"` // empty = token-less join (if server allows)
 	Username string `json:"username"`
 }
-type EncryptionMethod uint32
-
-const (
-	AES128   EncryptionMethod = 1
-	AES256   EncryptionMethod = 2
-	CHACHA20 EncryptionMethod = 3
-)
 
 type EncryptionInfo struct {
-	Key              []byte           `json:"encryption_key"`
-	EncryptionMethod EncryptionMethod `json:"encryption_method"`
+	Key              []byte                         `json:"encryption_key"`
+	EncryptionMethod gospeakCrypto.EncryptionMethod `json:"encryption_method"`
 }
 
 type AuthResponse struct {

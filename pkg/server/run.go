@@ -119,17 +119,17 @@ func (s *Server) ensureAdminToken(st store.DataStore) error {
 func (s *Server) buildEncryptionInfo() (pb.EncryptionInfo, error) {
 	enc := s.cfg.EncryptionMethod
 	var keysize crypto.EncryptionKeySize
-	var method pb.EncryptionMethod
+	var method crypto.EncryptionMethod
 	switch enc {
 	case "aes128":
 		keysize = crypto.AES128KeySize
-		method = pb.AES128
+		method = crypto.AES128
 	case "aes256":
 		keysize = crypto.AES256KeySize
-		method = pb.AES256
+		method = crypto.AES256
 	case "chacha20":
 		keysize = crypto.Chacha20KeySize
-		method = pb.CHACHA20
+		method = crypto.CHACHA20
 	default:
 		return pb.EncryptionInfo{}, fmt.Errorf("server: unable to parse encryption method %s", enc)
 	}

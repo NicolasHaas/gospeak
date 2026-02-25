@@ -135,7 +135,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		return err
 	}
 
-	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.Encryption)
+	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.Encryption.EncryptionMethod, authResp.Encryption.Key)
 	if err != nil {
 		_ = ctrl.Close()
 		_ = voice.Close()

@@ -39,7 +39,7 @@ func NewVoiceClient(serverAddr string, sessionID uint32, encryption pb.Encryptio
 		return nil, fmt.Errorf("client: dial voice: %w", err)
 	}
 
-	cipher, err := gospeakCrypto.NewVoiceCipher(encryption)
+	cipher, err := gospeakCrypto.NewVoiceCipher(encryption.EncryptionMethod, encryption.Key)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: voice cipher: %w", err)

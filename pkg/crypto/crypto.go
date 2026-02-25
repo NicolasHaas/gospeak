@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -46,8 +45,8 @@ type VoiceCipher struct {
 }
 
 // NewVoiceCipher creates a new voice cipher from given key.
-func NewVoiceCipher(encryption pb.EncryptionInfo) (*VoiceCipher, error) {
-	aead, err := NewCipher(encryption.EncryptionMethod, encryption.Key)
+func NewVoiceCipher(method EncryptionMethod, key []byte) (*VoiceCipher, error) {
+	aead, err := NewCipher(method, key)
 	if err != nil {
 		return nil, err
 	}

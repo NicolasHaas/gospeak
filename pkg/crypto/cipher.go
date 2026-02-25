@@ -7,35 +7,40 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type EncryptionKeySize uint32
 
+type EncryptionMethod uint32
+
 const (
 	AES128KeySize   EncryptionKeySize = 16
 	AES256KeySize   EncryptionKeySize = 32
 	Chacha20KeySize EncryptionKeySize = chacha20poly1305.KeySize
+
+	AES128   EncryptionMethod = 1
+	AES256   EncryptionMethod = 2
+	CHACHA20 EncryptionMethod = 3
 )
 
-func NewCipher(method pb.EncryptionMethod, key []byte) (cipher.AEAD, error) {
+func NewCipher(method EncryptionMethod, key []byte) (cipher.AEAD, error) {
 
 	var aead cipher.AEAD
 	var err error
 	keylength := len(key)
 	switch method {
-	case pb.AES128:
+	case AES128:
 		if keylength != int(AES128KeySize) {
 			return nil, fmt.Errorf("crypto: invalid aes128 key length: expected %d, got %d", int(AES128KeySize), keylength)
 		}
 		aead, err = newAESGCMCipher(key)
-	case pb.AES256:
+	case AES256:
 		if keylength != int(AES256KeySize) {
 			return nil, fmt.Errorf("crypto: invalid aes256 key length: expected %d, got %d", int(AES256KeySize), keylength)
 		}
 		aead, err = newAESGCMCipher(key)
-	case pb.CHACHA20:
+	case CHACHA20:
 		if keylength != int(Chacha20KeySize) {
 			return nil, fmt.Errorf("crypto: invalid chacha20poly1305 key length: expected %d, got %d", int(Chacha20KeySize), keylength)
 		}
