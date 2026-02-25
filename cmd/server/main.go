@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/logging"
 	"github.com/NicolasHaas/gospeak/pkg/server"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
 func main() {
@@ -42,7 +42,7 @@ func main() {
 
 	// Handle export commands (run and exit)
 	if cfg.ExportUsers || cfg.ExportChannels {
-		st, err := store.New(cfg.DBPath)
+		st, err := datastore.NewProviderFactory(cfg.DBPath)
 		if err != nil {
 			slog.Error("open database", "err", err)
 			os.Exit(1)
@@ -68,7 +68,7 @@ func main() {
 		return
 	}
 
-	st, err := store.New(cfg.DBPath)
+	st, err := datastore.NewProviderFactory(cfg.DBPath)
 	if err != nil {
 		slog.Error("open database", "err", err)
 		os.Exit(1)

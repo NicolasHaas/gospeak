@@ -3,19 +3,32 @@ package rbac
 
 import "github.com/NicolasHaas/gospeak/pkg/model"
 
+// Permission represents a specific action that can be checked against a role.
+type Permission int
+
+const (
+	PermCreateChannel Permission = iota
+	PermDeleteChannel
+	PermKickUser
+	PermBanUser
+	PermManageTokens
+	PermEditChannel
+	PermManageRoles
+)
+
 // permissionMatrix maps roles to their allowed permissions.
-var permissionMatrix = map[model.Role]map[model.Permission]bool{
+var permissionMatrix = map[model.Role]map[Permission]bool{
 	model.RoleAdmin: {
-		model.PermCreateChannel: true,
-		model.PermDeleteChannel: true,
-		model.PermKickUser:      true,
-		model.PermBanUser:       true,
-		model.PermManageTokens:  true,
-		model.PermEditChannel:   true,
-		model.PermManageRoles:   true,
+		PermCreateChannel: true,
+		PermDeleteChannel: true,
+		PermKickUser:      true,
+		PermBanUser:       true,
+		PermManageTokens:  true,
+		PermEditChannel:   true,
+		PermManageRoles:   true,
 	},
 	model.RoleModerator: {
-		model.PermKickUser: true,
+		PermKickUser: true,
 	},
 	model.RoleUser: {
 		// No special permissions — can only join channels and talk
@@ -23,7 +36,7 @@ var permissionMatrix = map[model.Role]map[model.Permission]bool{
 }
 
 // HasPermission checks if a role has a specific permission.
-func HasPermission(role model.Role, perm model.Permission) bool {
+func HasPermission(role model.Role, perm Permission) bool {
 	perms, ok := permissionMatrix[role]
 	if !ok {
 		return false
@@ -32,28 +45,28 @@ func HasPermission(role model.Role, perm model.Permission) bool {
 }
 
 // RequirePermission returns an error message if the role lacks the permission, or empty string if allowed.
-func RequirePermission(role model.Role, perm model.Permission) string {
+func RequirePermission(role model.Role, perm Permission) string {
 	if HasPermission(role, perm) {
 		return ""
 	}
 	return "permission denied: " + permName(perm) + " requires higher role"
 }
 
-func permName(p model.Permission) string {
+func permName(p Permission) string {
 	switch p {
-	case model.PermCreateChannel:
+	case PermCreateChannel:
 		return "create_channel"
-	case model.PermDeleteChannel:
+	case PermDeleteChannel:
 		return "delete_channel"
-	case model.PermKickUser:
+	case PermKickUser:
 		return "kick_user"
-	case model.PermBanUser:
+	case PermBanUser:
 		return "ban_user"
-	case model.PermManageTokens:
+	case PermManageTokens:
 		return "manage_tokens"
-	case model.PermEditChannel:
+	case PermEditChannel:
 		return "edit_channel"
-	case model.PermManageRoles:
+	case PermManageRoles:
 		return "manage_roles"
 	default:
 		return "unknown"
