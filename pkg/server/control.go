@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -12,17 +13,17 @@ import (
 	"unicode"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/rbac"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
 // ControlHandler handles TCP/TLS control plane connections.
 type ControlHandler struct {
 	server  *Server
-	store   store.DataStore
+	store   datastore.DataProviderFactory
 	mu      sync.RWMutex
 	connMap map[uint32]net.Conn // sessionID -> TLS conn for sending events
 
@@ -32,7 +33,7 @@ type ControlHandler struct {
 }
 
 // newControlHandler creates a control handler.
-func newControlHandler(srv *Server, st store.DataStore) *ControlHandler {
+func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHandler {
 	return &ControlHandler{
 		server:        srv,
 		store:         st,
@@ -73,7 +74,7 @@ func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMes
 }
 
 // StartControl starts the TCP/TLS control listener.
-func (s *Server) StartControl(st store.DataStore) error {
+func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 	cert, err := loadOrGenerateTLS(s.cfg)
 	if err != nil {
 		return fmt.Errorf("server: tls: %w", err)
@@ -113,7 +114,7 @@ func (s *Server) StartControl(st store.DataStore) error {
 }
 
 // handleControlConn handles a single control connection lifecycle.
-func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st store.DataStore) {
+func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st datastore.DataProviderFactory) {
 	defer func() { _ = conn.Close() }()
 
 	remoteAddr := conn.RemoteAddr().String()
@@ -158,16 +159,31 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 	} else {
 		tokenHash := crypto.HashToken(authReq.Token)
 		var err error
-		tokenRole, err = st.ValidateToken(tokenHash)
+
+		ctx := context.Background()
+		tx, err := st.Tx(ctx)
+		if err != nil {
+			sendError(conn, 3, "could not establish transaction: "+err.Error())
+		}
+		defer func() {
+			if err := tx.Rollback(); err != nil {
+				sendError(conn, 3, "could not rollback transaction: "+err.Error())
+			}
+		}()
+
+		tokenRole, err = tx.ValidateToken(tokenHash)
 		if err != nil {
 			s.metrics.FailedAuths.Add(1)
 			sendError(conn, 2, "authentication failed: "+err.Error())
 			return
 		}
+		if err := tx.Commit(); err != nil {
+			sendError(conn, 3, "error committing transaction: "+err.Error())
+		}
 	}
 
 	// Create or get user — existing users keep their stored role
-	user, err := st.GetUserByUsername(authReq.Username)
+	user, err := st.NonTx().GetUserByUsername(authReq.Username)
 	if err != nil {
 		sendError(conn, 3, "internal error")
 		return
@@ -176,7 +192,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 	var sessionRole model.Role
 	if user == nil {
 		// New user: role comes from the token
-		user, err = st.CreateUser(authReq.Username, tokenRole)
+		user, err = st.NonTx().CreateUser(authReq.Username, tokenRole)
 		if err != nil {
 			sendError(conn, 3, "failed to create user: "+err.Error())
 			return
@@ -188,7 +204,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 			rawToken, err := crypto.GenerateToken()
 			if err == nil {
 				hash := crypto.HashToken(rawToken)
-				_ = st.CreateToken(hash, model.RoleUser, 0, 0, 0, st.ZeroTime()) // unlimited, no expiry
+				_ = st.NonTx().CreateToken(hash, model.RoleUser, 0, 0, 0, st.NonTx().ZeroTime()) // unlimited, no expiry
 				autoToken = rawToken
 				slog.Debug("auto-generated token for token-less user", "user", user.Username)
 			}
@@ -199,7 +215,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 	}
 
 	// Check ban
-	banned, err := st.IsUserBanned(user.ID)
+	banned, err := st.NonTx().IsUserBanned(user.ID)
 	if err != nil {
 		sendError(conn, 3, "internal error")
 		return
@@ -241,7 +257,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 	}()
 
 	// Build channel list
-	channels, _ := st.ListChannels()
+	channels, _ := st.NonTx().ListChannels()
 	channelInfos := s.buildChannelInfos(channels)
 
 	// Send auth response
@@ -285,7 +301,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 }
 
 // handleMessage dispatches a control message to the appropriate handler.
-func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *pb.ControlMessage, st store.DataStore, conn net.Conn) {
+func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *pb.ControlMessage, st datastore.DataProviderFactory, conn net.Conn) {
 	switch {
 	case msg.JoinChannelRequest != nil:
 		s.handleJoinChannel(handler, sessionID, msg.JoinChannelRequest, st, conn)
@@ -333,14 +349,14 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 	}
 }
 
-func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, req *pb.JoinChannelRequest, st store.DataStore, conn net.Conn) {
+func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, req *pb.JoinChannelRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
 	// Verify channel exists
-	ch, err := st.GetChannel(req.ChannelID)
+	ch, err := st.NonTx().GetChannel(req.ChannelID)
 	if err != nil || ch == nil {
 		sendError(conn, 10, "channel not found")
 		return
@@ -387,7 +403,7 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 	s.broadcastServerState(st, handler)
 }
 
-func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, st store.DataStore, conn net.Conn) {
+func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
@@ -413,22 +429,22 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 	s.broadcastServerState(st, handler)
 }
 
-func (s *Server) handleChannelList(st store.DataStore, conn net.Conn) {
-	channels, _ := st.ListChannels()
+func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Conn) {
+	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
 		ChannelListResponse: &pb.ChannelListResponse{Channels: infos},
 	})
 }
 
-func (s *Server) handleUserState(handler *ControlHandler, sessionID uint32, upd *pb.UserStateUpdate, st store.DataStore) {
+func (s *Server) handleUserState(handler *ControlHandler, sessionID uint32, upd *pb.UserStateUpdate, st datastore.DataProviderFactory) {
 	s.sessions.UpdateUserState(sessionID, upd.Muted, upd.Deafened)
 
 	// Broadcast updated server state to all clients
 	s.broadcastServerState(st, handler)
 }
 
-func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequest, st store.DataStore, conn net.Conn, handler *ControlHandler) {
+func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequest, st datastore.DataProviderFactory, conn net.Conn, handler *ControlHandler) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
@@ -443,7 +459,7 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 
 	if req.ParentID > 0 && req.IsTemp {
 		// Temp sub-channel creation: any user can create if parent AllowSubChannels
-		parent, err := st.GetChannel(req.ParentID)
+		parent, err := st.NonTx().GetChannel(req.ParentID)
 		if err != nil || parent == nil {
 			sendError(conn, 31, "parent channel not found")
 			return
@@ -464,7 +480,7 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 		handler.tempChanMu.Unlock()
 	} else {
 		// Permanent channel: require PermCreateChannel (admin/mod)
-		if errMsg := rbac.RequirePermission(session.Role, model.PermCreateChannel); errMsg != "" {
+		if errMsg := rbac.RequirePermission(session.Role, rbac.PermCreateChannel); errMsg != "" {
 			sendError(conn, 30, errMsg)
 			return
 		}
@@ -483,7 +499,7 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 		IsTemp:           req.IsTemp,
 		AllowSubChannels: req.AllowSubChannels,
 	}
-	if err := st.CreateChannel(ch); err != nil {
+	if err := st.NonTx().CreateChannel(ch); err != nil {
 		sendError(conn, 31, "failed to create channel: "+err.Error())
 		return
 	}
@@ -495,18 +511,18 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 	s.broadcastServerState(st, handler)
 }
 
-func (s *Server) handleDeleteChannel(sessionID uint32, req *pb.DeleteChannelRequest, st store.DataStore, conn net.Conn, handler *ControlHandler) {
+func (s *Server) handleDeleteChannel(sessionID uint32, req *pb.DeleteChannelRequest, st datastore.DataProviderFactory, conn net.Conn, handler *ControlHandler) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermDeleteChannel); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermDeleteChannel); errMsg != "" {
 		sendError(conn, 30, errMsg)
 		return
 	}
 
-	if err := st.DeleteChannel(req.ChannelID); err != nil {
+	if err := st.NonTx().DeleteChannel(req.ChannelID); err != nil {
 		sendError(conn, 31, "failed to delete channel: "+err.Error())
 		return
 	}
@@ -523,13 +539,13 @@ func (s *Server) handleDeleteChannel(sessionID uint32, req *pb.DeleteChannelRequ
 	s.broadcastServerState(st, handler)
 }
 
-func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest, st store.DataStore, conn net.Conn) {
+func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermManageTokens); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermManageTokens); errMsg != "" {
 		sendError(conn, 30, errMsg)
 		return
 	}
@@ -548,7 +564,7 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	hash := crypto.HashToken(rawToken)
 	role := model.ParseRole(req.Role)
 
-	if err := st.CreateToken(hash, role, req.ChannelScope, session.UserID, int(req.MaxUses), expiresAt); err != nil {
+	if err := st.NonTx().CreateToken(hash, role, req.ChannelScope, session.UserID, int(req.MaxUses), expiresAt); err != nil {
 		sendError(conn, 31, "failed to store token: "+err.Error())
 		return
 	}
@@ -567,7 +583,7 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermKickUser); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermKickUser); errMsg != "" {
 		sendError(conn, 30, errMsg)
 		return
 	}
@@ -596,13 +612,13 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 	s.metrics.KickCount.Add(1)
 }
 
-func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *pb.BanUserRequest, st store.DataStore, conn net.Conn) {
+func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *pb.BanUserRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermBanUser); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermBanUser); errMsg != "" {
 		sendError(conn, 30, errMsg)
 		return
 	}
@@ -617,7 +633,7 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 		expiresAt = time.Now().Add(time.Duration(req.DurationSeconds) * time.Second)
 	}
 
-	if err := st.CreateBan(req.UserID, "", reason, session.UserID, expiresAt); err != nil {
+	if err := st.NonTx().CreateBan(req.UserID, "", reason, session.UserID, expiresAt); err != nil {
 		sendError(conn, 31, "failed to create ban")
 		return
 	}
@@ -687,13 +703,13 @@ func (s *Server) handleChatMessage(handler *ControlHandler, sessionID uint32, ch
 	s.metrics.ChatMessagesSent.Add(1)
 }
 
-func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, req *pb.SetUserRoleRequest, st store.DataStore, conn net.Conn) {
+func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, req *pb.SetUserRoleRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermManageRoles); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermManageRoles); errMsg != "" {
 		sendError(conn, 30, errMsg)
 		return
 	}
@@ -711,7 +727,7 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 		sendError(conn, 31, "cannot grant a role higher than your own")
 		return
 	}
-	if err := st.UpdateUserRole(req.TargetUserID, newRole); err != nil {
+	if err := st.NonTx().UpdateUserRole(req.TargetUserID, newRole); err != nil {
 		sendError(conn, 31, "failed to update role: "+err.Error())
 		return
 	}
@@ -732,8 +748,8 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 }
 
 // sendServerState sends the full server state to a single connection.
-func (s *Server) sendServerState(st store.DataStore, conn net.Conn) {
-	channels, _ := st.ListChannels()
+func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
+	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos},
@@ -741,8 +757,8 @@ func (s *Server) sendServerState(st store.DataStore, conn net.Conn) {
 }
 
 // broadcastServerState sends updated server state to ALL connected sessions.
-func (s *Server) broadcastServerState(st store.DataStore, handler *ControlHandler) {
-	channels, _ := st.ListChannels()
+func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler *ControlHandler) {
+	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos},
@@ -774,8 +790,8 @@ func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 
 // cleanupTempChannel schedules a temp channel for deletion after a 5-minute grace period.
 // If someone rejoins within that window the deletion is cancelled.
-func (s *Server) cleanupTempChannel(channelID int64, st store.DataStore) {
-	ch, err := st.GetChannel(channelID)
+func (s *Server) cleanupTempChannel(channelID int64, st datastore.DataProviderFactory) {
+	ch, err := st.NonTx().GetChannel(channelID)
 	if err != nil || ch == nil || !ch.IsTemp {
 		return
 	}
@@ -789,7 +805,7 @@ func (s *Server) cleanupTempChannel(channelID int64, st store.DataStore) {
 		if s.channels.MembersCount(channelID) > 0 {
 			return
 		}
-		if err := st.DeleteChannel(channelID); err != nil {
+		if err := st.NonTx().DeleteChannel(channelID); err != nil {
 			slog.Error("failed to delete empty temp channel", "id", channelID, "err", err)
 			return
 		}
@@ -830,13 +846,13 @@ func sanitizeText(s string) string {
 	}, s)
 }
 
-func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, st store.DataStore, conn net.Conn) {
+func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermCreateChannel); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermCreateChannel); errMsg != "" {
 		sendError(conn, 30, "admin only: "+errMsg)
 		return
 	}
@@ -866,13 +882,13 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 	})
 }
 
-func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRequest, st store.DataStore, conn net.Conn, handler *ControlHandler) {
+func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRequest, st datastore.DataProviderFactory, conn net.Conn, handler *ControlHandler) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
 		return
 	}
-	if errMsg := rbac.RequirePermission(session.Role, model.PermCreateChannel); errMsg != "" {
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermCreateChannel); errMsg != "" {
 		sendError(conn, 30, "admin only: "+errMsg)
 		return
 	}

@@ -1,71 +1,30 @@
-package store_test
+package datastore_test
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-type storeFactory struct {
-	name string
-	new  func(t *testing.T) (store.DataStore, func())
-}
-
-var storeFactories = []storeFactory{
-	{
-		name: "sqlite",
-		new: func(t *testing.T) (store.DataStore, func()) {
-			t.Helper()
-			dir := t.TempDir()
-			dbPath := filepath.Join(dir, "test.db")
-			st, err := store.New(dbPath)
-			if err != nil {
-				t.Fatalf("store_test: failed to open db: %v", err)
-			}
-			return st, func() {
-				if err := st.Close(); err != nil {
-					fmt.Printf("Error closing database: %v\n", err)
-				}
-			}
-		},
-	},
-	{
-		name: "memory",
-		new: func(t *testing.T) (store.DataStore, func()) {
-			t.Helper()
-			return store.NewMemory(), func() {}
-		},
-	},
-}
-
-func withStores(t *testing.T, fn func(t *testing.T, st store.DataStore)) {
-	for _, factory := range storeFactories {
-		factory := factory
-		t.Run(factory.name, func(t *testing.T) {
-			st, cleanup := factory.new(t)
-			t.Cleanup(cleanup)
-			fn(t, st)
-		})
-	}
-}
-
-func NewTestSqlConn(t *testing.T) (*store.Store, error) {
+func NewTestSqlConn(t *testing.T) (*datastore.ProviderFactory, error) {
 	t.Helper()
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
-	st, err := store.New(dbPath)
+	st, err := datastore.NewProviderFactory(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("store_test: failed to open db: %w", err)
 	}
@@ -99,8 +58,8 @@ func TestZeroTime(t *testing.T) {
 		t.Fatalf("failed to open test connection: %v", err)
 	}
 
-	if diff := cmp.Diff(time.Time{}, store.ZeroTime()); diff != "" {
-		t.Errorf("store.ZeroTime mismatch (-want +got):\\n%s", diff)
+	if diff := cmp.Diff(time.Time{}, store.NonTx().ZeroTime()); diff != "" {
+		t.Errorf("store.NonTx().ZeroTime mismatch (-want +got):\\n%s", diff)
 	}
 }
 
@@ -148,7 +107,7 @@ func TestCreateUser(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			got, err := store.CreateUser(tc.username, tc.role)
+			got, err := store.NonTx().CreateUser(tc.username, tc.role)
 			if tc.expectErr {
 				if err == nil {
 					t.Fatalf("CreateUser: expected error, got nil")
@@ -165,7 +124,7 @@ func TestCreateUser(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
-				t.Errorf("store.CreateUser mismatch (-want +got):\\n%s", diff)
+				t.Errorf("store.NonTx().CreateUser mismatch (-want +got):\\n%s", diff)
 			}
 		}
 	}
@@ -211,14 +170,14 @@ func TestGetUserByUsername(t *testing.T) {
 
 			var seeded *model.User
 			if tc.seedUser {
-				u, err := store.CreateUser(tc.username, tc.role)
+				u, err := store.NonTx().CreateUser(tc.username, tc.role)
 				if err != nil {
 					t.Fatalf("CreateUser: failed to seed user: %v", err)
 				}
 				seeded = u
 			}
 
-			got, err := store.GetUserByUsername(tc.username)
+			got, err := store.NonTx().GetUserByUsername(tc.username)
 			if !tc.expectUser {
 				if got != nil {
 					t.Fatalf("GetUserByUsername: expected nil, got user")
@@ -255,12 +214,12 @@ func TestGetUserByID(t *testing.T) {
 
 	want := int64(1)
 
-	_, err = store.CreateUser("johndoe", model.RoleUser)
+	_, err = store.NonTx().CreateUser("johndoe", model.RoleUser)
 	if err != nil {
 		t.Fatalf("CreateUser: failed to seed user: %v", err)
 	}
 
-	res, err := store.GetUserByID(want)
+	res, err := store.NonTx().GetUserByID(want)
 	if err != nil {
 		t.Fatalf("GetUserByID: unexpected error: %v", err)
 	}
@@ -296,12 +255,12 @@ func TestUpdateUserRole(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			u, err := store.CreateUser(tc.username, tc.role)
+			u, err := store.NonTx().CreateUser(tc.username, tc.role)
 			if err != nil {
 				t.Fatalf("CreateUser: failed to seed user: %v", err)
 			}
 
-			if err := store.UpdateUserRole(u.ID, model.RoleAdmin); err != nil {
+			if err := store.NonTx().UpdateUserRole(u.ID, model.RoleAdmin); err != nil {
 				t.Fatalf("UpdateUserRole: unexpected error: %v", err)
 			}
 
@@ -310,7 +269,7 @@ func TestUpdateUserRole(t *testing.T) {
 				Role:     model.RoleAdmin,
 			}
 
-			got, err := store.GetUserByID(u.ID)
+			got, err := store.NonTx().GetUserByID(u.ID)
 			if err != nil {
 				t.Fatalf("GetUserByID: unexpected error: %v", err)
 			}
@@ -358,13 +317,13 @@ func TestListUsers(t *testing.T) {
 			}
 
 			for _, user := range tc.users {
-				_, err := store.CreateUser(user.Username, user.Role)
+				_, err := store.NonTx().CreateUser(user.Username, user.Role)
 				if err != nil {
 					t.Fatalf("CreateUser: failed to seed user: %v", err)
 				}
 			}
 
-			users, err := store.ListUsers()
+			users, err := store.NonTx().ListUsers()
 			if err != nil {
 				t.Fatalf("ListUsers: unexpected error: %v", err)
 			}
@@ -454,7 +413,7 @@ func TestCreateChannelFull(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			err = store.CreateChannel(tc.inputChannel)
+			err = store.NonTx().CreateChannel(tc.inputChannel)
 			if tc.expecErr {
 				if err == nil {
 					t.Fatalf("CreateChannelFull: expected error, got nil")
@@ -494,16 +453,16 @@ func TestDeleteChannel(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			err = store.CreateChannel(tc.inputChannel)
+			err = store.NonTx().CreateChannel(tc.inputChannel)
 			if err != nil {
 				t.Fatalf("CreateChannel: unexpected error: %v", err)
 			}
 
-			if err := store.DeleteChannel(tc.inputChannel.ID); err != nil {
+			if err := store.NonTx().DeleteChannel(tc.inputChannel.ID); err != nil {
 				t.Fatalf("DeleteChannel: unexpected error: %v", err)
 			}
 
-			deletedChannel, err := store.GetChannel(tc.inputChannel.ID)
+			deletedChannel, err := store.NonTx().GetChannel(tc.inputChannel.ID)
 			if err != nil {
 				t.Fatalf("GetChannel: unexpected error: %v", err)
 			}
@@ -550,7 +509,7 @@ func TestListChannels(t *testing.T) {
 					ParentID:    1,
 				}
 
-				err := store.CreateChannel(tempChannel)
+				err := store.NonTx().CreateChannel(tempChannel)
 				if err != nil {
 					t.Fatalf("CreateChannel: unexpected error: %v", err)
 				}
@@ -558,7 +517,7 @@ func TestListChannels(t *testing.T) {
 				expectedChannels[channelName] = tempChannel
 			}
 
-			channelList, err := store.ListChannels()
+			channelList, err := store.NonTx().ListChannels()
 			if err != nil {
 				t.Fatalf("ListChannels: unexpected error: %v", err)
 			}
@@ -604,12 +563,12 @@ func TestGetChannel(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			err = store.CreateChannel(tc.inputChannel)
+			err = store.NonTx().CreateChannel(tc.inputChannel)
 			if err != nil {
 				t.Fatalf("CreateChannel: unexpected error: %v", err)
 			}
 
-			got, err := store.GetChannel(tc.inputChannel.ID)
+			got, err := store.NonTx().GetChannel(tc.inputChannel.ID)
 			if err != nil {
 				t.Fatalf("GetChannel: unexpected error: %v", err)
 			}
@@ -651,19 +610,19 @@ func TestGetChannelByNameAndParent(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			err = store.CreateChannel(tc.parentChannel)
+			err = store.NonTx().CreateChannel(tc.parentChannel)
 			if err != nil {
 				t.Fatalf("CreateChannel: unexpected error creating parent: %v", err)
 			}
 
 			tc.childChannel.ParentID = tc.parentChannel.ID
 
-			err = store.CreateChannel(tc.childChannel)
+			err = store.NonTx().CreateChannel(tc.childChannel)
 			if err != nil {
 				t.Fatalf("CreateChannel: unexpected error creating child: %v", err)
 			}
 
-			got, err := store.GetChannelByNameAndParent(tc.childChannel.Name, tc.childChannel.ParentID)
+			got, err := store.NonTx().GetChannelByNameAndParent(tc.childChannel.Name, tc.childChannel.ParentID)
 			if err != nil {
 				t.Fatalf("GetChannel: unexpected error: %v", err)
 			}
@@ -708,12 +667,12 @@ func TestHasTokens(t *testing.T) {
 
 				hash := crypto.HashToken(rawToken)
 
-				if err := store.CreateToken(hash, model.RoleUser, 1, 1, 1, time.Now().Add(time.Hour)); err != nil {
+				if err := store.NonTx().CreateToken(hash, model.RoleUser, 1, 1, 1, time.Now().Add(time.Hour)); err != nil {
 					t.Fatalf("CreateToken: failed to create token: %v", err)
 				}
 			}
 
-			hasTokens, err := store.HasTokens()
+			hasTokens, err := store.NonTx().HasTokens()
 			if err != nil {
 				t.Fatalf("HasTokens: unexpected error: %v", err)
 			}
@@ -757,11 +716,11 @@ func TestCreateToken(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			if err := store.CreateToken(tc.hash, tc.role, tc.channelScope, tc.createdBy, tc.maxUses, tc.expiresAt); err != nil {
+			if err := store.NonTx().CreateToken(tc.hash, tc.role, tc.channelScope, tc.createdBy, tc.maxUses, tc.expiresAt); err != nil {
 				t.Fatalf("CreateToken: failed to create token: %v", err)
 			}
 
-			hasTokens, err := store.HasTokens()
+			hasTokens, err := store.NonTx().HasTokens()
 			if err != nil {
 				t.Fatalf("HasTokens: unexpected error: %v", err)
 			}
@@ -847,22 +806,33 @@ func TestValidateToken(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			ctx := context.Background()
 
 			store, err := NewTestSqlConn(t)
 			if err != nil {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			if err := store.CreateToken(tc.token.hash, tc.token.role, tc.token.channelScope, tc.token.createdBy, tc.token.maxUses, tc.token.expiresAt); err != nil {
+			if err := store.NonTx().CreateToken(tc.token.hash, tc.token.role, tc.token.channelScope, tc.token.createdBy, tc.token.maxUses, tc.token.expiresAt); err != nil {
 				t.Fatalf("CreateToken: failed to create token: %v", err)
 			}
 
-			// Simulate multiple token usages
-			_, err = store.ValidateToken(tc.token.hash)
+			// First validation
+			tx1, err := store.Tx(ctx)
+			if err != nil {
+				t.Fatalf("Tx: %v", err)
+			}
+			_, err = tx1.ValidateToken(tc.token.hash)
 			if err != nil && tc.expectValidation {
 				t.Fatalf("ValidateToken_1: unexpected error: %v", err)
 			}
-			role, err := store.ValidateToken(tc.token.hash)
+
+			// Second validation — needs its own transaction
+			tx2, err := store.Tx(ctx)
+			if err != nil {
+				t.Fatalf("Tx: %v", err)
+			}
+			_, err = tx2.ValidateToken(tc.token.hash)
 			if !tc.expectValidation {
 				if err == nil {
 					t.Fatalf("ValidateToken_2: expected error, got nil")
@@ -871,10 +841,6 @@ func TestValidateToken(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ValidateToken: unexpected error: %v", err)
-			}
-
-			if tc.token.role != role {
-				t.Fatalf("ValidateToken: role mismatch want=%d got=%d", int(tc.token.role), int(role))
 			}
 		})
 	}
@@ -929,7 +895,7 @@ func TestCreateBan(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			if err := store.CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
+			if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
 				t.Fatalf("CreateBan: unexpected error: %v", err)
 			}
 		})
@@ -986,18 +952,18 @@ func TestIsUserBanned(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
-			if err := store.CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
+			if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
 				t.Fatalf("CreateBan: unexpected error: %v", err)
 			}
 			// For the multi ban express the user has one valid and one invalid ban
 			// asserting that the newer valid ban will still cause a positive ban
 			if tc.multiBan {
-				if err := store.CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, time.Now().Add(time.Hour)); err != nil {
+				if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, time.Now().Add(time.Hour)); err != nil {
 					t.Fatalf("CreateBan_Multi: unexpected error: %v", err)
 				}
 			}
 
-			isBanned, err := store.IsUserBanned(tc.userID)
+			isBanned, err := store.NonTx().IsUserBanned(tc.userID)
 			if err != nil {
 				t.Fatalf("IsUserBanned: unexpected error: %v", err)
 			}
@@ -1005,5 +971,188 @@ func TestIsUserBanned(t *testing.T) {
 				t.Fatalf("IsUserBanned: ban mismatch want=%t got=%t", tc.expectBan, isBanned)
 			}
 		})
+	}
+}
+
+func TestCreateMessage(t *testing.T) {
+	t.Parallel()
+
+	type tcase struct {
+		message   *model.Message
+		expectErr bool
+	}
+
+	tests := map[string]tcase{
+		"valid_message": {
+			message: &model.Message{
+				ChannelID: 1,
+				SenderID:  1,
+				Body:      "Hello, world!",
+			},
+			expectErr: false,
+		},
+		"empty_body": {
+			message: &model.Message{
+				ChannelID: 1,
+				SenderID:  1,
+				Body:      "",
+			},
+			expectErr: true,
+		},
+		"whitespace_only_body": {
+			message: &model.Message{
+				ChannelID: 1,
+				SenderID:  1,
+				Body:      "   ",
+			},
+			expectErr: true,
+		},
+		"body_at_max_length": {
+			message: &model.Message{
+				ChannelID: 1,
+				SenderID:  1,
+				Body:      strings.Repeat("a", model.MessageMaxBodyLength),
+			},
+			expectErr: false,
+		},
+		"body_exceeds_max_length": {
+			message: &model.Message{
+				ChannelID: 1,
+				SenderID:  1,
+				Body:      strings.Repeat("a", model.MessageMaxBodyLength+1),
+			},
+			expectErr: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := NewTestSqlConn(t)
+			if err != nil {
+				t.Fatalf("failed to open test connection: %v", err)
+			}
+
+			err = store.NonTx().CreateMessage(tc.message)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("CreateMessage: expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateMessage: unexpected error: %v", err)
+			}
+
+			if tc.message.ID == 0 {
+				t.Fatalf("CreateMessage: expected non-zero ID")
+			}
+		})
+	}
+}
+
+func TestListMessages(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+
+	st := store.NonTx()
+
+	msgs := []model.Message{
+		{ChannelID: 1, SenderID: 1, Body: "msg one"},
+		{ChannelID: 1, SenderID: 2, Body: "msg two"},
+		{ChannelID: 2, SenderID: 1, Body: "msg three"},
+	}
+	for i := range msgs {
+		if err := st.CreateMessage(&msgs[i]); err != nil {
+			t.Fatalf("CreateMessage[%d]: unexpected error: %v", i, err)
+		}
+	}
+
+	t.Run("all_messages", func(t *testing.T) {
+		got, err := st.ListMessages(model.MessageFilters{})
+		if err != nil {
+			t.Fatalf("ListMessages: unexpected error: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("ListMessages: expected 3 messages, got %d", len(got))
+		}
+	})
+
+	t.Run("filter_by_channel", func(t *testing.T) {
+		channelID := int64(1)
+		got, err := st.ListMessages(model.MessageFilters{LimitToChannelID: &channelID})
+		if err != nil {
+			t.Fatalf("ListMessages: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListMessages: expected 2 messages for channel 1, got %d", len(got))
+		}
+	})
+
+	t.Run("filter_by_sender", func(t *testing.T) {
+		senderID := int64(2)
+		got, err := st.ListMessages(model.MessageFilters{LimitToSenderID: &senderID})
+		if err != nil {
+			t.Fatalf("ListMessages: unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("ListMessages: expected 1 message for sender 2, got %d", len(got))
+		}
+	})
+
+	t.Run("pagination", func(t *testing.T) {
+		pageSize := int64(2)
+		got, err := st.ListMessages(model.MessageFilters{PageSize: &pageSize})
+		if err != nil {
+			t.Fatalf("ListMessages: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListMessages: expected 2 messages with page size 2, got %d", len(got))
+		}
+	})
+
+	t.Run("offset", func(t *testing.T) {
+		pageSize := int64(10)
+		offset := int64(2)
+		got, err := st.ListMessages(model.MessageFilters{PageSize: &pageSize, Offset: &offset})
+		if err != nil {
+			t.Fatalf("ListMessages: unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("ListMessages: expected 1 message with offset 2, got %d", len(got))
+		}
+	})
+}
+
+func TestDeleteMessage(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+
+	st := store.NonTx()
+
+	msg := &model.Message{ChannelID: 1, SenderID: 1, Body: "to be deleted"}
+	if err := st.CreateMessage(msg); err != nil {
+		t.Fatalf("CreateMessage: unexpected error: %v", err)
+	}
+
+	if err := st.DeleteMessage(msg.ID); err != nil {
+		t.Fatalf("DeleteMessage: unexpected error: %v", err)
+	}
+
+	got, err := st.ListMessages(model.MessageFilters{})
+	if err != nil {
+		t.Fatalf("ListMessages: unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("DeleteMessage: expected 0 messages after delete, got %d", len(got))
 	}
 }

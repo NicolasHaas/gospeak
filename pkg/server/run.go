@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
 // Run starts the server and blocks until shutdown signal.
@@ -19,7 +19,7 @@ func (s *Server) Run() error {
 		return fmt.Errorf("server: missing store dependency")
 	}
 	st := s.store
-	defer func() { _ = st.Close() }()
+	defer func() { _ = st.NonTx().Close() }()
 
 	// Generate shared voice encryption key
 	voiceKey, err := crypto.GenerateKey()
@@ -29,9 +29,9 @@ func (s *Server) Run() error {
 	s.voiceKey = voiceKey
 
 	// Ensure default "Lobby" channel exists
-	channels, _ := st.ListChannels()
+	channels, _ := st.NonTx().ListChannels()
 	if len(channels) == 0 {
-		if err := st.CreateChannel(model.NewChannel()); err != nil {
+		if err := st.NonTx().CreateChannel(model.NewChannel()); err != nil {
 			return fmt.Errorf("server: create lobby: %w", err)
 		}
 		slog.Info("created default Lobby channel")
@@ -90,8 +90,8 @@ func (s *Server) Shutdown() {
 }
 
 // ensureAdminToken creates an admin token only on first run (no tokens exist).
-func (s *Server) ensureAdminToken(st store.DataStore) error {
-	hasTokens, err := st.HasTokens()
+func (s *Server) ensureAdminToken(st datastore.DataProviderFactory) error {
+	hasTokens, err := st.NonTx().HasTokens()
 	if err != nil {
 		return fmt.Errorf("server: check tokens: %w", err)
 	}
@@ -105,7 +105,7 @@ func (s *Server) ensureAdminToken(st store.DataStore) error {
 	}
 
 	hash := crypto.HashToken(rawToken)
-	if err := st.CreateToken(hash, model.RoleAdmin, 0, 0, 0 /* unlimited uses, no expiry */, st.ZeroTime()); err != nil {
+	if err := st.NonTx().CreateToken(hash, model.RoleAdmin, 0, 0, 0 /* unlimited uses, no expiry */, st.NonTx().ZeroTime()); err != nil {
 		return fmt.Errorf("server: store admin token: %w", err)
 	}
 
