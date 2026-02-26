@@ -10,6 +10,7 @@ import (
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/model"
+	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
@@ -22,9 +23,9 @@ func (s *Server) Run() error {
 	defer func() { _ = st.Close() }()
 
 	// Generate shared voice encryption key
-	voiceKey, err := crypto.GenerateKey()
+	voiceKey, err := s.buildEncryptionInfo()
 	if err != nil {
-		return fmt.Errorf("server: generate voice key: %w", err)
+		return fmt.Errorf("server: failure to generate voice key %w", err)
 	}
 	s.voiceKey = voiceKey
 
@@ -113,4 +114,33 @@ func (s *Server) ensureAdminToken(st store.DataStore) error {
 	slog.Info("ADMIN TOKEN (save this!):", "token", rawToken)
 	slog.Info("========================================")
 	return nil
+}
+
+func (s *Server) buildEncryptionInfo() (pb.EncryptionInfo, error) {
+	enc := s.cfg.EncryptionMethod
+	var keysize crypto.EncryptionKeySize
+	var method crypto.EncryptionMethod
+	switch enc {
+	case "aes128":
+		keysize = crypto.AES128KeySize
+		method = crypto.AES128GCM
+	case "aes256":
+		keysize = crypto.AES256KeySize
+		method = crypto.AES256GCM
+	case "chacha20":
+		keysize = crypto.Chacha20KeySize
+		method = crypto.CHACHA20Poly1305
+	default:
+		return pb.EncryptionInfo{}, fmt.Errorf("server: unable to parse encryption method %s", enc)
+	}
+	key, err := crypto.GenerateKey(keysize)
+	if err != nil {
+		return pb.EncryptionInfo{}, fmt.Errorf("server: generate voice key: %w", err)
+	}
+	voiceKey := pb.EncryptionInfo{
+		EncryptionMethod: method,
+		Key:              key,
+	}
+	return voiceKey, nil
+
 }

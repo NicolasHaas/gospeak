@@ -247,12 +247,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st st
 	// Send auth response
 	authResp := &pb.ControlMessage{
 		AuthResponse: &pb.AuthResponse{
-			SessionID:     sessionID,
-			Username:      user.Username,
-			Role:          sessionRole.String(),
-			EncryptionKey: s.voiceKey,
-			Channels:      channelInfos,
-			AutoToken:     autoToken,
+			SessionID:  sessionID,
+			Username:   user.Username,
+			Role:       sessionRole.String(),
+			Encryption: s.voiceKey,
+			Channels:   channelInfos,
+			AutoToken:  autoToken,
 		},
 	}
 	if err := protocol.WriteControlMessage(conn, authResp); err != nil {

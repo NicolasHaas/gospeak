@@ -18,20 +18,22 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
 // Config holds server configuration.
 type Config struct {
-	ControlAddr  string // TCP/TLS bind address (e.g. ":9600")
-	VoiceAddr    string // UDP bind address (e.g. ":9601")
-	DBPath       string // SQLite database path
-	CertFile     string // TLS certificate file path
-	KeyFile      string // TLS private key file path
-	DataDir      string // directory for generated certs and data
-	AllowNoToken bool   // allow users to join without a token (open server)
-	ChannelsFile string // YAML file defining channels to create on startup
-	MetricsAddr  string // HTTP bind address for /metrics endpoint (empty = disabled)
+	ControlAddr      string // TCP/TLS bind address (e.g. ":9600")
+	VoiceAddr        string // UDP bind address (e.g. ":9601")
+	DBPath           string // SQLite database path
+	CertFile         string // TLS certificate file path
+	KeyFile          string // TLS private key file path
+	DataDir          string // directory for generated certs and data
+	AllowNoToken     bool   // allow users to join without a token (open server)
+	ChannelsFile     string // YAML file defining channels to create on startup
+	MetricsAddr      string // HTTP bind address for /metrics endpoint (empty = disabled)
+	EncryptionMethod string // Encryption method to use, supports aes128, aes256, and chacha20
 
 	// CLI-only actions (run and exit)
 	ExportUsers    bool // export all users as YAML and exit
@@ -47,11 +49,12 @@ type Dependencies struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		ControlAddr: ":9600",
-		VoiceAddr:   ":9601",
-		MetricsAddr: ":9602",
-		DBPath:      "gospeak.db",
-		DataDir:     ".",
+		ControlAddr:      ":9600",
+		VoiceAddr:        ":9601",
+		MetricsAddr:      ":9602",
+		DBPath:           "gospeak.db",
+		DataDir:          ".",
+		EncryptionMethod: "aes128",
 	}
 }
 
@@ -142,7 +145,7 @@ type Server struct {
 	store       store.DataStore
 	controlConn net.Listener
 	voiceConn   *net.UDPConn
-	voiceKey    []byte // shared AES-128 key for all voice encryption
+	voiceKey    pb.EncryptionInfo // shared encryption key for all voice encryption
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
