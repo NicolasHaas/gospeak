@@ -53,6 +53,16 @@ func NewCipher(method EncryptionMethod, key []byte) (cipher.AEAD, error) {
 	}
 	return aead, nil
 }
+
+// GenerateKey generates a random key of a given size.
+func GenerateKey(keysize EncryptionKeySize) ([]byte, error) {
+	key := make([]byte, keysize)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return nil, fmt.Errorf("crypto: generate key: %w", err)
+	}
+	return key, nil
+}
+
 func newAESGCMCipher(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -71,13 +81,4 @@ func newChacha20Poly1305Cipher(key []byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("crypto: new chacha20 cipher: %w", err)
 	}
 	return aead, nil
-}
-
-// GenerateKey generates a random key of a given size.
-func GenerateKey(keysize EncryptionKeySize) ([]byte, error) {
-	key := make([]byte, keysize)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, fmt.Errorf("crypto: generate key: %w", err)
-	}
-	return key, nil
 }
