@@ -123,13 +123,13 @@ func (s *Server) buildEncryptionInfo() (pb.EncryptionInfo, error) {
 	switch enc {
 	case "aes128":
 		keysize = crypto.AES128KeySize
-		method = crypto.AES128
+		method = crypto.AES128GCM
 	case "aes256":
 		keysize = crypto.AES256KeySize
-		method = crypto.AES256
+		method = crypto.AES256GCM
 	case "chacha20":
 		keysize = crypto.Chacha20KeySize
-		method = crypto.CHACHA20
+		method = crypto.CHACHA20Poly1305
 	default:
 		return pb.EncryptionInfo{}, fmt.Errorf("server: unable to parse encryption method %s", enc)
 	}
