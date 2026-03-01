@@ -114,6 +114,8 @@ func (s *ProviderFactory) migrate() error {
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		username   TEXT    NOT NULL UNIQUE CHECK(length(username) > 0 AND length(username) <= 32),
 		role       INTEGER NOT NULL DEFAULT 0 CHECK(role >= 0 AND role <= 2),
+		personal_token_hash TEXT NOT NULL DEFAULT '',
+		personal_token_created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 	);
 
@@ -182,6 +184,21 @@ func (s *ProviderFactory) migrate() error {
 				"ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0",
 				"ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0",
 				"ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0",
+			},
+			ignoreErrors: true,
+		},
+		{
+			version: 3,
+			statements: []string{
+				"ALTER TABLE users ADD COLUMN personal_token_hash TEXT NOT NULL DEFAULT ''",
+				"ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+			},
+			ignoreErrors: true,
+		},
+		{
+			version: 4,
+			statements: []string{
+				"CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)",
 			},
 			ignoreErrors: true,
 		},
@@ -263,7 +280,14 @@ func (s *baseProvider) CreateUser(username string, role model.Role) (*model.User
 	if !role.Valid() {
 		return nil, fmt.Errorf("datastore: create user: %w", model.ErrInvalidRole)
 	}
-	res, err := s.ExecContext(context.Background(), "INSERT INTO users (username, role) VALUES (?, ?)", username, int(role))
+	res, err := s.ExecContext(
+		context.Background(),
+		"INSERT INTO users (username, role, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?)",
+		username,
+		int(role),
+		"",
+		formatDBTime(time.Now().UTC()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("datastore: create user: %w", err)
 	}
@@ -281,8 +305,12 @@ func (s *baseProvider) GetUserByUsername(username string) (*model.User, error) {
 	u := &model.User{}
 	var roleInt int
 	var createdAt string
-	err := s.QueryRowContext(context.Background(), "SELECT id, username, role, created_at FROM users WHERE username = ?", username).
-		Scan(&u.ID, &u.Username, &roleInt, &createdAt)
+	var personalTokenCreatedAt string
+	err := s.QueryRowContext(
+		context.Background(),
+		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE username = ?",
+		username,
+	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -295,6 +323,10 @@ func (s *baseProvider) GetUserByUsername(username string) (*model.User, error) {
 		return nil, fmt.Errorf("datastore: get user: %w", err)
 	}
 	u.CreatedAt = parsed
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: get user: %w", err)
+	}
 	return u, nil
 }
 
@@ -303,8 +335,12 @@ func (s *baseProvider) GetUserByID(id int64) (*model.User, error) {
 	u := &model.User{}
 	var roleInt int
 	var createdAt string
-	err := s.QueryRowContext(context.Background(), "SELECT id, username, role, created_at FROM users WHERE id = ?", id).
-		Scan(&u.ID, &u.Username, &roleInt, &createdAt)
+	var personalTokenCreatedAt string
+	err := s.QueryRowContext(
+		context.Background(),
+		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE id = ?",
+		id,
+	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -317,6 +353,38 @@ func (s *baseProvider) GetUserByID(id int64) (*model.User, error) {
 		return nil, fmt.Errorf("datastore: get user: %w", err)
 	}
 	u.CreatedAt = parsed
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: get user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *baseProvider) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	u := &model.User{}
+	var roleInt int
+	var createdAt string
+	var personalTokenCreatedAt string
+	err := s.QueryRowContext(
+		context.Background(),
+		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE personal_token_hash = ?",
+		hash,
+	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("datastore: get user by token: %w", err)
+	}
+	u.Role = model.Role(roleInt)
+	u.CreatedAt, err = parseDBTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: get user by token: %w", err)
+	}
+	u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: get user by token: %w", err)
+	}
 	return u, nil
 }
 
@@ -332,9 +400,28 @@ func (s *baseProvider) UpdateUserRole(userID int64, role model.Role) error {
 	return nil
 }
 
+func (s *baseProvider) UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error {
+	var createdAtValue *string
+	if !createdAt.IsZero() {
+		value := formatDBTime(createdAt)
+		createdAtValue = &value
+	}
+	_, err := s.ExecContext(
+		context.Background(),
+		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ? WHERE id = ?",
+		hash,
+		createdAtValue,
+		userID,
+	)
+	if err != nil {
+		return fmt.Errorf("datastore: update personal token: %w", err)
+	}
+	return nil
+}
+
 // ListUsers returns all users.
 func (s *baseProvider) ListUsers() ([]model.User, error) {
-	rows, err := s.QueryContext(context.Background(), "SELECT id, username, role, created_at FROM users ORDER BY id")
+	rows, err := s.QueryContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("datastore: list users: %w", err)
 	}
@@ -345,15 +432,19 @@ func (s *baseProvider) ListUsers() ([]model.User, error) {
 		var u model.User
 		var roleInt int
 		var createdAt string
-		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &createdAt); err != nil {
+		var personalTokenCreatedAt string
+		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("datastore: scan user: %w", err)
 		}
 		u.Role = model.Role(roleInt)
-		parsed, err := parseDBTime(createdAt)
+		u.CreatedAt, err = parseDBTime(createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("datastore: scan user: %w", err)
 		}
-		u.CreatedAt = parsed
+		u.PersonalTokenCreatedAt, err = parseDBTime(personalTokenCreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("datastore: scan user: %w", err)
+		}
 		users = append(users, u)
 	}
 	return users, rows.Err()

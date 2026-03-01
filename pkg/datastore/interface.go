@@ -51,12 +51,14 @@ type ConfigReadProvider interface {
 type UserReadProvider interface {
 	GetUserByUsername(username string) (*model.User, error)
 	GetUserByID(id int64) (*model.User, error)
+	GetUserByPersonalTokenHash(hash string) (*model.User, error)
 	ListUsers() ([]model.User, error)
 }
 
 type UserWriteProvider interface {
 	CreateUser(username string, role model.Role) (*model.User, error)
 	UpdateUserRole(userID int64, role model.Role) error
+	UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error
 }
 
 type ChannelReadProvider interface {
