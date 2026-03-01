@@ -284,61 +284,115 @@ func TestUpdateUserRole(t *testing.T) {
 func TestGetUserByPersonalTokenHash(t *testing.T) {
 	t.Parallel()
 
-	store, err := NewTestSqlConn(t)
-	if err != nil {
-		t.Fatalf("failed to open test connection: %v", err)
+	type tcase struct {
+		seedUsername string
+		lookupHash   string
+		expectUser   bool
 	}
 
-	u, err := store.NonTx().CreateUser("johndoe", model.RoleUser)
-	if err != nil {
-		t.Fatalf("CreateUser: failed to seed user: %v", err)
+	tests := map[string]tcase{
+		"hash_matches_user": {
+			seedUsername: "johndoe",
+			lookupHash:   crypto.HashToken("personal-token"),
+			expectUser:   true,
+		},
+		"hash_not_found": {
+			seedUsername: "janedoe",
+			lookupHash:   crypto.HashToken("missing-token"),
+			expectUser:   false,
+		},
 	}
 
-	hash := crypto.HashToken("personal-token")
-	if err := store.NonTx().UpdateUserPersonalToken(u.ID, hash, time.Now().UTC()); err != nil {
-		t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
-	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	got, err := store.NonTx().GetUserByPersonalTokenHash(hash)
-	if err != nil {
-		t.Fatalf("GetUserByPersonalTokenHash: unexpected error: %v", err)
-	}
-	if got == nil {
-		t.Fatalf("GetUserByPersonalTokenHash: expected user, got nil")
-	}
-	if got.ID != u.ID {
-		t.Fatalf("GetUserByPersonalTokenHash: id mismatch want=%d got=%d", u.ID, got.ID)
+			store, err := NewTestSqlConn(t)
+			if err != nil {
+				t.Fatalf("failed to open test connection: %v", err)
+			}
+
+			u, err := store.NonTx().CreateUser(tc.seedUsername, model.RoleUser)
+			if err != nil {
+				t.Fatalf("CreateUser: failed to seed user: %v", err)
+			}
+
+			if tc.expectUser {
+				if err := store.NonTx().UpdateUserPersonalToken(u.ID, tc.lookupHash, time.Now().UTC()); err != nil {
+					t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
+				}
+			}
+
+			got, err := store.NonTx().GetUserByPersonalTokenHash(tc.lookupHash)
+			if err != nil {
+				t.Fatalf("GetUserByPersonalTokenHash: unexpected error: %v", err)
+			}
+			if !tc.expectUser {
+				if got != nil {
+					t.Fatalf("GetUserByPersonalTokenHash: expected nil user")
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("GetUserByPersonalTokenHash: expected user, got nil")
+			}
+			if got.ID != u.ID {
+				t.Fatalf("GetUserByPersonalTokenHash: id mismatch want=%d got=%d", u.ID, got.ID)
+			}
+		})
 	}
 }
 
 func TestUpdateUserPersonalToken(t *testing.T) {
 	t.Parallel()
 
-	store, err := NewTestSqlConn(t)
-	if err != nil {
-		t.Fatalf("failed to open test connection: %v", err)
+	type tcase struct {
+		username  string
+		tokenText string
 	}
 
-	u, err := store.NonTx().CreateUser("janedoe", model.RoleUser)
-	if err != nil {
-		t.Fatalf("CreateUser: failed to seed user: %v", err)
+	tests := map[string]tcase{
+		"updates_to_first_token": {
+			username:  "janedoe",
+			tokenText: "new-personal-token",
+		},
+		"updates_to_replacement_token": {
+			username:  "johnsmith",
+			tokenText: "replacement-personal-token",
+		},
 	}
 
-	hash := crypto.HashToken("new-personal-token")
-	now := time.Now().UTC()
-	if err := store.NonTx().UpdateUserPersonalToken(u.ID, hash, now); err != nil {
-		t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
-	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	got, err := store.NonTx().GetUserByID(u.ID)
-	if err != nil {
-		t.Fatalf("GetUserByID: unexpected error: %v", err)
-	}
-	if got == nil {
-		t.Fatalf("GetUserByID: expected user, got nil")
-	}
-	if got.PersonalTokenHash != hash {
-		t.Fatalf("UpdateUserPersonalToken: hash mismatch")
+			store, err := NewTestSqlConn(t)
+			if err != nil {
+				t.Fatalf("failed to open test connection: %v", err)
+			}
+
+			u, err := store.NonTx().CreateUser(tc.username, model.RoleUser)
+			if err != nil {
+				t.Fatalf("CreateUser: failed to seed user: %v", err)
+			}
+
+			hash := crypto.HashToken(tc.tokenText)
+			now := time.Now().UTC()
+			if err := store.NonTx().UpdateUserPersonalToken(u.ID, hash, now); err != nil {
+				t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
+			}
+
+			got, err := store.NonTx().GetUserByID(u.ID)
+			if err != nil {
+				t.Fatalf("GetUserByID: unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatalf("GetUserByID: expected user, got nil")
+			}
+			if got.PersonalTokenHash != hash {
+				t.Fatalf("UpdateUserPersonalToken: hash mismatch")
+			}
+		})
 	}
 }
 

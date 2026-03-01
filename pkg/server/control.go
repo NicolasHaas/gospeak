@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -136,93 +137,93 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 
-	// Validate token
 	authReq := msg.AuthRequest
-
-	// Validate username
-	if !isValidUsername(authReq.Username) {
-		sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
-		return
-	}
-
-	var tokenRole model.Role
-	var autoToken string // set when server generates a token for token-less join
-
-	if authReq.Token == "" {
-		// Token-less join
-		if !s.cfg.AllowNoToken {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: token required")
-			return
-		}
-		tokenRole = model.RoleUser
-	} else {
-		tokenHash := crypto.HashToken(authReq.Token)
-		var err error
-
-		ctx := context.Background()
-		tx, err := st.Tx(ctx)
-		if err != nil {
-			sendError(conn, 3, "could not establish transaction: "+err.Error())
-			return
-		}
-
-		committed := false
-		defer func() {
-			if !committed {
-				// We never made it to commit, roll it back
-				if err := tx.Rollback(); err != nil {
-					// Rollback failures are almost never the root problem
-					// for a failure here and returning an error would mask
-					// the root problem, so we'll log the failure for observation
-					slog.Warn("tx rollback failed", "err", err)
-				}
-			}
-		}()
-
-		tokenRole, err = tx.ValidateToken(tokenHash)
-		if err != nil {
-			s.metrics.FailedAuths.Add(1)
-			sendError(conn, 2, "authentication failed: "+err.Error())
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			sendError(conn, 3, "error committing transaction: "+err.Error())
-			return
-		}
-		committed = true
-	}
-
-	// Create or get user — existing users keep their stored role
-	user, err := st.NonTx().GetUserByUsername(authReq.Username)
-	if err != nil {
-		sendError(conn, 3, "internal error")
-		return
+	var tokenHash string
+	if authReq.Token != "" {
+		tokenHash = crypto.HashToken(authReq.Token)
 	}
 
 	var sessionRole model.Role
-	if user == nil {
+	var autoToken string // set when server generates a personal token
+
+	var user *model.User
+	if tokenHash != "" {
+		user, err = st.NonTx().GetUserByPersonalTokenHash(tokenHash)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
+
+	var tokenRole model.Role
+	if user != nil {
+		sessionRole = user.Role
+	} else {
+		if !isValidUsername(authReq.Username) {
+			sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
+			return
+		}
+
 		// New user: role comes from the token
+		if authReq.Token == "" {
+			if !s.cfg.AllowNoToken {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: token required")
+				return
+			}
+			tokenRole = model.RoleUser
+		} else {
+			ctx := context.Background()
+			tx, err := st.Tx(ctx)
+			if err != nil {
+				sendError(conn, 3, "could not establish transaction: "+err.Error())
+				return
+			}
+
+			committed := false
+			defer func() {
+				if !committed {
+					if err := tx.Rollback(); err != nil {
+						slog.Warn("tx rollback failed", "err", err)
+					}
+				}
+			}()
+
+			tokenRole, err = tx.ValidateToken(tokenHash)
+			if err != nil {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: "+err.Error())
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				sendError(conn, 3, "error committing transaction: "+err.Error())
+				return
+			}
+			committed = true
+		}
+
 		user, err = st.NonTx().CreateUser(authReq.Username, tokenRole)
 		if err != nil {
+			if errors.Is(err, datastore.ErrUsernameTaken) {
+				s.metrics.FailedAuths.Add(1)
+				sendError(conn, 2, "authentication failed: personal token required")
+				return
+			}
 			sendError(conn, 3, "failed to create user: "+err.Error())
 			return
 		}
 		sessionRole = tokenRole
 
-		// Auto-generate a personal token for identification (token-less join)
-		if authReq.Token == "" {
-			rawToken, err := crypto.GenerateToken()
-			if err == nil {
-				hash := crypto.HashToken(rawToken)
-				_ = st.NonTx().CreateToken(hash, model.RoleUser, 0, 0, 0, st.NonTx().ZeroTime()) // unlimited, no expiry
-				autoToken = rawToken
-				slog.Debug("auto-generated token for token-less user", "user", user.Username)
-			}
+		rawToken, err := crypto.GenerateToken()
+		if err != nil {
+			sendError(conn, 3, "failed to generate personal token")
+			return
 		}
-	} else {
-		// Existing user: use their stored/persisted role (honors SetUserRole changes)
-		sessionRole = user.Role
+		if err := st.NonTx().UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
+			sendError(conn, 3, "failed to store personal token")
+			return
+		}
+		autoToken = rawToken
 	}
 
 	// Check ban

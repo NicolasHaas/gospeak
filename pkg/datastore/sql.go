@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -289,6 +290,9 @@ func (s *baseProvider) CreateUser(username string, role model.Role) (*model.User
 		formatDBTime(time.Now().UTC()),
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
+			return nil, fmt.Errorf("datastore: create user: %w", ErrUsernameTaken)
+		}
 		return nil, fmt.Errorf("datastore: create user: %w", err)
 	}
 	id, _ := res.LastInsertId()
@@ -401,16 +405,15 @@ func (s *baseProvider) UpdateUserRole(userID int64, role model.Role) error {
 }
 
 func (s *baseProvider) UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error {
-	var createdAtValue *string
-	if !createdAt.IsZero() {
-		value := formatDBTime(createdAt)
-		createdAtValue = &value
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
 	}
+	createdAtStr := formatDBTime(createdAt)
 	_, err := s.ExecContext(
 		context.Background(),
 		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ? WHERE id = ?",
 		hash,
-		createdAtValue,
+		createdAtStr,
 		userID,
 	)
 	if err != nil {

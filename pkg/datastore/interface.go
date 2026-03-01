@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/model"
@@ -42,6 +43,10 @@ type DataStore interface {
 }
 
 // Compile-time check: *Store implements DataStore.
+// ErrUsernameTaken is returned when a CreateUser call fails due to a
+// duplicate username constraint.
+var ErrUsernameTaken = errors.New("datastore: username already taken")
+
 var _ DataProviderFactory = (*ProviderFactory)(nil)
 
 type ConfigReadProvider interface {
