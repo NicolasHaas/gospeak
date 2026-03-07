@@ -826,6 +826,9 @@ func TestValidateToken(t *testing.T) {
 			if err != nil && tc.expectValidation {
 				t.Fatalf("ValidateToken_1: unexpected error: %v", err)
 			}
+			if err = tx1.Commit(); err != nil {
+				t.Fatalf("Tx: Commit: %v", err)
+			}
 
 			// Second validation — needs its own transaction
 			tx2, err := store.Tx(ctx)
@@ -841,6 +844,9 @@ func TestValidateToken(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ValidateToken: unexpected error: %v", err)
+			}
+			if err = tx2.Commit(); err != nil {
+				t.Fatalf("Tx: Commit: %v", err)
 			}
 		})
 	}

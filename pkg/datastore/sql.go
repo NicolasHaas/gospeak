@@ -28,7 +28,7 @@ func (p *baseProvider) ZeroTime() time.Time {
 }
 
 func (p *baseProvider) Close() error {
-	return nil
+	return p.Close()
 }
 
 type nonTxProvider struct {
@@ -514,8 +514,6 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 func (s *txProvider) ValidateToken(hash string) (model.Role, error) {
 	ctx := context.Background()
 
-	defer func() { _ = s.Rollback() }()
-
 	var roleInt int
 	var maxUses, useCount int
 	var expiresAt *string
@@ -548,10 +546,6 @@ func (s *txProvider) ValidateToken(hash string) (model.Role, error) {
 	// Increment use count
 	if _, err := s.ExecContext(ctx, "UPDATE tokens SET use_count = use_count + 1 WHERE hash = ?", hash); err != nil {
 		return 0, fmt.Errorf("datastore: increment use: %w", err)
-	}
-
-	if err := s.Commit(); err != nil {
-		return 0, fmt.Errorf("datastore: commit: %w", err)
 	}
 
 	return model.Role(roleInt), nil

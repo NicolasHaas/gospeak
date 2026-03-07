@@ -164,12 +164,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		tx, err := st.Tx(ctx)
 		if err != nil {
 			sendError(conn, 3, "could not establish transaction: "+err.Error())
+			return
 		}
-		defer func() {
-			if err := tx.Rollback(); err != nil {
-				sendError(conn, 3, "could not rollback transaction: "+err.Error())
-			}
-		}()
 
 		tokenRole, err = tx.ValidateToken(tokenHash)
 		if err != nil {
