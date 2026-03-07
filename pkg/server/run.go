@@ -19,7 +19,6 @@ func (s *Server) Run() error {
 		return fmt.Errorf("server: missing store dependency")
 	}
 	st := s.store
-	defer func() { _ = st.NonTx().Close() }()
 
 	// Generate shared voice encryption key
 	voiceKey, err := crypto.GenerateKey()

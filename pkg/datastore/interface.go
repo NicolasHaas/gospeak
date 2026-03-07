@@ -46,7 +46,6 @@ var _ DataProviderFactory = (*ProviderFactory)(nil)
 
 type ConfigReadProvider interface {
 	ZeroTime() time.Time
-	Close() error
 }
 
 type UserReadProvider interface {

@@ -27,10 +27,6 @@ func (p *baseProvider) ZeroTime() time.Time {
 	return time.Time{}
 }
 
-func (p *baseProvider) Close() error {
-	return p.Close()
-}
-
 type nonTxProvider struct {
 	baseProvider
 }

@@ -47,7 +47,7 @@ func main() {
 			slog.Error("open database", "err", err)
 			os.Exit(1)
 		}
-		defer st.Close()
+		defer st.DB.Close()
 
 		if cfg.ExportUsers {
 			data, err := server.ExportUsersYAML(st)
