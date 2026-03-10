@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -37,8 +37,8 @@ type UsersExport struct {
 	Users []UserYAML `yaml:"users"`
 }
 
-// LoadChannelsFromYAML reads a channels YAML file and creates/updates channels in the store.
-func LoadChannelsFromYAML(path string, st store.DataStore) error {
+// LoadChannelsFromYAML reads a channels YAML file and creates/updates channels in the datastore.
+func LoadChannelsFromYAML(path string, st datastore.DataProviderFactory) error {
 	data, err := os.ReadFile(path) //nolint:gosec // path from user-provided CLI config
 	if err != nil {
 		return fmt.Errorf("read channels config: %w", err)
@@ -46,8 +46,8 @@ func LoadChannelsFromYAML(path string, st store.DataStore) error {
 	return ImportChannelsFromYAML(data, st)
 }
 
-// ImportChannelsFromYAML parses YAML data and creates/updates channels in the store.
-func ImportChannelsFromYAML(data []byte, st store.DataStore) error {
+// ImportChannelsFromYAML parses YAML data and creates/updates channels in the datastore.
+func ImportChannelsFromYAML(data []byte, st datastore.DataProviderFactory) error {
 	var cfg ChannelsConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse channels config: %w", err)
@@ -63,9 +63,9 @@ func ImportChannelsFromYAML(data []byte, st store.DataStore) error {
 	return nil
 }
 
-func ensureChannel(st store.DataStore, ch ChannelYAML, parentID int64) error {
+func ensureChannel(st datastore.DataProviderFactory, ch ChannelYAML, parentID int64) error {
 	// Check if channel already exists under this parent
-	existing, err := st.GetChannelByNameAndParent(ch.Name, parentID)
+	existing, err := st.NonTx().GetChannelByNameAndParent(ch.Name, parentID)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func ensureChannel(st store.DataStore, ch ChannelYAML, parentID int64) error {
 			IsTemp:           false,
 			AllowSubChannels: ch.AllowSubChannels,
 		}
-		if err := st.CreateChannel(channel); err != nil {
+		if err := st.NonTx().CreateChannel(channel); err != nil {
 			return err
 		}
 		channelID = channel.ID
@@ -107,8 +107,8 @@ func countChannels(channels []ChannelYAML) int {
 }
 
 // ExportChannelsYAML exports all channels as YAML.
-func ExportChannelsYAML(st store.DataStore) ([]byte, error) {
-	channels, err := st.ListChannels()
+func ExportChannelsYAML(st datastore.DataProviderFactory) ([]byte, error) {
+	channels, err := st.NonTx().ListChannels()
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +137,8 @@ func buildChannelTree(channels []model.Channel, parentID int64) []ChannelYAML {
 }
 
 // ExportUsersYAML exports all users as YAML.
-func ExportUsersYAML(st store.DataStore) ([]byte, error) {
-	users, err := st.ListUsers()
+func ExportUsersYAML(st datastore.DataProviderFactory) ([]byte, error) {
+	users, err := st.NonTx().ListUsers()
 	if err != nil {
 		return nil, err
 	}

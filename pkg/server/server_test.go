@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
-	"github.com/NicolasHaas/gospeak/pkg/store"
 )
 
 type nopConn struct{}
@@ -22,10 +22,13 @@ func (c *nopConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *nopConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *nopConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-func newTestServer(t *testing.T) (*Server, store.DataStore, *ControlHandler) {
+func newTestServer(t *testing.T) (*Server, datastore.DataProviderFactory, *ControlHandler) {
 	t.Helper()
-	st := store.NewMemory()
 	cfg := DefaultConfig()
+	st, err := datastore.NewProviderFactory(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("Could not start datastore: %v", err)
+	}
 	srv := New(cfg, Dependencies{Store: st})
 	handler := newControlHandler(srv, st)
 	return srv, st, handler
@@ -36,7 +39,7 @@ func TestHandleJoinLeaveChannel(t *testing.T) {
 	conn := &nopConn{}
 
 	ch := model.NewChannel()
-	if err := st.CreateChannel(ch); err != nil {
+	if err := st.NonTx().CreateChannel(ch); err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
 

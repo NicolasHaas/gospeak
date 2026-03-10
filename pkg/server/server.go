@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/NicolasHaas/gospeak/pkg/store"
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 )
 
 // Config holds server configuration.
@@ -41,7 +41,7 @@ type Config struct {
 // Dependencies holds external dependencies for the server.
 // Server assumes ownership of Store and will Close() it on shutdown.
 type Dependencies struct {
-	Store store.DataStore
+	Store datastore.DataProviderFactory
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -139,7 +139,7 @@ type Server struct {
 	sessions    *SessionManager
 	channels    *ChannelManager
 	metrics     *Metrics
-	store       store.DataStore
+	store       datastore.DataProviderFactory
 	controlConn net.Listener
 	voiceConn   *net.UDPConn
 	voiceKey    []byte // shared AES-128 key for all voice encryption
