@@ -167,6 +167,19 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 
+		committed := false
+		defer func() {
+			if !committed {
+				// We never made it to commit, roll it back
+				if err := tx.Rollback(); err != nil {
+					// Rollback failures are almost never the root problem
+					// for a failure here and returning an error would mask
+					// the root problem, so we'll log the failure for observation
+					slog.Warn("tx rollback failed", "err", err)
+				}
+			}
+		}()
+
 		tokenRole, err = tx.ValidateToken(tokenHash)
 		if err != nil {
 			s.metrics.FailedAuths.Add(1)
@@ -175,7 +188,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 		if err := tx.Commit(); err != nil {
 			sendError(conn, 3, "error committing transaction: "+err.Error())
+			return
 		}
+		committed = true
 	}
 
 	// Create or get user — existing users keep their stored role
