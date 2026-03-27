@@ -15,10 +15,12 @@ var ErrInvalidRole = errors.New("invalid role: must be user (0), moderator (1), 
 
 // User represents a registered user.
 type User struct {
-	ID        int64     `json:"id"`
-	Username  string    `json:"username"`
-	Role      Role      `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                     int64     `json:"id"`
+	Username               string    `json:"username"`
+	Role                   Role      `json:"role"`
+	PersonalTokenHash      string    `json:"-"`
+	PersonalTokenCreatedAt time.Time `json:"-"`
+	CreatedAt              time.Time `json:"created_at"`
 }
 
 // ValidateUsername checks that a username is 1-32 ASCII alphanumeric, underscore,

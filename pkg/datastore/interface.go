@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/model"
@@ -42,6 +43,10 @@ type DataStore interface {
 }
 
 // Compile-time check: *Store implements DataStore.
+// ErrUsernameTaken is returned when a CreateUser call fails due to a
+// duplicate username constraint.
+var ErrUsernameTaken = errors.New("datastore: username already taken")
+
 var _ DataProviderFactory = (*ProviderFactory)(nil)
 
 type ConfigReadProvider interface {
@@ -51,12 +56,14 @@ type ConfigReadProvider interface {
 type UserReadProvider interface {
 	GetUserByUsername(username string) (*model.User, error)
 	GetUserByID(id int64) (*model.User, error)
+	GetUserByPersonalTokenHash(hash string) (*model.User, error)
 	ListUsers() ([]model.User, error)
 }
 
 type UserWriteProvider interface {
 	CreateUser(username string, role model.Role) (*model.User, error)
 	UpdateUserRole(userID int64, role model.Role) error
+	UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error
 }
 
 type ChannelReadProvider interface {

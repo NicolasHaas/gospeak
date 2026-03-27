@@ -134,11 +134,12 @@ sequenceDiagram
     participant UDP as UDP Voice
     participant Srv as Server
 
-    UI->>Eng: Connect(host, token, username)
+    UI->>Eng: Connect(host, token?, username)
     Eng->>TLS: Dial TCP/TLS (skip verify for self-signed)
     TLS->>Srv: TLS 1.3 Handshake
-    Eng->>Srv: AuthRequest{token, username}
-    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, channels}
+    Eng->>Srv: AuthRequest{token?, username}
+    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, channels, autoToken?}
+    Note over Eng: Store autoToken for future logins
     Eng->>Eng: Create VoiceCipher from encryptionKey
     Eng->>UDP: Dial UDP to server:9601
     Eng->>Eng: Start audio capture + playback

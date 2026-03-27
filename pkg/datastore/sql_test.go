@@ -123,7 +123,7 @@ func TestCreateUser(t *testing.T) {
 				Role:     tc.role,
 			}
 
-			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "PersonalTokenCreatedAt", "CreatedAt")); diff != "" {
 				t.Errorf("store.NonTx().CreateUser mismatch (-want +got):\\n%s", diff)
 			}
 		}
@@ -193,7 +193,7 @@ func TestGetUserByUsername(t *testing.T) {
 				Role:     tc.role,
 			}
 
-			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(model.User{}, "ID", "PersonalTokenCreatedAt", "CreatedAt")); diff != "" {
 				t.Fatalf("GetUserByUsername mismatch (-want +got):\n%s", diff)
 			}
 
@@ -281,6 +281,121 @@ func TestUpdateUserRole(t *testing.T) {
 	}
 }
 
+func TestGetUserByPersonalTokenHash(t *testing.T) {
+	t.Parallel()
+
+	type tcase struct {
+		seedUsername string
+		lookupHash   string
+		expectUser   bool
+	}
+
+	tests := map[string]tcase{
+		"hash_matches_user": {
+			seedUsername: "johndoe",
+			lookupHash:   crypto.HashToken("personal-token"),
+			expectUser:   true,
+		},
+		"hash_not_found": {
+			seedUsername: "janedoe",
+			lookupHash:   crypto.HashToken("missing-token"),
+			expectUser:   false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := NewTestSqlConn(t)
+			if err != nil {
+				t.Fatalf("failed to open test connection: %v", err)
+			}
+
+			u, err := store.NonTx().CreateUser(tc.seedUsername, model.RoleUser)
+			if err != nil {
+				t.Fatalf("CreateUser: failed to seed user: %v", err)
+			}
+
+			if tc.expectUser {
+				if err := store.NonTx().UpdateUserPersonalToken(u.ID, tc.lookupHash, time.Now().UTC()); err != nil {
+					t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
+				}
+			}
+
+			got, err := store.NonTx().GetUserByPersonalTokenHash(tc.lookupHash)
+			if err != nil {
+				t.Fatalf("GetUserByPersonalTokenHash: unexpected error: %v", err)
+			}
+			if !tc.expectUser {
+				if got != nil {
+					t.Fatalf("GetUserByPersonalTokenHash: expected nil user")
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("GetUserByPersonalTokenHash: expected user, got nil")
+			}
+			if got.ID != u.ID {
+				t.Fatalf("GetUserByPersonalTokenHash: id mismatch want=%d got=%d", u.ID, got.ID)
+			}
+		})
+	}
+}
+
+func TestUpdateUserPersonalToken(t *testing.T) {
+	t.Parallel()
+
+	type tcase struct {
+		username  string
+		tokenText string
+	}
+
+	tests := map[string]tcase{
+		"updates_to_first_token": {
+			username:  "janedoe",
+			tokenText: "new-personal-token",
+		},
+		"updates_to_replacement_token": {
+			username:  "johnsmith",
+			tokenText: "replacement-personal-token",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := NewTestSqlConn(t)
+			if err != nil {
+				t.Fatalf("failed to open test connection: %v", err)
+			}
+
+			u, err := store.NonTx().CreateUser(tc.username, model.RoleUser)
+			if err != nil {
+				t.Fatalf("CreateUser: failed to seed user: %v", err)
+			}
+
+			hash := crypto.HashToken(tc.tokenText)
+			now := time.Now().UTC()
+			if err := store.NonTx().UpdateUserPersonalToken(u.ID, hash, now); err != nil {
+				t.Fatalf("UpdateUserPersonalToken: unexpected error: %v", err)
+			}
+
+			got, err := store.NonTx().GetUserByID(u.ID)
+			if err != nil {
+				t.Fatalf("GetUserByID: unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatalf("GetUserByID: expected user, got nil")
+			}
+			if got.PersonalTokenHash != hash {
+				t.Fatalf("UpdateUserPersonalToken: hash mismatch")
+			}
+		})
+	}
+}
+
 func TestListUsers(t *testing.T) {
 	t.Parallel()
 
@@ -328,7 +443,7 @@ func TestListUsers(t *testing.T) {
 				t.Fatalf("ListUsers: unexpected error: %v", err)
 			}
 
-			if diff := cmp.Diff(tc.users, users, cmpopts.IgnoreFields(model.User{}, "ID", "CreatedAt")); diff != "" {
+			if diff := cmp.Diff(tc.users, users, cmpopts.IgnoreFields(model.User{}, "ID", "PersonalTokenCreatedAt", "CreatedAt")); diff != "" {
 				t.Fatalf("ListUsers mismatch (-want +got):\n%s", diff)
 			}
 		})
