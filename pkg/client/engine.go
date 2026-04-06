@@ -498,12 +498,13 @@ func (e *Engine) LeaveChannel() error {
 func (e *Engine) SetMuted(muted bool) {
 	e.mu.Lock()
 	e.muted = muted
+	deafened := e.deafened
 	ctrl := e.control
 	e.mu.Unlock()
 
 	if ctrl != nil {
 		_ = ctrl.Send(&pb.ControlMessage{
-			UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: e.deafened},
+			UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
 		})
 	}
 }
@@ -511,13 +512,19 @@ func (e *Engine) SetMuted(muted bool) {
 // SetDeafened toggles deafen state.
 func (e *Engine) SetDeafened(deafened bool) {
 	e.mu.Lock()
+	wasDeafened := e.deafened
 	e.deafened = deafened
+	muted := e.muted
 	ctrl := e.control
 	e.mu.Unlock()
 
+	if wasDeafened && !deafened {
+		e.resetReceiveState()
+	}
+
 	if ctrl != nil {
 		_ = ctrl.Send(&pb.ControlMessage{
-			UserStateUpdate: &pb.UserStateUpdate{Muted: e.muted, Deafened: deafened},
+			UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
 		})
 	}
 }
@@ -763,6 +770,13 @@ func (e *Engine) IsDeafened() bool {
 	return e.deafened
 }
 
+func (e *Engine) resetReceiveState() {
+	e.decoderMu.Lock()
+	e.decoders = make(map[uint32]audio.AudioDecoder)
+	e.jitterBufs = make(map[uint32]*JitterBuffer)
+	e.decoderMu.Unlock()
+}
+
 func (e *Engine) handleDisconnect(reason string) {
 	e.mu.Lock()
 	if e.state == StateDisconnected {
@@ -803,11 +817,7 @@ func (e *Engine) handleDisconnect(reason string) {
 	// Reset context for reconnection
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 
-	// Clean up decoders
-	e.decoderMu.Lock()
-	e.decoders = make(map[uint32]audio.AudioDecoder)
-	e.jitterBufs = make(map[uint32]*JitterBuffer)
-	e.decoderMu.Unlock()
+	e.resetReceiveState()
 
 	slog.Info("disconnected", "reason", reason)
 	e.notifyStateChange(StateDisconnected)
