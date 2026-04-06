@@ -77,6 +77,12 @@ func (p *PlaybackDevice) Start() error {
 
 // WriteFrame writes one frame of PCM audio to the output. Blocks until written.
 func (p *PlaybackDevice) WriteFrame(frame []int16) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.running {
+		return fmt.Errorf("audio: playback device not running")
+	}
 	if len(frame) != len(p.buffer) {
 		return fmt.Errorf("audio: frame size mismatch: got %d, want %d", len(frame), len(p.buffer))
 	}
