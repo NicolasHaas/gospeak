@@ -84,11 +84,18 @@ func (c *CaptureDevice) Start() error {
 // ReadFrame reads one frame of PCM audio. Blocks until a frame is available.
 // Returns a copy of the frame buffer.
 func (c *CaptureDevice) ReadFrame() ([]int16, error) {
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("audio: capture device not running")
+	}
 	if err := c.stream.Read(); err != nil {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("audio: read frame: %w", err)
 	}
 	frame := make([]int16, len(c.buffer))
 	copy(frame, c.buffer)
+	c.mu.Unlock()
 	return frame, nil
 }
 
