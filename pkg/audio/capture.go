@@ -118,6 +118,5 @@ func (c *CaptureDevice) Stop() error {
 
 // Close releases all audio resources.
 func (c *CaptureDevice) Close() error {
-	_ = c.Stop()
-	return portaudio.Terminate()
+	return c.Stop()
 }

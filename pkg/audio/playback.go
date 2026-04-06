@@ -22,6 +22,8 @@ type PlaybackDevice struct {
 // NewPlaybackDevice creates a new audio playback device.
 // deviceName may be empty to use the system default.
 func NewPlaybackDevice(sampleRate float64, frameSize int, deviceName ...string) (*PlaybackDevice, error) {
+	WaitPreInit()
+
 	dn := ""
 	if len(deviceName) > 0 {
 		dn = deviceName[0]

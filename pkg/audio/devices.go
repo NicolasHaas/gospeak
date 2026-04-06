@@ -46,10 +46,7 @@ type DeviceEntry struct {
 
 // ListInputDevices returns all available audio input devices.
 func ListInputDevices() ([]DeviceEntry, error) {
-	if err := portaudio.Initialize(); err != nil {
-		return nil, err
-	}
-	defer func() { _ = portaudio.Terminate() }()
+	WaitPreInit()
 
 	defaultIn, _ := portaudio.DefaultInputDevice()
 	devices, err := portaudio.Devices()
@@ -76,10 +73,7 @@ func ListInputDevices() ([]DeviceEntry, error) {
 
 // ListOutputDevices returns all available audio output devices.
 func ListOutputDevices() ([]DeviceEntry, error) {
-	if err := portaudio.Initialize(); err != nil {
-		return nil, err
-	}
-	defer func() { _ = portaudio.Terminate() }()
+	WaitPreInit()
 
 	defaultOut, _ := portaudio.DefaultOutputDevice()
 	devices, err := portaudio.Devices()

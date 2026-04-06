@@ -211,8 +211,8 @@ func (e *Engine) initAudioDefault() error {
 
 	encoder, err := audio.NewEncoder()
 	if err != nil {
-		_ = capture.Close()
 		_ = playback.Stop()
+		_ = capture.Close()
 		return fmt.Errorf("encoder: %w", err)
 	}
 
@@ -786,11 +786,11 @@ func (e *Engine) handleDisconnect(reason string) {
 	e.mu.Unlock()
 
 	// Clean up resources
-	if capture != nil {
-		_ = capture.Close()
-	}
 	if playback != nil {
 		_ = playback.Stop()
+	}
+	if capture != nil {
+		_ = capture.Close()
 	}
 	if voice != nil {
 		_ = voice.Close()
