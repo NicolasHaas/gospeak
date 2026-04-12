@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GoSpeak
+Comment=Privacy-focused voice communication client
+Exec=gospeak-client
+Icon=ch.haas_nicolas.gospeak
+Terminal=false
+Categories=Network;AudioVideo;Chat;
+Keywords=voice;chat;communication;audio;
+StartupNotify=true

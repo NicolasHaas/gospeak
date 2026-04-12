@@ -1,0 +1,73 @@
+id: ch.haas_nicolas.gospeak
+default-branch: stable
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.golang
+command: gospeak-client
+
+build-options:
+  append-path: /usr/lib/sdk/golang/bin
+  env:
+    GOROOT: /usr/lib/sdk/golang
+    GOFLAGS: -mod=vendor
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/aclocal
+  - /share/doc
+  - /share/gtk-doc
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  - name: opus
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
+        sha256: 65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+
+  - name: portaudio
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
+        sha256: 47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def
+
+  - name: gospeak
+    buildsystem: simple
+    build-options:
+      env:
+        CGO_ENABLED: '1'
+        GOCACHE: /run/build/gospeak/.cache/go-build
+    build-commands:
+      - go build -mod=vendor -tags nolibopusfile -trimpath -ldflags="-s -w" -o /app/bin/gospeak-client ./cmd/client/
+      - install -Dm644 packaging/flatpak/ch.haas_nicolas.gospeak.desktop /app/share/applications/ch.haas_nicolas.gospeak.desktop
+      - install -Dm644 packaging/flatpak/ch.haas_nicolas.gospeak.metainfo.xml /app/share/metainfo/ch.haas_nicolas.gospeak.metainfo.xml
+      - install -Dm644 ui/gospeak-icon.png /app/share/icons/hicolor/512x512/apps/ch.haas_nicolas.gospeak.png
+      - install -Dm644 LICENSE /app/share/licenses/ch.haas_nicolas.gospeak/LICENSE
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .flatpak-builder
+          - bin
+          - flatpak-build
+      - go.mod.yml
