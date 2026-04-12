@@ -3,13 +3,13 @@ package client
 import (
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Settings stores user preferences persisted as YAML next to the binary.
+// Settings stores user preferences persisted as YAML in the user config directory.
 type Settings struct {
+	path         string
 	MuteKey      string  `yaml:"mute_key"`
 	DeafenKey    string  `yaml:"deafen_key"`
 	VADThreshold float64 `yaml:"vad_threshold"`
@@ -26,18 +26,19 @@ func DefaultSettings() *Settings {
 	}
 }
 
-func settingsPath() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "settings.yaml"
-	}
-	return filepath.Join(filepath.Dir(exe), "settings.yaml")
-}
-
 // LoadSettings loads settings from YAML or returns defaults.
 func LoadSettings() *Settings {
 	s := DefaultSettings()
-	data, err := os.ReadFile(settingsPath())
+	path, err := configFilePath(settingsFileName)
+	s.path = path
+	if err != nil {
+		slog.Warn("resolve settings path", "err", err)
+	}
+	if err := migrateLegacyConfigFile(path, settingsFileName); err != nil {
+		slog.Warn("migrate settings", "err", err)
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return s
 	}
@@ -54,5 +55,21 @@ func (s *Settings) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath(), data, 0600)
+
+	if s.path == "" {
+		path, pathErr := configFilePath(settingsFileName)
+		if pathErr != nil {
+			slog.Warn("resolve settings path", "err", pathErr)
+		}
+		if path == "" {
+			return pathErr
+		}
+		s.path = path
+	}
+
+	if err := ensureParentDir(s.path); err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.path, data, 0600)
 }
