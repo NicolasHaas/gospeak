@@ -160,7 +160,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		sessionRole = user.Role
 	} else {
 		if !isValidUsername(authReq.Username) {
-			sendError(conn, 2, "invalid username: must be 1-32 alphanumeric/underscore characters")
+			sendError(conn, 2, "invalid username: must be 1-32 letters, digits, underscores, or hyphens")
 			return
 		}
 
@@ -839,7 +839,7 @@ func isClosedErr(err error) bool {
 		err.Error() == "tls: use of closed connection"
 }
 
-// isValidUsername checks that a username is 1-32 alphanumeric/underscore/hyphen characters.
+// isValidUsername checks that a username is 1-32 Unicode letters, digits, underscores, or hyphens.
 func isValidUsername(name string) bool {
 	return model.ValidateUsername(name) == nil
 }

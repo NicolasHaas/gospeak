@@ -17,16 +17,22 @@ func TestValidateUsername(t *testing.T) {
 		{"valid with hyphen", "my-user", nil},
 		{"valid mixed", "A-b_3", nil},
 		{"valid max length", strings.Repeat("a", MaxUsernameLength), nil},
+		{"valid unicode latin", "ñoño", nil},
+		{"valid cyrillic", "Иван", nil},
+		{"valid cjk", "太郎", nil},
+		{"valid accented", "café", nil},
+		{"valid lithuanian", "Žilvinas", nil},
 		{"empty", "", ErrUsernameEmpty},
 		{"too long", strings.Repeat("a", MaxUsernameLength+1), ErrUsernameTooLong},
 		{"way too long", strings.Repeat("x", 65), ErrUsernameTooLong},
+		{"too long unicode", strings.Repeat("ñ", MaxUsernameLength+1), ErrUsernameTooLong},
 		{"contains space", "has space", ErrUsernameInvalidChars},
 		{"contains dot", "user.name", ErrUsernameInvalidChars},
 		{"contains @", "user@name", ErrUsernameInvalidChars},
-		{"unicode letter", "ñoño", ErrUsernameInvalidChars},
 		{"emoji", "user😀", ErrUsernameInvalidChars},
 		{"tab character", "user\tname", ErrUsernameInvalidChars},
 		{"newline", "user\nname", ErrUsernameInvalidChars},
+		{"zero-width space", "user\u200Bname", ErrUsernameInvalidChars},
 	}
 
 	for _, tt := range tests {
