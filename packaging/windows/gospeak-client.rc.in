@@ -1,0 +1,31 @@
+#include <windows.h>
+
+IDI_APP_ICON ICON "@ICON_PATH@"
+
+1 VERSIONINFO
+FILEVERSION @FILE_VERSION@
+PRODUCTVERSION @FILE_VERSION@
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName", "Nicolas Haas\0"
+            VALUE "FileDescription", "GoSpeak voice communication client\0"
+            VALUE "FileVersion", "@DISPLAY_VERSION@\0"
+            VALUE "InternalName", "gospeak-client-win.exe\0"
+            VALUE "OriginalFilename", "gospeak-client-win.exe\0"
+            VALUE "ProductName", "GoSpeak\0"
+            VALUE "ProductVersion", "@DISPLAY_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
