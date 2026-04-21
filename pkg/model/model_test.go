@@ -108,3 +108,69 @@ func TestParseRole(t *testing.T) {
 		})
 	}
 }
+
+func TestChannelValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel *Channel
+		wantErr error
+	}{
+		{
+			"valid channel",
+			&Channel{
+				Name:        "General",
+				Description: "Main channel",
+				MaxUsers:    50,
+			},
+			nil,
+		},
+		{
+			"empty name",
+			&Channel{
+				Name:        "",
+				Description: "Bad",
+			},
+			ErrChannelNameEmpty,
+		},
+		{
+			"name too long",
+			&Channel{
+				Name: strings.Repeat("a", MaxChannelNameLength+1),
+			},
+			ErrChannelNameTooLong,
+		},
+		{
+			"description too long",
+			&Channel{
+				Name:        "Valid",
+				Description: strings.Repeat("x", MaxChannelDescLength+1),
+			},
+			ErrChannelDescTooLong,
+		},
+		{
+			"max users negative",
+			&Channel{
+				Name:     "Bad",
+				MaxUsers: -1,
+			},
+			ErrChannelMaxUsers,
+		},
+		{
+			"max users too high",
+			&Channel{
+				Name:     "Bad",
+				MaxUsers: MaxChannelUsers + 1,
+			},
+			ErrChannelMaxUsers,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.channel.Validate()
+			if err != tt.wantErr {
+				t.Errorf("Validate() = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
