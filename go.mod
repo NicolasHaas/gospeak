@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	fyne.io/fyne/v2 v2.7.2
+	github.com/google/go-cmp v0.7.0
 	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	golang.org/x/crypto v0.48.0
@@ -27,7 +28,6 @@ require (
 	github.com/go-text/render v0.2.0 // indirect
 	github.com/go-text/typesetting v0.2.1 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hack-pad/go-indexeddb v0.3.2 // indirect
 	github.com/hack-pad/safejs v0.1.0 // indirect
