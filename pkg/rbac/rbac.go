@@ -52,6 +52,7 @@ func RequirePermission(role model.Role, perm Permission) string {
 	return "permission denied: " + permName(perm) + " requires higher role"
 }
 
+// permName returns a human-readable string for a Permission value.
 func permName(p Permission) string {
 	switch p {
 	case PermCreateChannel:
