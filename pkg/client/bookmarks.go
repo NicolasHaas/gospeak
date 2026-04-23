@@ -2,7 +2,6 @@ package client
 
 import (
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,26 +16,38 @@ type Bookmark struct {
 	LastUsed    int64  `yaml:"last_used,omitempty"`
 }
 
-// BookmarkStore manages server bookmarks stored next to the binary.
+// BookmarkStore manages server bookmarks stored in the user config directory.
 type BookmarkStore struct {
 	path      string
 	Bookmarks []Bookmark `yaml:"bookmarks"`
 }
 
-// NewBookmarkStore creates a bookmark store using a file next to the executable.
+// NewBookmarkStore creates a bookmark store in the user config directory.
 func NewBookmarkStore() *BookmarkStore {
-	exePath, err := os.Executable()
-	if err != nil {
-		exePath = "."
+	path, err := configFilePath(bookmarksFileName)
+	if err != nil && path == "" {
+		path = bookmarksFileName
 	}
-	dir := filepath.Dir(exePath)
+
 	return &BookmarkStore{
-		path: filepath.Join(dir, "servers.yaml"),
+		path: path,
 	}
 }
 
 // Load reads bookmarks from disk. Returns empty list if file doesn't exist.
 func (bs *BookmarkStore) Load() error {
+	if bs.path == "" {
+		path, err := configFilePath(bookmarksFileName)
+		if path == "" {
+			return err
+		}
+		bs.path = path
+	}
+
+	if err := migrateLegacyConfigFile(bs.path, bookmarksFileName); err != nil {
+		return err
+	}
+
 	data, err := os.ReadFile(bs.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -50,8 +61,19 @@ func (bs *BookmarkStore) Load() error {
 
 // Save writes bookmarks to disk.
 func (bs *BookmarkStore) Save() error {
+	if bs.path == "" {
+		path, err := configFilePath(bookmarksFileName)
+		if path == "" {
+			return err
+		}
+		bs.path = path
+	}
+
 	data, err := yaml.Marshal(bs)
 	if err != nil {
+		return err
+	}
+	if err := ensureParentDir(bs.path); err != nil {
 		return err
 	}
 	return os.WriteFile(bs.path, data, 0600)

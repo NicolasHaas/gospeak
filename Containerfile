@@ -104,8 +104,22 @@ COPY . .
 RUN VERSION_PKG="github.com/NicolasHaas/gospeak/pkg/version" && \
     TAG=$(git describe --tags --exact-match 2>/dev/null || true) && \
     COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) && \
+    DISPLAY_VERSION="$TAG" && \
+    if [ -z "$DISPLAY_VERSION" ]; then DISPLAY_VERSION="$COMMIT"; fi && \
+    if [ -z "$DISPLAY_VERSION" ] || [ "$DISPLAY_VERSION" = "unknown" ]; then DISPLAY_VERSION=dev; fi && \
     DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    echo "-X ${VERSION_PKG}.tag=${TAG} -X ${VERSION_PKG}.commit=${COMMIT} -X ${VERSION_PKG}.date=${DATE}" > /tmp/version-ldflags
+    VERSION_RAW=${TAG#v} && \
+    V1=0 && V2=0 && V3=0 && V4=0 && \
+    if printf '%s' "$VERSION_RAW" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$'; then \
+        V1=$(printf '%s' "$VERSION_RAW" | cut -d. -f1) && \
+        V2=$(printf '%s' "$VERSION_RAW" | cut -d. -f2) && \
+        V3=$(printf '%s' "$VERSION_RAW" | cut -d. -f3) && \
+        V4=$(printf '%s' "$VERSION_RAW" | cut -d. -f4); \
+    fi && \
+    : ${V1:=0} ${V2:=0} ${V3:=0} ${V4:=0} && \
+    echo "-X ${VERSION_PKG}.tag=${TAG} -X ${VERSION_PKG}.commit=${COMMIT} -X ${VERSION_PKG}.date=${DATE}" > /tmp/version-ldflags && \
+    printf '%s,%s,%s,%s' "$V1" "$V2" "$V3" "$V4" > /tmp/windows-file-version && \
+    printf '%s\n' "$DISPLAY_VERSION" > /tmp/windows-display-version
 
 # Build server (Linux)
 RUN CGO_ENABLED=1 go build -o /out/gospeak-server \
@@ -123,6 +137,14 @@ RUN CGO_ENABLED=1 go build -o /out/gospeak-client-lin \
     -tags nolibopusfile \
     -ldflags="-s -w $(cat /tmp/version-ldflags)" \
     ./cmd/client/
+
+# Generate Windows EXE resources (icon + version metadata)
+RUN sed \
+        -e "s|@ICON_PATH@|ui/gospeak-client.ico|g" \
+        -e "s|@FILE_VERSION@|$(cat /tmp/windows-file-version)|g" \
+        -e "s|@DISPLAY_VERSION@|$(cat /tmp/windows-display-version)|g" \
+        packaging/windows/gospeak-client.rc.in > /tmp/gospeak-client.rc && \
+    x86_64-w64-mingw32-windres /tmp/gospeak-client.rc -O coff -o cmd/client/gospeak_client_windows_amd64.syso
 
 # Build Windows client
 RUN PKG_CONFIG_PATH=/win-deps/lib/pkgconfig \

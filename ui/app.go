@@ -72,7 +72,7 @@ func NewApp() *App {
 	audio.PreInitAudio()
 
 	a := &App{
-		fyneApp:   app.NewWithID("io.gospeak.client"),
+		fyneApp:   app.NewWithID(AppID),
 		engine:    client.NewEngine(),
 		bookmarks: client.NewBookmarkStore(),
 		settings:  client.LoadSettings(),
@@ -80,11 +80,11 @@ func NewApp() *App {
 	}
 	a.bookmarks.Load() //nolint:errcheck,gosec // best-effort load
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
-	a.window = a.fyneApp.NewWindow("GoSpeak")
+	a.window = a.fyneApp.NewWindow(AppName)
 	a.window.Resize(fyne.NewSize(800, 600))
 	a.window.SetMaster()
 	if len(appIconBytes) > 0 {
-		iconRes := fyne.NewStaticResource("gospeak-icon.png", appIconBytes)
+		iconRes := fyne.NewStaticResource(AppIconSourceName, appIconBytes)
 		a.window.SetIcon(iconRes)
 		a.fyneApp.SetIcon(iconRes)
 	}

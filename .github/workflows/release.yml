@@ -27,6 +27,70 @@ jobs:
           docker cp "$CONTAINER_ID:/out/gospeak-client-win.exe" ./bin/gospeak-client-win.exe
           docker rm "$CONTAINER_ID"
 
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            bin/gospeak-server
+            bin/gospeak-server-win.exe
+            bin/gospeak-client-lin
+            bin/gospeak-client-win.exe
+
+  windows-installer:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    needs: binaries
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: bin
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $exePath = (Resolve-Path "bin/gospeak-client-win.exe").Path
+          $iconPath = (Resolve-Path "ui/gospeak-client.ico").Path
+          $appVersion = $env:GITHUB_REF_NAME
+          if ($appVersion.StartsWith("v")) { $appVersion = $appVersion.Substring(1) }
+          & $iscc "/DAppVersion=$appVersion" "/DAppExePath=$exePath" "/DSetupIconFile=$iconPath" packaging/windows/gospeak-client.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-installer
+          path: bin/gospeak-client-installer-win.exe
+
+  release:
+    name: Publish GitHub Release Assets
+    runs-on: ubuntu-latest
+    needs: [binaries, windows-installer]
+    steps:
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: bin
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-installer
+          path: bin
+
       - name: Generate checksums
         run: |
           cd bin
@@ -42,6 +106,7 @@ jobs:
             bin/gospeak-server-win.exe
             bin/gospeak-client-lin
             bin/gospeak-client-win.exe
+            bin/gospeak-client-installer-win.exe
             bin/checksums-sha256.txt
 
   container:
