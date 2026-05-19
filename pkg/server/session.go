@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"net"
 	"sync"
 
@@ -17,14 +18,15 @@ type SessionManager struct {
 
 // SessionSnapshot is an immutable view of a session.
 type SessionSnapshot struct {
-	ID        uint32
-	UserID    int64
-	Username  string
-	Role      model.Role
-	ChannelID int64
-	UDPAddr   *net.UDPAddr
-	Muted     bool
-	Deafened  bool
+	ID              uint32
+	UserID          int64
+	Username        string
+	Role            model.Role
+	ChannelID       int64
+	ScreenAuthToken string
+	UDPAddr         *net.UDPAddr
+	Muted           bool
+	Deafened        bool
 }
 
 // NewSessionManager creates a new session manager.
@@ -55,10 +57,11 @@ func (sm *SessionManager) Create(userID int64, username string, role model.Role)
 	}
 
 	sess := &model.Session{
-		ID:       id,
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		ID:              id,
+		UserID:          userID,
+		Username:        username,
+		Role:            role,
+		ScreenAuthToken: newScreenAuthToken(),
 	}
 	sm.sessions[id] = sess
 	return sess
@@ -73,14 +76,15 @@ func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) 
 		return SessionSnapshot{}, false
 	}
 	return SessionSnapshot{
-		ID:        s.ID,
-		UserID:    s.UserID,
-		Username:  s.Username,
-		Role:      s.Role,
-		ChannelID: s.ChannelID,
-		UDPAddr:   cloneUDPAddr(s.UDPAddr),
-		Muted:     s.Muted,
-		Deafened:  s.Deafened,
+		ID:              s.ID,
+		UserID:          s.UserID,
+		Username:        s.Username,
+		Role:            s.Role,
+		ChannelID:       s.ChannelID,
+		ScreenAuthToken: s.ScreenAuthToken,
+		UDPAddr:         cloneUDPAddr(s.UDPAddr),
+		Muted:           s.Muted,
+		Deafened:        s.Deafened,
 	}, true
 }
 
@@ -91,18 +95,27 @@ func (sm *SessionManager) GetByUserIDSnapshot(userID int64) (SessionSnapshot, bo
 	for _, s := range sm.sessions {
 		if s.UserID == userID {
 			return SessionSnapshot{
-				ID:        s.ID,
-				UserID:    s.UserID,
-				Username:  s.Username,
-				Role:      s.Role,
-				ChannelID: s.ChannelID,
-				UDPAddr:   cloneUDPAddr(s.UDPAddr),
-				Muted:     s.Muted,
-				Deafened:  s.Deafened,
+				ID:              s.ID,
+				UserID:          s.UserID,
+				Username:        s.Username,
+				Role:            s.Role,
+				ChannelID:       s.ChannelID,
+				ScreenAuthToken: s.ScreenAuthToken,
+				UDPAddr:         cloneUDPAddr(s.UDPAddr),
+				Muted:           s.Muted,
+				Deafened:        s.Deafened,
 			}, true
 		}
 	}
 	return SessionSnapshot{}, false
+}
+
+// ValidateScreenAuth reports whether the session exists and the auth token matches.
+func (sm *SessionManager) ValidateScreenAuth(sessionID uint32, token string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	s, ok := sm.sessions[sessionID]
+	return ok && s.ScreenAuthToken == token
 }
 
 // Remove removes a session.
@@ -165,4 +178,12 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 		clone.IP = append([]byte(nil), addr.IP...)
 	}
 	return &clone
+}
+
+func newScreenAuthToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failure: " + err.Error())
+	}
+	return hex.EncodeToString(b)
 }

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package gospeak;
 
-option go_package = "github.com/nicolascb/gospeak/pkg/protocol/pb";
+option go_package = "github.com/NicolasHaas/gospeak/pkg/protocol/pb";
 
 // ----- Envelope -----
 
@@ -32,6 +32,19 @@ message ControlMessage {
     CreateTokenResponse   create_token_response   = 33;
     KickUserRequest       kick_user_request       = 34;
     BanUserRequest        ban_user_request        = 35;
+    ChatMessage           chat_message            = 36;
+    ChatMessage           chat_event              = 37;
+    ScreenShareStartRequest        screen_share_start_request         = 38;
+    ScreenShareStopRequest         screen_share_stop_request          = 39;
+    ScreenShareSubscribeRequest    screen_share_subscribe_request     = 40;
+    ScreenShareUnsubscribeRequest  screen_share_unsubscribe_request   = 41;
+    ScreenShareEvent               screen_share_event                 = 42;
+    SetUserRoleRequest             set_user_role_request              = 43;
+    SetUserRoleResponse            set_user_role_response             = 44;
+    ExportDataRequest              export_data_request                = 45;
+    ExportDataResponse             export_data_response               = 46;
+    ImportChannelsRequest          import_channels_request            = 47;
+    ImportChannelsResponse         import_channels_response           = 48;
 
     // Generic
     ErrorResponse       error_response        = 50;
@@ -53,6 +66,10 @@ message AuthResponse {
   string role           = 3; // "admin", "moderator", "user"
   bytes  encryption_key = 4; // AES-128 key for voice UDP
   repeated ChannelInfo channels = 5; // initial channel list
+  string screen_addr = 6;
+  string screen_auth_token = 7;
+  bool screen_share_enabled = 8;
+  string auto_token = 9;
 }
 
 // ----- Channels -----
@@ -62,7 +79,10 @@ message ChannelInfo {
   string name        = 2;
   string description = 3;
   int32  max_users   = 4;
-  repeated UserInfo users = 5; // users currently in channel
+  int64 parent_id = 5;
+  bool is_temp = 6;
+  bool allow_sub_channels = 7;
+  repeated UserInfo users = 8; // users currently in channel
 }
 
 message UserInfo {
@@ -105,6 +125,7 @@ message UserStateUpdate {
 
 message ServerStateEvent {
   repeated ChannelInfo channels = 1;
+  bool screen_share_enabled = 2;
 }
 
 // ----- Admin -----
@@ -113,6 +134,9 @@ message CreateChannelRequest {
   string name        = 1;
   string description = 2;
   int32  max_users   = 3;
+  int64 parent_id = 4;
+  bool is_temp = 5;
+  bool allow_sub_channels = 6;
 }
 
 message DeleteChannelRequest {
@@ -139,6 +163,68 @@ message BanUserRequest {
   int64  user_id    = 1;
   string reason     = 2;
   int64  duration_seconds = 3; // 0 = permanent
+}
+
+message ChatMessage {
+  int64 channel_id = 1;
+  int64 sender_id = 2;
+  string sender_name = 3;
+  string text = 4;
+  int64 timestamp = 5;
+}
+
+message ScreenShareStartRequest {
+  int32 display_index = 1;
+  int32 width = 2;
+  int32 height = 3;
+}
+
+message ScreenShareStopRequest {}
+
+message ScreenShareSubscribeRequest {
+  int64 channel_id = 1;
+}
+
+message ScreenShareUnsubscribeRequest {}
+
+message ScreenShareEvent {
+  int64 channel_id = 1;
+  uint32 session_id = 2;
+  int64 user_id = 3;
+  string username = 4;
+  bool active = 5;
+  int32 width = 6;
+  int32 height = 7;
+  int32 viewers = 8;
+  bytes encryption_key = 9;
+}
+
+message SetUserRoleRequest {
+  int64 target_user_id = 1;
+  string new_role = 2;
+}
+
+message SetUserRoleResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ExportDataRequest {
+  string type = 1;
+}
+
+message ExportDataResponse {
+  string type = 1;
+  string data = 2;
+}
+
+message ImportChannelsRequest {
+  string yaml = 1;
+}
+
+message ImportChannelsResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 // ----- Generic -----

@@ -57,6 +57,20 @@ func (ch *ControlHandler) removeConn(sessionID uint32) {
 	ch.mu.Unlock()
 }
 
+func (ch *ControlHandler) sendToSession(sessionID uint32, msg *pb.ControlMessage) bool {
+	ch.mu.RLock()
+	conn, ok := ch.connMap[sessionID]
+	ch.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	if err := protocol.WriteControlMessage(conn, msg); err != nil {
+		slog.Error("direct write failed", "session", sessionID, "err", err)
+		return false
+	}
+	return true
+}
+
 // broadcastToChannel sends a control message to all sessions in a channel.
 func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMessage, excludeSession uint32) {
 	members := ch.server.channels.Members(channelID)
@@ -243,8 +257,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 
 	handler.setConn(sessionID, conn)
 	defer func() {
+		stopEvent, stopped := s.screenShare.StopBySession(sessionID)
 		// Cleanup on disconnect
 		chID := s.channels.Leave(sessionID)
+		if stopped && stopEvent != nil {
+			s.metrics.ScreenSharesStopped.Add(1)
+			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
+			slog.Info("screen share stopped", "user", user.Username, "session", sessionID, "channel", stopEvent.ChannelID, "reason", "disconnect")
+			handler.broadcastToChannel(stopEvent.ChannelID, &pb.ControlMessage{ScreenShareEvent: stopEvent}, sessionID)
+		} else {
+			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
+		}
 		handler.removeConn(sessionID)
 		s.sessions.Remove(sessionID)
 		s.metrics.ActiveConnections.Add(-1)
@@ -275,12 +298,15 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	// Send auth response
 	authResp := &pb.ControlMessage{
 		AuthResponse: &pb.AuthResponse{
-			SessionID:     sessionID,
-			Username:      user.Username,
-			Role:          sessionRole.String(),
-			EncryptionKey: s.voiceKey,
-			Channels:      channelInfos,
-			AutoToken:     autoToken,
+			SessionID:          sessionID,
+			Username:           user.Username,
+			Role:               sessionRole.String(),
+			EncryptionKey:      s.voiceKey,
+			Channels:           channelInfos,
+			ScreenAddr:         s.cfg.ScreenAddr,
+			ScreenAuthToken:    session.ScreenAuthToken,
+			ScreenShareEnabled: s.cfg.EnableScreenShare,
+			AutoToken:          autoToken,
 		},
 	}
 	if err := protocol.WriteControlMessage(conn, authResp); err != nil {
@@ -345,6 +371,18 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 	case msg.ChatMsg != nil:
 		s.handleChatMessage(handler, sessionID, msg.ChatMsg)
 
+	case msg.ScreenShareStartReq != nil:
+		s.handleScreenShareStart(handler, sessionID, msg.ScreenShareStartReq, conn)
+
+	case msg.ScreenShareStopReq != nil:
+		s.handleScreenShareStop(handler, sessionID)
+
+	case msg.ScreenShareSubReq != nil:
+		s.handleScreenShareSubscribe(handler, sessionID, msg.ScreenShareSubReq, conn)
+
+	case msg.ScreenShareUnsubReq != nil:
+		s.handleScreenShareUnsubscribe(sessionID)
+
 	case msg.SetUserRoleReq != nil:
 		s.handleSetUserRole(handler, sessionID, msg.SetUserRoleReq, st, conn)
 
@@ -381,7 +419,13 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 	}
 
 	prevCh := s.channels.Join(session.ID, ch.ID)
+	if prevCh > 0 {
+		if stopEvent, stopped := s.screenShare.StopBySession(session.ID); stopped && stopEvent != nil {
+			handler.broadcastToChannel(prevCh, &pb.ControlMessage{ScreenShareEvent: stopEvent}, session.ID)
+		}
+	}
 	s.sessions.SetChannel(session.ID, ch.ID)
+	s.screenShare.Unsubscribe(session.ID)
 
 	// Notify old channel
 	if prevCh > 0 {
@@ -410,6 +454,9 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 
 	// Send full server state to the joining user
 	s.sendServerState(st, conn)
+	if active, ok := s.screenShare.ActiveForChannel(ch.ID); ok {
+		handler.sendToSession(session.ID, &pb.ControlMessage{ScreenShareEvent: active})
+	}
 
 	// Broadcast updated state to ALL clients so everyone sees the new member
 	s.broadcastServerState(st, handler)
@@ -421,7 +468,17 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 		sendError(conn, 3, "session not found")
 		return
 	}
-	chID := s.channels.Leave(session.ID)
+	chID := session.ChannelID
+	if stopEvent, stopped := s.screenShare.StopBySession(session.ID); stopped && stopEvent != nil {
+		s.metrics.ScreenSharesStopped.Add(1)
+		s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
+		slog.Info("screen share stopped", "user", session.Username, "session", session.ID, "channel", chID, "reason", "leave")
+		handler.broadcastToChannel(chID, &pb.ControlMessage{ScreenShareEvent: stopEvent}, session.ID)
+	} else {
+		s.screenShare.Unsubscribe(session.ID)
+		s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
+	}
+	chID = s.channels.Leave(session.ID)
 	s.sessions.SetChannel(session.ID, 0)
 
 	if chID > 0 {
@@ -764,7 +821,7 @@ func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
 	})
 }
 
@@ -773,7 +830,7 @@ func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler 
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
 	}
 	handler.mu.RLock()
 	for _, conn := range handler.connMap {

@@ -92,6 +92,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	write("gospeak_chat_messages_total", "Total chat messages relayed.", "counter",
 		m.ChatMessagesSent.Load())
 
+	write("gospeak_screen_shares_started_total", "Screen shares started.", "counter",
+		m.ScreenSharesStarted.Load())
+	write("gospeak_screen_shares_stopped_total", "Screen shares stopped.", "counter",
+		m.ScreenSharesStopped.Load())
+	write("gospeak_screen_share_frames_in_total", "Screen share frames received from sharers.", "counter",
+		m.ScreenShareFramesIn.Load())
+	write("gospeak_screen_share_frames_out_total", "Screen share frames forwarded to viewers.", "counter",
+		m.ScreenShareFramesOut.Load())
+	write("gospeak_screen_share_bytes_in_total", "Screen share bytes received from sharers.", "counter",
+		m.ScreenShareBytesIn.Load())
+	write("gospeak_screen_share_bytes_out_total", "Screen share bytes forwarded to viewers.", "counter",
+		m.ScreenShareBytesOut.Load())
+	write("gospeak_screen_share_subscribers", "Current active screen share subscribers.", "gauge",
+		m.ScreenShareSubscribers.Load())
+
 	write("gospeak_channels_created_total", "Channels created.", "counter",
 		m.ChannelsCreated.Load())
 	write("gospeak_channels_deleted_total", "Channels deleted.", "counter",

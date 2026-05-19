@@ -25,6 +25,7 @@ services:
     ports:
       - "9600:9600"      # TCP/TLS control plane
       - "9601:9601/udp"  # UDP voice plane
+      - "9603:9603"      # TCP/TLS screen-share plane (used when -screen-share is enabled)
       - "9602:9602"      # Prometheus /metrics HTTP
     volumes:
       - ./data:/data

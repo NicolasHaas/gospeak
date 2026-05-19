@@ -1,15 +1,23 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"log/slog"
+	"math"
+	"net"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/audio"
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
+	"github.com/NicolasHaas/gospeak/pkg/screenshare"
 )
 
 // State represents the client's connection state.
@@ -35,6 +43,7 @@ type Engine struct {
 
 	control *ControlClient
 	voice   *VoiceClient
+	screen  *ScreenClient
 	cipher  *gospeakCrypto.VoiceCipher
 
 	capture  audio.Capturer
@@ -53,22 +62,34 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	screenMu           sync.Mutex
+	screenSharePending bool
+	screenShareRunning bool
+	screenShareDisplay int
+	screenShareCancel  context.CancelFunc
+	screenCipher       *gospeakCrypto.VoiceCipher
+	screenSeqNum       uint32
+	activeScreenShare  *pb.ScreenShareEvent
+	screenShareEnabled bool
+
 	// Audio initialization function (allows platform-specific audio backends)
 	initAudioFn func() error
 
 	// Callbacks for UI updates
-	OnStateChange    func(state State)
-	OnChannelsUpdate func(channels []pb.ChannelInfo)
-	OnError          func(err error)
-	OnVoiceActivity  func(active bool)
-	OnRMSLevel       func(level float64)
-	OnDisconnect     func(reason string)
-	OnChatMessage    func(channelID int64, sender, text string, ts int64)
-	OnTokenCreated   func(token string)
-	OnRoleChanged    func(success bool, message string)
-	OnAutoToken      func(token string) // called when server auto-generates a token for this user
-	OnExportData     func(dataType, data string)
-	OnImportResult   func(success bool, message string)
+	OnStateChange      func(state State)
+	OnChannelsUpdate   func(channels []pb.ChannelInfo)
+	OnError            func(err error)
+	OnVoiceActivity    func(active bool)
+	OnRMSLevel         func(level float64)
+	OnDisconnect       func(reason string)
+	OnChatMessage      func(channelID int64, sender, text string, ts int64)
+	OnScreenShareEvent func(event *pb.ScreenShareEvent)
+	OnScreenFrame      func(img image.Image)
+	OnTokenCreated     func(token string)
+	OnRoleChanged      func(success bool, message string)
+	OnAutoToken        func(token string) // called when server auto-generates a token for this user
+	OnExportData       func(dataType, data string)
+	OnImportResult     func(success bool, message string)
 }
 
 // NewEngine creates a new client engine.
@@ -143,14 +164,35 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		return err
 	}
 
+	var screen *ScreenClient
+	if authResp.ScreenShareEnabled {
+		screenAddr, err := resolveAdvertisedAddr(controlAddr, authResp.ScreenAddr, "9603")
+		if err != nil {
+			_ = ctrl.Close()
+			_ = voice.Close()
+			e.setState(StateDisconnected)
+			return fmt.Errorf("resolve screen address: %w", err)
+		} else {
+			screen, err = NewScreenClient(screenAddr, authResp.SessionID, authResp.ScreenAuthToken)
+			if err != nil {
+				_ = ctrl.Close()
+				_ = voice.Close()
+				e.setState(StateDisconnected)
+				return fmt.Errorf("connect screen plane: %w", err)
+			}
+		}
+	}
+
 	e.mu.Lock()
 	e.control = ctrl
 	e.voice = voice
+	e.screen = screen
 	e.cipher = cipher
 	e.sessionID = authResp.SessionID
 	e.username = authResp.Username
 	e.role = authResp.Role
 	e.channels = authResp.Channels
+	e.screenShareEnabled = authResp.ScreenShareEnabled
 	e.state = StateConnected
 	e.mu.Unlock()
 
@@ -158,6 +200,14 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 	ctrl.SetEventHandler(e.handleEvent)
 	ctrl.StartReceiving()
 	voice.StartReceiving()
+	if screen != nil {
+		screen.SetPacketHandler(e.handleScreenPacket)
+		screen.StartReceiving()
+		go func() {
+			<-screen.Done()
+			e.handleScreenDisconnect()
+		}()
+	}
 
 	// Report connected immediately — audio init happens in background
 	e.notifyStateChange(StateConnected)
@@ -243,7 +293,6 @@ func (e *Engine) captureLoop() {
 		muted := e.muted
 		channelID := e.channelID
 		e.mu.RUnlock()
-
 		if capture == nil || encoder == nil || voice == nil {
 			return
 		}
@@ -379,6 +428,7 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 	case msg.ServerStateEvent != nil:
 		e.mu.Lock()
 		e.channels = msg.ServerStateEvent.Channels
+		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled
 		e.mu.Unlock()
 		if e.OnChannelsUpdate != nil {
 			e.OnChannelsUpdate(msg.ServerStateEvent.Channels)
@@ -404,6 +454,12 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 
 	case msg.ErrorResponse != nil:
 		slog.Error("server error", "code", msg.ErrorResponse.Code, "msg", msg.ErrorResponse.Message)
+		if msg.ErrorResponse.Code == 40 && strings.Contains(strings.ToLower(msg.ErrorResponse.Message), "screen") {
+			e.stopScreenShareLoop()
+			e.screenMu.Lock()
+			e.screenSharePending = false
+			e.screenMu.Unlock()
+		}
 		if msg.ErrorResponse.Code == 99 {
 			// Kicked or banned
 			e.handleDisconnect(msg.ErrorResponse.Message)
@@ -425,6 +481,9 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 		if e.OnChatMessage != nil {
 			e.OnChatMessage(msg.ChatEvent.ChannelID, msg.ChatEvent.SenderName, msg.ChatEvent.Text, msg.ChatEvent.Timestamp)
 		}
+
+	case msg.ScreenShareEvent != nil:
+		e.handleScreenShareEvent(msg.ScreenShareEvent)
 
 	case msg.SetUserRoleResp != nil:
 		if e.OnRoleChanged != nil {
@@ -666,6 +725,96 @@ func (e *Engine) SendChat(text string) error {
 	})
 }
 
+// StartScreenShare announces a screen share and begins streaming once the server confirms it.
+func (e *Engine) StartScreenShare(displayIndex int) error {
+	e.mu.RLock()
+	ctrl := e.control
+	channelID := e.channelID
+	e.mu.RUnlock()
+
+	if ctrl == nil {
+		return fmt.Errorf("not connected")
+	}
+	if channelID == 0 {
+		return fmt.Errorf("not in a channel")
+	}
+
+	img, err := screenshare.CaptureDisplay(displayIndex)
+	if err != nil {
+		return fmt.Errorf("capture display: %w", err)
+	}
+	_, width, height, err := screenshare.EncodeJPEG(img, screenshare.DefaultMaxWidth, screenshare.DefaultJPEGQuality)
+	if err != nil {
+		return fmt.Errorf("prepare screen share: %w", err)
+	}
+
+	e.screenMu.Lock()
+	if e.screenShareRunning || e.screenSharePending {
+		e.screenMu.Unlock()
+		return fmt.Errorf("screen share already active")
+	}
+	e.screenSharePending = true
+	e.screenShareDisplay = displayIndex
+	e.screenMu.Unlock()
+
+	if displayIndex < 0 || displayIndex > math.MaxInt32 {
+		e.screenMu.Lock()
+		e.screenSharePending = false
+		e.screenMu.Unlock()
+		return fmt.Errorf("display index out of range: %d", displayIndex)
+	}
+
+	if err := ctrl.Send(&pb.ControlMessage{
+		ScreenShareStartReq: &pb.ScreenShareStartRequest{
+			DisplayIndex: int32(displayIndex),
+			Width:        width,
+			Height:       height,
+		},
+	}); err != nil {
+		e.screenMu.Lock()
+		e.screenSharePending = false
+		e.screenMu.Unlock()
+		return err
+	}
+
+	return nil
+}
+
+func (e *Engine) StopScreenShare() error {
+	e.stopScreenShareLoop()
+	e.screenMu.Lock()
+	e.screenSharePending = false
+	e.screenMu.Unlock()
+
+	e.mu.RLock()
+	ctrl := e.control
+	e.mu.RUnlock()
+	if ctrl == nil {
+		return fmt.Errorf("not connected")
+	}
+	return ctrl.Send(&pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}})
+}
+
+func (e *Engine) SubscribeScreenShare(channelID int64) error {
+	e.mu.RLock()
+	ctrl := e.control
+	e.mu.RUnlock()
+	if ctrl == nil {
+		return fmt.Errorf("not connected")
+	}
+	return ctrl.Send(&pb.ControlMessage{ScreenShareSubReq: &pb.ScreenShareSubscribeRequest{ChannelID: channelID}})
+}
+
+func (e *Engine) UnsubscribeScreenShare() error {
+	e.mu.RLock()
+	ctrl := e.control
+	e.mu.RUnlock()
+	if ctrl == nil {
+		return fmt.Errorf("not connected")
+	}
+	return ctrl.Send(&pb.ControlMessage{ScreenShareUnsubReq: &pb.ScreenShareUnsubscribeRequest{}})
+}
+
 // SetUserRole sends a role change request (admin only).
 func (e *Engine) SetUserRole(targetUserID int64, newRole string) error {
 	e.mu.RLock()
@@ -733,6 +882,20 @@ func (e *Engine) GetUsername() string {
 	return e.username
 }
 
+// GetSessionID returns the authenticated session ID.
+func (e *Engine) GetSessionID() uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.sessionID
+}
+
+// IsScreenShareEnabled returns whether the server advertised screen sharing support.
+func (e *Engine) IsScreenShareEnabled() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.screenShareEnabled
+}
+
 // GetRole returns the user's role.
 func (e *Engine) GetRole() string {
 	e.mu.RLock()
@@ -792,12 +955,21 @@ func (e *Engine) handleDisconnect(reason string) {
 	voice := e.voice
 	capture := e.capture
 	playback := e.playback
+	screen := e.screen
 
 	e.control = nil
 	e.voice = nil
+	e.screen = nil
 	e.capture = nil
 	e.playback = nil
+	e.activeScreenShare = nil
+	e.screenShareEnabled = false
 	e.mu.Unlock()
+	e.stopScreenShareLoop()
+	e.screenMu.Lock()
+	e.screenCipher = nil
+	e.screenSeqNum = 0
+	e.screenMu.Unlock()
 
 	// Clean up resources
 	if playback != nil {
@@ -808,6 +980,9 @@ func (e *Engine) handleDisconnect(reason string) {
 	}
 	if voice != nil {
 		_ = voice.Close()
+	}
+	if screen != nil {
+		_ = screen.Close()
 	}
 	if ctrl != nil {
 		_ = ctrl.Close()
@@ -826,6 +1001,206 @@ func (e *Engine) handleDisconnect(reason string) {
 	}
 }
 
+func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
+	e.mu.Lock()
+	e.activeScreenShare = event
+	mySessionID := e.sessionID
+	channelID := e.channelID
+	e.mu.Unlock()
+
+	if event.SessionID == mySessionID {
+		if event.Active {
+			e.screenMu.Lock()
+			pending := e.screenSharePending
+			e.screenMu.Unlock()
+			if pending {
+				e.startScreenShareLoop()
+			}
+		} else {
+			e.stopScreenShareLoop()
+			e.screenMu.Lock()
+			e.screenSharePending = false
+			e.screenMu.Unlock()
+		}
+	}
+
+	e.screenMu.Lock()
+	if !event.Active {
+		if e.activeScreenShare == nil || e.activeScreenShare.SessionID == event.SessionID {
+			e.screenCipher = nil
+			e.screenSeqNum = 0
+		}
+	} else if len(event.EncryptionKey) > 0 {
+		cipher, err := gospeakCrypto.NewVoiceCipher(event.EncryptionKey)
+		if err != nil {
+			e.screenMu.Unlock()
+			slog.Error("screen cipher init failed", "err", err)
+			return
+		}
+		e.screenCipher = cipher
+		e.screenSeqNum = 0
+	} else if e.activeScreenShare == nil || e.activeScreenShare.SessionID != event.SessionID {
+		e.screenCipher = nil
+		e.screenSeqNum = 0
+	}
+	e.screenMu.Unlock()
+
+	if !event.Active && e.OnScreenFrame != nil {
+		e.OnScreenFrame(nil)
+	}
+	if event.ChannelID != 0 && channelID != 0 && event.ChannelID != channelID {
+		return
+	}
+	if e.OnScreenShareEvent != nil {
+		e.OnScreenShareEvent(event)
+	}
+}
+
+func (e *Engine) handleScreenPacket(pkt *protocol.ScreenPacket) {
+	e.screenMu.Lock()
+	cipher := e.screenCipher
+	event := e.activeScreenShare
+	e.screenMu.Unlock()
+	if cipher == nil || event == nil || !event.Active || pkt == nil || pkt.SessionID != event.SessionID {
+		return
+	}
+	frameData, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), pkt.Payload)
+	if err != nil {
+		slog.Debug("screen frame decrypt error", "err", err)
+		return
+	}
+	frame, err := protocol.UnmarshalScreenFrame(frameData)
+	if err != nil {
+		slog.Debug("screen frame unmarshal error", "err", err)
+		return
+	}
+	img, _, err := image.Decode(bytes.NewReader(frame.Data))
+	if err != nil {
+		slog.Debug("screen frame decode error", "err", err)
+		return
+	}
+	if e.OnScreenFrame != nil {
+		e.OnScreenFrame(img)
+	}
+}
+
+func (e *Engine) startScreenShareLoop() {
+	e.screenMu.Lock()
+	if e.screenShareRunning {
+		e.screenSharePending = false
+		e.screenMu.Unlock()
+		return
+	}
+	displayIndex := e.screenShareDisplay
+	ctx, cancel := context.WithCancel(e.ctx)
+	e.screenShareCancel = cancel
+	e.screenShareRunning = true
+	e.screenSharePending = false
+	e.screenMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		defer e.stopScreenShareLoop()
+
+		for {
+			if err := e.sendScreenShareFrame(displayIndex); err != nil {
+				slog.Debug("screen share send failed", "err", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (e *Engine) stopScreenShareLoop() {
+	e.screenMu.Lock()
+	cancel := e.screenShareCancel
+	e.screenShareCancel = nil
+	e.screenShareRunning = false
+	e.screenSharePending = false
+	e.screenMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (e *Engine) handleScreenDisconnect() {
+	e.mu.Lock()
+	if e.state == StateDisconnected || e.screen == nil {
+		e.mu.Unlock()
+		return
+	}
+	e.screen = nil
+	e.screenShareEnabled = false
+	e.activeScreenShare = nil
+	e.mu.Unlock()
+
+	e.stopScreenShareLoop()
+	e.screenMu.Lock()
+	e.screenCipher = nil
+	e.screenSeqNum = 0
+	e.screenMu.Unlock()
+
+	if e.OnScreenFrame != nil {
+		e.OnScreenFrame(nil)
+	}
+	if e.OnScreenShareEvent != nil {
+		e.OnScreenShareEvent(&pb.ScreenShareEvent{Active: false})
+	}
+	if e.OnChannelsUpdate != nil {
+		e.OnChannelsUpdate(e.GetChannels())
+	}
+	if e.OnError != nil {
+		e.OnError(fmt.Errorf("screen share connection lost"))
+	}
+}
+
+func (e *Engine) sendScreenShareFrame(displayIndex int) error {
+	e.mu.RLock()
+	screen := e.screen
+	sessionID := e.sessionID
+	e.mu.RUnlock()
+
+	if screen == nil {
+		return fmt.Errorf("not connected")
+	}
+	img, err := screenshare.CaptureDisplay(displayIndex)
+	if err != nil {
+		return err
+	}
+	data, width, height, err := screenshare.EncodeJPEG(img, screenshare.DefaultMaxWidth, screenshare.DefaultJPEGQuality)
+	if err != nil {
+		return err
+	}
+	frameData, err := protocol.MarshalScreenFrame(&protocol.ScreenFrame{
+		Timestamp: time.Now().UnixMilli(),
+		Width:     width,
+		Height:    height,
+		Format:    "jpeg",
+		Data:      data,
+	})
+	if err != nil {
+		return err
+	}
+	e.screenMu.Lock()
+	cipher := e.screenCipher
+	if cipher == nil {
+		e.screenMu.Unlock()
+		return fmt.Errorf("screen share encryption is not ready")
+	}
+	e.screenSeqNum++
+	seqNum := e.screenSeqNum
+	e.screenMu.Unlock()
+	pkt := &protocol.ScreenPacket{SessionID: sessionID, SeqNum: seqNum}
+	pkt.Payload = cipher.Encrypt(sessionID, seqNum, pkt.MarshalHeader(), frameData)
+	return screen.Send(pkt)
+}
+
 func (e *Engine) setState(state State) {
 	e.mu.Lock()
 	e.state = state
@@ -837,4 +1212,25 @@ func (e *Engine) notifyStateChange(state State) {
 	if e.OnStateChange != nil {
 		e.OnStateChange(state)
 	}
+}
+
+func resolveAdvertisedAddr(controlAddr, advertisedAddr, defaultPort string) (string, error) {
+	controlHost, _, err := net.SplitHostPort(controlAddr)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(advertisedAddr) == "" {
+		if controlHost == "" {
+			return "", fmt.Errorf("missing screen address")
+		}
+		return net.JoinHostPort(controlHost, defaultPort), nil
+	}
+	host, port, err := net.SplitHostPort(advertisedAddr)
+	if err != nil {
+		return "", err
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = controlHost
+	}
+	return net.JoinHostPort(host, port), nil
 }

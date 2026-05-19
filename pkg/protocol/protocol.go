@@ -19,8 +19,8 @@ const (
 	// MaxVoicePayload is the maximum encrypted Opus payload size.
 	MaxVoicePayload = 1400
 
-	// MaxControlMessage is the maximum control message size (64KB).
-	MaxControlMessage = 65536
+	// MaxControlMessage is the maximum control message size (512KB).
+	MaxControlMessage = 512 * 1024
 
 	// FrameDuration is the Opus frame duration in milliseconds.
 	FrameDuration = 20

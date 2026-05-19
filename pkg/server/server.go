@@ -16,22 +16,26 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
 // Config holds server configuration.
 type Config struct {
-	ControlAddr  string // TCP/TLS bind address (e.g. ":9600")
-	VoiceAddr    string // UDP bind address (e.g. ":9601")
-	DBPath       string // SQLite database path
-	CertFile     string // TLS certificate file path
-	KeyFile      string // TLS private key file path
-	DataDir      string // directory for generated certs and data
-	AllowNoToken bool   // allow users to join without a token (open server)
-	ChannelsFile string // YAML file defining channels to create on startup
-	MetricsAddr  string // HTTP bind address for /metrics endpoint (empty = disabled)
+	ControlAddr       string // TCP/TLS bind address (e.g. ":9600")
+	VoiceAddr         string // UDP bind address (e.g. ":9601")
+	ScreenAddr        string // TCP/TLS screen-share bind address (e.g. ":9603")
+	DBPath            string // SQLite database path
+	CertFile          string // TLS certificate file path
+	KeyFile           string // TLS private key file path
+	DataDir           string // directory for generated certs and data
+	AllowNoToken      bool   // allow users to join without a token (open server)
+	EnableScreenShare bool   // enable per-channel screen sharing support
+	ChannelsFile      string // YAML file defining channels to create on startup
+	MetricsAddr       string // HTTP bind address for /metrics endpoint (empty = disabled)
 
 	// CLI-only actions (run and exit)
 	ExportUsers    bool // export all users as YAML and exit
@@ -49,6 +53,7 @@ func DefaultConfig() Config {
 	return Config{
 		ControlAddr: ":9600",
 		VoiceAddr:   ":9601",
+		ScreenAddr:  ":9603",
 		MetricsAddr: ":9602",
 		DBPath:      "gospeak.db",
 		DataDir:     ".",
@@ -138,10 +143,14 @@ type Server struct {
 	cfg         Config
 	sessions    *SessionManager
 	channels    *ChannelManager
+	screenShare *ScreenShareManager
 	metrics     *Metrics
 	store       datastore.DataProviderFactory
 	controlConn net.Listener
 	voiceConn   *net.UDPConn
+	screenConn  net.Listener
+	screenMu    sync.RWMutex
+	screenConns map[uint32]net.Conn
 	voiceKey    []byte // shared AES-128 key for all voice encryption
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -151,13 +160,57 @@ type Server struct {
 func New(cfg Config, deps Dependencies) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		cfg:      cfg,
-		sessions: NewSessionManager(),
-		channels: NewChannelManager(),
-		metrics:  NewMetrics(),
-		store:    deps.Store,
-		ctx:      ctx,
-		cancel:   cancel,
+		cfg:         cfg,
+		sessions:    NewSessionManager(),
+		channels:    NewChannelManager(),
+		screenShare: NewScreenShareManager(),
+		metrics:     NewMetrics(),
+		screenConns: make(map[uint32]net.Conn),
+		store:       deps.Store,
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+}
+
+func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) {
+	s.screenMu.Lock()
+	old := s.screenConns[sessionID]
+	s.screenConns[sessionID] = conn
+	s.screenMu.Unlock()
+	if old != nil && old != conn {
+		_ = old.Close()
+	}
+}
+
+func (s *Server) removeScreenConn(sessionID uint32, conn net.Conn) {
+	s.screenMu.Lock()
+	current := s.screenConns[sessionID]
+	if current == conn {
+		delete(s.screenConns, sessionID)
+	}
+	s.screenMu.Unlock()
+}
+
+func (s *Server) sendScreenPacketToSession(sessionID uint32, pkt *protocol.ScreenPacket) bool {
+	s.screenMu.RLock()
+	conn, ok := s.screenConns[sessionID]
+	s.screenMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if err := protocol.WriteScreenPacket(conn, pkt); err != nil {
+		slog.Error("screen write failed", "session", sessionID, "err", err)
+		return false
+	}
+	return true
+}
+
+func (s *Server) closeScreenConns() {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
+	for sessionID, conn := range s.screenConns {
+		_ = conn.Close()
+		delete(s.screenConns, sessionID)
 	}
 }
 

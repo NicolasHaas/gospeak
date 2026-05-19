@@ -269,6 +269,97 @@
         }
       ],
       "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Screen Share Subscribers",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 20 },
+      "targets": [
+        {
+          "expr": "gospeak_screen_share_subscribers",
+          "legendFormat": "subscribers",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Screen Shares Started / Stopped",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 20 },
+      "targets": [
+        {
+          "expr": "gospeak_screen_shares_started_total",
+          "legendFormat": "started",
+          "refId": "A"
+        },
+        {
+          "expr": "gospeak_screen_shares_stopped_total",
+          "legendFormat": "stopped",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Screen Frames / sec",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(gospeak_screen_share_frames_in_total[1m])",
+          "legendFormat": "in",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(gospeak_screen_share_frames_out_total[1m])",
+          "legendFormat": "out",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Screen Share Bandwidth",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(gospeak_screen_share_bytes_in_total[1m])",
+          "legendFormat": "in",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(gospeak_screen_share_bytes_out_total[1m])",
+          "legendFormat": "out",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
     }
   ],
   "schemaVersion": 39,
@@ -279,5 +370,5 @@
   "timezone": "browser",
   "title": "GoSpeak Server",
   "uid": "gospeak-server",
-  "version": 1
+  "version": 2
 }
