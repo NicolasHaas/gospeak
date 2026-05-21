@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestScreenShareManager_PublicEventHidesEncryptionKey(t *testing.T) {
 	mgr := NewScreenShareManager()
@@ -29,6 +32,16 @@ func TestScreenShareManager_SubscribeTracksViewerAndReturnsKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	shared, viewerSessionIDs, err := mgr.ShareWithViewers(100, []uint32{300})
+	if err != nil {
+		t.Fatalf("ShareWithViewers: %v", err)
+	}
+	if len(viewerSessionIDs) != 1 || viewerSessionIDs[0] != 300 {
+		t.Fatalf("ShareWithViewers viewers = %v, want [300]", viewerSessionIDs)
+	}
+	if len(shared.EncryptionKey) == 0 {
+		t.Fatalf("ShareWithViewers returned empty encryption key")
+	}
 
 	subscribed, err := mgr.Subscribe(1, 300)
 	if err != nil {
@@ -37,11 +50,11 @@ func TestScreenShareManager_SubscribeTracksViewerAndReturnsKey(t *testing.T) {
 	if subscribed.Viewers != 1 {
 		t.Fatalf("Viewers = %d, want 1", subscribed.Viewers)
 	}
-	if len(subscribed.EncryptionKey) == 0 {
-		t.Fatalf("Subscribe returned empty encryption key")
+	if len(subscribed.EncryptionKey) != 0 {
+		t.Fatalf("Subscribe encryption key = %v, want empty", subscribed.EncryptionKey)
 	}
-	if string(subscribed.EncryptionKey) != string(started.EncryptionKey) {
-		t.Fatalf("Subscribe encryption key = %v, want %v", subscribed.EncryptionKey, started.EncryptionKey)
+	if string(shared.EncryptionKey) != string(started.EncryptionKey) {
+		t.Fatalf("ShareWithViewers encryption key = %v, want %v", shared.EncryptionKey, started.EncryptionKey)
 	}
 
 	viewers := mgr.SubscribersForSharer(100)
@@ -59,6 +72,9 @@ func TestScreenShareManager_StopClearsSubscribers(t *testing.T) {
 	if _, err := mgr.Start(1, 10, 20, "alice", 800, 600); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	if _, _, err := mgr.ShareWithViewers(10, []uint32{30}); err != nil {
+		t.Fatalf("ShareWithViewers: %v", err)
+	}
 	if _, err := mgr.Subscribe(1, 30); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -72,6 +88,34 @@ func TestScreenShareManager_StopClearsSubscribers(t *testing.T) {
 	}
 	if got := mgr.SubscriberCount(); got != 0 {
 		t.Fatalf("SubscriberCount = %d, want 0", got)
+	}
+	if _, ok := mgr.ActiveForChannel(1); ok {
+		t.Fatalf("ActiveForChannel(1) = ok true, want false")
+	}
+}
+
+func TestScreenShareManager_ShareWithViewersRequiresActiveShare(t *testing.T) {
+	mgr := NewScreenShareManager()
+
+	if _, _, err := mgr.ShareWithViewers(100, []uint32{300}); err == nil {
+		t.Fatalf("ShareWithViewers without active share = nil error, want error")
+	}
+}
+
+func TestScreenShareManager_ExpireInactiveStopsShare(t *testing.T) {
+	mgr := NewScreenShareManager()
+
+	if _, err := mgr.Start(1, 10, 20, "alice", 800, 600); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	mgr.lastFrameAt[10] = time.Now().Add(-20 * time.Second)
+
+	expired := mgr.ExpireInactive(15 * time.Second)
+	if len(expired) != 1 {
+		t.Fatalf("ExpireInactive() len = %d, want 1", len(expired))
+	}
+	if expired[0].Active {
+		t.Fatalf("expired event Active = true, want false")
 	}
 	if _, ok := mgr.ActiveForChannel(1); ok {
 		t.Fatalf("ActiveForChannel(1) = ok true, want false")

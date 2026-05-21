@@ -43,5 +43,6 @@ func EncodeJPEG(img image.Image, maxWidth int, quality int) ([]byte, int32, int3
 	if width < 0 || width > math.MaxInt32 || height < 0 || height > math.MaxInt32 {
 		return nil, 0, 0, fmt.Errorf("screen image dimensions out of range: %dx%d", width, height)
 	}
+	//nolint:gosec // width and height are range-checked against MaxInt32 above.
 	return buf.Bytes(), int32(width), int32(height), nil
 }

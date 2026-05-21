@@ -26,6 +26,7 @@ type ControlMessage struct {
 	ScreenShareStartReq *ScreenShareStartRequest       `json:"screen_share_start_request,omitempty"`
 	ScreenShareStopReq  *ScreenShareStopRequest        `json:"screen_share_stop_request,omitempty"`
 	ScreenShareSubReq   *ScreenShareSubscribeRequest   `json:"screen_share_subscribe_request,omitempty"`
+	ScreenShareShareReq *ScreenShareShareRequest       `json:"screen_share_share_request,omitempty"`
 	ScreenShareUnsubReq *ScreenShareUnsubscribeRequest `json:"screen_share_unsubscribe_request,omitempty"`
 	ScreenShareEvent    *ScreenShareEvent              `json:"screen_share_event,omitempty"`
 	ScreenShareFrame    *ScreenShareFrame              `json:"screen_share_frame,omitempty"`
@@ -190,6 +191,8 @@ type ScreenShareStopRequest struct{}
 type ScreenShareSubscribeRequest struct {
 	ChannelID int64 `json:"channel_id"`
 }
+
+type ScreenShareShareRequest struct{}
 
 type ScreenShareUnsubscribeRequest struct{}
 

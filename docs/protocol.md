@@ -127,10 +127,11 @@ The control plane carries screen-share lifecycle messages only:
 - `ScreenShareStartRequest`
 - `ScreenShareStopRequest`
 - `ScreenShareSubscribeRequest`
+- `ScreenShareShareRequest`
 - `ScreenShareUnsubscribeRequest`
 - `ScreenShareEvent`
 
-`ScreenShareEvent` is broadcast to channel members for presence updates. A targeted copy with an `encryption_key` is sent only to the active sharer and subscribed viewers.
+`ScreenShareEvent` is broadcast to channel members for presence updates. A targeted copy with an `encryption_key` is sent to the active sharer, to users already in the channel when sharing starts, and to current channel members if the sharer later shares the active key with the channel again.
 
 ### Admin Operations
 

@@ -33,6 +33,11 @@ type ControlHandler struct {
 	tempChanTimes map[int64]time.Time
 }
 
+const (
+	screenShareIdleTimeout = 15 * time.Second
+	screenShareIdleSweep   = 5 * time.Second
+)
+
 // newControlHandler creates a control handler.
 func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHandler {
 	return &ControlHandler{
@@ -108,6 +113,9 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 
 	handler := newControlHandler(s, st)
 	slog.Info("control plane listening", "addr", s.cfg.ControlAddr)
+	if s.cfg.EnableScreenShare {
+		go s.runScreenShareJanitor(handler)
+	}
 
 	go func() {
 		for {
@@ -126,6 +134,38 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 	}()
 
 	return nil
+}
+
+func (s *Server) runScreenShareJanitor(handler *ControlHandler) {
+	ticker := time.NewTicker(screenShareIdleSweep)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		expired := s.screenShare.ExpireInactive(screenShareIdleTimeout)
+		if len(expired) == 0 {
+			continue
+		}
+
+		for _, event := range expired {
+			if event == nil {
+				continue
+			}
+			s.metrics.ScreenSharesStopped.Add(1)
+			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
+			username := "unknown"
+			if session, ok := s.sessions.GetSnapshot(event.SessionID); ok {
+				username = session.Username
+			}
+			slog.Info("screen share stopped", "user", username, "session", event.SessionID, "channel", event.ChannelID, "reason", "idle timeout")
+			handler.broadcastToChannel(event.ChannelID, &pb.ControlMessage{ScreenShareEvent: event}, 0)
+		}
+	}
 }
 
 // handleControlConn handles a single control connection lifecycle.
@@ -379,6 +419,9 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 
 	case msg.ScreenShareSubReq != nil:
 		s.handleScreenShareSubscribe(handler, sessionID, msg.ScreenShareSubReq, conn)
+
+	case msg.ScreenShareShareReq != nil:
+		s.handleScreenShareShare(handler, sessionID, conn)
 
 	case msg.ScreenShareUnsubReq != nil:
 		s.handleScreenShareUnsubscribe(sessionID)

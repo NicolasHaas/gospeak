@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -18,6 +19,16 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/screenshare"
+)
+
+var (
+	errScreenShareCaptureTimedOut = errors.New("screen capture timed out")
+	errScreenShareStartTimedOut   = errors.New("screen share start timed out")
+)
+
+const (
+	defaultScreenShareCaptureTimeout = 15 * time.Second
+	defaultScreenShareStartTimeout   = 10 * time.Second
 )
 
 // State represents the client's connection state.
@@ -67,10 +78,15 @@ type Engine struct {
 	screenShareRunning bool
 	screenShareDisplay int
 	screenShareCancel  context.CancelFunc
+	screenShareAttempt uint64
 	screenCipher       *gospeakCrypto.VoiceCipher
 	screenSeqNum       uint32
 	activeScreenShare  *pb.ScreenShareEvent
 	screenShareEnabled bool
+	captureScreenFn    func(displayIndex int) (image.Image, error)
+	encodeScreenFn     func(img image.Image, maxWidth, quality int) ([]byte, int32, int32, error)
+	screenCaptureWait  time.Duration
+	screenStartWait    time.Duration
 
 	// Audio initialization function (allows platform-specific audio backends)
 	initAudioFn func() error
@@ -96,13 +112,19 @@ type Engine struct {
 func NewEngine() *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		state:          StateDisconnected,
-		decoders:       make(map[uint32]audio.AudioDecoder),
-		jitterBufs:     make(map[uint32]*JitterBuffer),
-		ctx:            ctx,
-		cancel:         cancel,
-		vad:            audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
-		decoderFactory: &defaultDecoderFactory{},
+		state:             StateDisconnected,
+		decoders:          make(map[uint32]audio.AudioDecoder),
+		jitterBufs:        make(map[uint32]*JitterBuffer),
+		ctx:               ctx,
+		cancel:            cancel,
+		vad:               audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
+		decoderFactory:    &defaultDecoderFactory{},
+		encodeScreenFn:    screenshare.EncodeJPEG,
+		screenCaptureWait: defaultScreenShareCaptureTimeout,
+		screenStartWait:   defaultScreenShareStartTimeout,
+	}
+	e.captureScreenFn = func(displayIndex int) (image.Image, error) {
+		return screenshare.CaptureDisplay(displayIndex)
 	}
 	e.initAudioFn = e.initAudioDefault
 	return e
@@ -522,6 +544,7 @@ func (e *Engine) JoinChannel(channelID int64) error {
 	e.mu.Lock()
 	e.channelID = channelID
 	e.mu.Unlock()
+	e.clearScreenShareState()
 
 	if voice != nil {
 		voice.SetChannel(channelID)
@@ -549,6 +572,7 @@ func (e *Engine) LeaveChannel() error {
 	e.mu.Lock()
 	e.channelID = 0
 	e.mu.Unlock()
+	e.clearScreenShareState()
 
 	return nil
 }
@@ -730,6 +754,8 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 	e.mu.RLock()
 	ctrl := e.control
 	channelID := e.channelID
+	mySessionID := e.sessionID
+	active := e.activeScreenShare
 	e.mu.RUnlock()
 
 	if ctrl == nil {
@@ -738,14 +764,14 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 	if channelID == 0 {
 		return fmt.Errorf("not in a channel")
 	}
-
-	img, err := screenshare.CaptureDisplay(displayIndex)
-	if err != nil {
-		return fmt.Errorf("capture display: %w", err)
+	if active != nil && active.Active {
+		if active.SessionID == mySessionID {
+			return fmt.Errorf("screen share already active")
+		}
+		return fmt.Errorf("another user is already sharing their screen in this channel")
 	}
-	_, width, height, err := screenshare.EncodeJPEG(img, screenshare.DefaultMaxWidth, screenshare.DefaultJPEGQuality)
-	if err != nil {
-		return fmt.Errorf("prepare screen share: %w", err)
+	if displayIndex < 0 || displayIndex > math.MaxInt32 {
+		return fmt.Errorf("display index out of range: %d", displayIndex)
 	}
 
 	e.screenMu.Lock()
@@ -753,16 +779,20 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 		e.screenMu.Unlock()
 		return fmt.Errorf("screen share already active")
 	}
-	e.screenSharePending = true
-	e.screenShareDisplay = displayIndex
 	e.screenMu.Unlock()
 
-	if displayIndex < 0 || displayIndex > math.MaxInt32 {
-		e.screenMu.Lock()
-		e.screenSharePending = false
-		e.screenMu.Unlock()
-		return fmt.Errorf("display index out of range: %d", displayIndex)
+	_, width, height, err := e.prepareScreenShareFrame(displayIndex)
+	if err != nil {
+		return fmt.Errorf("prepare screen share: %w", err)
 	}
+
+	e.screenMu.Lock()
+	e.screenSharePending = true
+	e.screenShareDisplay = displayIndex
+	e.screenShareAttempt++
+	attempt := e.screenShareAttempt
+	startWait := e.screenStartWait
+	e.screenMu.Unlock()
 
 	if err := ctrl.Send(&pb.ControlMessage{
 		ScreenShareStartReq: &pb.ScreenShareStartRequest{
@@ -776,6 +806,7 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 		e.screenMu.Unlock()
 		return err
 	}
+	go e.watchScreenShareStart(attempt, startWait)
 
 	return nil
 }
@@ -803,6 +834,16 @@ func (e *Engine) SubscribeScreenShare(channelID int64) error {
 		return fmt.Errorf("not connected")
 	}
 	return ctrl.Send(&pb.ControlMessage{ScreenShareSubReq: &pb.ScreenShareSubscribeRequest{ChannelID: channelID}})
+}
+
+func (e *Engine) ShareScreenShareWithChannel() error {
+	e.mu.RLock()
+	ctrl := e.control
+	e.mu.RUnlock()
+	if ctrl == nil {
+		return fmt.Errorf("not connected")
+	}
+	return ctrl.Send(&pb.ControlMessage{ScreenShareShareReq: &pb.ScreenShareShareRequest{}})
 }
 
 func (e *Engine) UnsubscribeScreenShare() error {
@@ -1002,6 +1043,11 @@ func (e *Engine) handleDisconnect(reason string) {
 }
 
 func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
+	if event == nil {
+		e.clearScreenShareState()
+		return
+	}
+
 	e.mu.Lock()
 	e.activeScreenShare = event
 	mySessionID := e.sessionID
@@ -1056,6 +1102,23 @@ func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
 	}
 }
 
+func (e *Engine) clearScreenShareState() {
+	e.mu.Lock()
+	e.activeScreenShare = nil
+	e.mu.Unlock()
+	e.stopScreenShareLoop()
+	e.screenMu.Lock()
+	e.screenCipher = nil
+	e.screenSeqNum = 0
+	e.screenMu.Unlock()
+	if e.OnScreenFrame != nil {
+		e.OnScreenFrame(nil)
+	}
+	if e.OnScreenShareEvent != nil {
+		e.OnScreenShareEvent(nil)
+	}
+}
+
 func (e *Engine) handleScreenPacket(pkt *protocol.ScreenPacket) {
 	e.screenMu.Lock()
 	cipher := e.screenCipher
@@ -1105,6 +1168,13 @@ func (e *Engine) startScreenShareLoop() {
 
 		for {
 			if err := e.sendScreenShareFrame(displayIndex); err != nil {
+				if errors.Is(err, errScreenShareCaptureTimedOut) {
+					e.requestScreenShareStop()
+					if e.OnError != nil {
+						e.OnError(fmt.Errorf("screen share stopped: %w", err))
+					}
+					return
+				}
 				slog.Debug("screen share send failed", "err", err)
 			}
 
@@ -1169,11 +1239,7 @@ func (e *Engine) sendScreenShareFrame(displayIndex int) error {
 	if screen == nil {
 		return fmt.Errorf("not connected")
 	}
-	img, err := screenshare.CaptureDisplay(displayIndex)
-	if err != nil {
-		return err
-	}
-	data, width, height, err := screenshare.EncodeJPEG(img, screenshare.DefaultMaxWidth, screenshare.DefaultJPEGQuality)
+	data, width, height, err := e.prepareScreenShareFrame(displayIndex)
 	if err != nil {
 		return err
 	}
@@ -1199,6 +1265,80 @@ func (e *Engine) sendScreenShareFrame(displayIndex int) error {
 	pkt := &protocol.ScreenPacket{SessionID: sessionID, SeqNum: seqNum}
 	pkt.Payload = cipher.Encrypt(sessionID, seqNum, pkt.MarshalHeader(), frameData)
 	return screen.Send(pkt)
+}
+
+type screenSharePrepareResult struct {
+	data   []byte
+	width  int32
+	height int32
+	err    error
+}
+
+func (e *Engine) prepareScreenShareFrame(displayIndex int) ([]byte, int32, int32, error) {
+	timeout := e.screenCaptureWait
+	if timeout <= 0 {
+		timeout = defaultScreenShareCaptureTimeout
+	}
+
+	resultCh := make(chan screenSharePrepareResult, 1)
+	go func() {
+		img, err := e.captureScreenFn(displayIndex)
+		if err != nil {
+			resultCh <- screenSharePrepareResult{err: err}
+			return
+		}
+		data, width, height, err := e.encodeScreenFn(img, screenshare.DefaultMaxWidth, screenshare.DefaultJPEGQuality)
+		resultCh <- screenSharePrepareResult{data: data, width: width, height: height, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		return result.data, result.width, result.height, result.err
+	case <-time.After(timeout):
+		return nil, 0, 0, errScreenShareCaptureTimedOut
+	case <-e.ctx.Done():
+		return nil, 0, 0, fmt.Errorf("not connected")
+	}
+}
+
+func (e *Engine) watchScreenShareStart(attempt uint64, timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = defaultScreenShareStartTimeout
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+	case <-e.ctx.Done():
+		return
+	}
+
+	e.screenMu.Lock()
+	if !e.screenSharePending || e.screenShareRunning || e.screenShareAttempt != attempt {
+		e.screenMu.Unlock()
+		return
+	}
+	e.screenSharePending = false
+	e.screenMu.Unlock()
+
+	e.requestScreenShareStop()
+	if e.OnError != nil {
+		e.OnError(errScreenShareStartTimedOut)
+	}
+}
+
+func (e *Engine) requestScreenShareStop() {
+	e.mu.RLock()
+	ctrl := e.control
+	e.mu.RUnlock()
+	if ctrl == nil {
+		return
+	}
+	if err := ctrl.Send(&pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}}); err != nil {
+		slog.Debug("screen share stop request failed", "err", err)
+	}
 }
 
 func (e *Engine) setState(state State) {

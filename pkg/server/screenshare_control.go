@@ -35,12 +35,49 @@ func (s *Server) handleScreenShareStart(handler *ControlHandler, sessionID uint3
 		sendError(conn, 40, err.Error())
 		return
 	}
+	viewerSessionIDs := s.channels.Members(session.ChannelID)
+	_, sharedSessionIDs, err := s.screenShare.ShareWithViewers(sessionID, viewerSessionIDs)
+	if err != nil {
+		sendError(conn, 40, err.Error())
+		return
+	}
+	for _, viewerSessionID := range sharedSessionIDs {
+		handler.sendToSession(viewerSessionID, &pb.ControlMessage{ScreenShareEvent: event})
+	}
 	s.metrics.ScreenSharesStarted.Add(1)
 	slog.Info("screen share started", "user", session.Username, "session", sessionID, "channel", session.ChannelID, "width", req.Width, "height", req.Height)
 
 	handler.sendToSession(sessionID, &pb.ControlMessage{ScreenShareEvent: event})
 	publicEvent, _ := s.screenShare.PublicEvent(session.ChannelID)
 	handler.broadcastToChannel(session.ChannelID, &pb.ControlMessage{ScreenShareEvent: publicEvent}, 0)
+}
+
+func (s *Server) handleScreenShareShare(handler *ControlHandler, sessionID uint32, conn net.Conn) {
+	session, ok := s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if session.ChannelID == 0 {
+		sendError(conn, 40, "join a channel before sharing your screen")
+		return
+	}
+	if !s.screenShare.IsSharer(sessionID, session.ChannelID) {
+		sendError(conn, 40, "only the active sharer can share screen access")
+		return
+	}
+
+	event, sharedSessionIDs, err := s.screenShare.ShareWithViewers(sessionID, s.channels.Members(session.ChannelID))
+	if err != nil {
+		sendError(conn, 40, err.Error())
+		return
+	}
+	for _, viewerSessionID := range sharedSessionIDs {
+		handler.sendToSession(viewerSessionID, &pb.ControlMessage{ScreenShareEvent: event})
+	}
+	if len(sharedSessionIDs) > 0 {
+		slog.Info("screen share shared with channel", "sharer_session", sessionID, "channel", session.ChannelID, "viewer_count", len(sharedSessionIDs))
+	}
 }
 
 func (s *Server) handleScreenShareStop(handler *ControlHandler, sessionID uint32) {
@@ -74,11 +111,6 @@ func (s *Server) handleScreenShareSubscribe(handler *ControlHandler, sessionID u
 	event, err := s.screenShare.Subscribe(req.ChannelID, sessionID)
 	if err != nil {
 		sendError(conn, 40, err.Error())
-		return
-	}
-	if event.SessionID == sessionID {
-		s.screenShare.Unsubscribe(sessionID)
-		sendError(conn, 40, "cannot subscribe to your own share")
 		return
 	}
 	s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())

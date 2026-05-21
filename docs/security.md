@@ -2,7 +2,7 @@
 
 GoSpeak is designed with security as a core principle. All communication is encrypted and the server operates as a relay for voice and screen-sharing media.
 
-> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed only to the sharer and subscribed viewers. In both cases the server generates the key material, so a compromised server _could_ theoretically decrypt media. This is a known trade-off for simplicity.
+> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server _could_ theoretically decrypt media. This is a known trade-off for simplicity.
 
 ## Threat Model
 
@@ -116,7 +116,8 @@ For each voice packet:
 ## Screen Share Encryption (AES-128-GCM)
 
 - One AES-128 key is generated for each active screen share.
-- The key is delivered over the TLS control plane only to the sharer and subscribed viewers.
+- The key is delivered over the TLS control plane to the sharer and to users already in the channel when the share starts.
+- If additional users join later, the sharer can share the active key with the current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
 - The server forwards opaque encrypted packets to subscribed viewers without decoding frame contents.
 

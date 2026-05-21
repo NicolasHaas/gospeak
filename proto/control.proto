@@ -37,14 +37,15 @@ message ControlMessage {
     ScreenShareStartRequest        screen_share_start_request         = 38;
     ScreenShareStopRequest         screen_share_stop_request          = 39;
     ScreenShareSubscribeRequest    screen_share_subscribe_request     = 40;
-    ScreenShareUnsubscribeRequest  screen_share_unsubscribe_request   = 41;
-    ScreenShareEvent               screen_share_event                 = 42;
-    SetUserRoleRequest             set_user_role_request              = 43;
-    SetUserRoleResponse            set_user_role_response             = 44;
-    ExportDataRequest              export_data_request                = 45;
-    ExportDataResponse             export_data_response               = 46;
-    ImportChannelsRequest          import_channels_request            = 47;
-    ImportChannelsResponse         import_channels_response           = 48;
+    ScreenShareShareRequest        screen_share_share_request         = 41;
+    ScreenShareUnsubscribeRequest  screen_share_unsubscribe_request   = 42;
+    ScreenShareEvent               screen_share_event                 = 43;
+    SetUserRoleRequest             set_user_role_request              = 44;
+    SetUserRoleResponse            set_user_role_response             = 45;
+    ExportDataRequest              export_data_request                = 46;
+    ExportDataResponse             export_data_response               = 47;
+    ImportChannelsRequest          import_channels_request            = 48;
+    ImportChannelsResponse         import_channels_response           = 49;
 
     // Generic
     ErrorResponse       error_response        = 50;
@@ -184,6 +185,8 @@ message ScreenShareStopRequest {}
 message ScreenShareSubscribeRequest {
   int64 channel_id = 1;
 }
+
+message ScreenShareShareRequest {}
 
 message ScreenShareUnsubscribeRequest {}
 
