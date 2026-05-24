@@ -152,14 +152,14 @@ type Server struct {
 func New(cfg Config, deps Dependencies) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		cfg:      cfg,
-		sessions: NewSessionManager(),
-		channels: NewChannelManager(),
+		cfg:         cfg,
+		sessions:    NewSessionManager(),
+		channels:    NewChannelManager(),
 		metrics:     NewMetrics(),
 		store:       deps.Store,
 		authLimiter: newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
 		ctx:         ctx,
-		cancel:   cancel,
+		cancel:      cancel,
 	}
 }
 
