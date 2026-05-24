@@ -33,3 +33,4 @@ vendor/
 # Settings / local config
 settings.yaml
 bookmarks.yaml
+servers.yaml

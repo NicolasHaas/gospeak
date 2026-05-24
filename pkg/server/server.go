@@ -152,6 +152,7 @@ type Server struct {
 	screenMu    sync.RWMutex
 	screenConns map[uint32]net.Conn
 	voiceKey    []byte // shared AES-128 key for all voice encryption
+	authLimiter *authRateLimiter
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
@@ -167,6 +168,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		metrics:     NewMetrics(),
 		screenConns: make(map[uint32]net.Conn),
 		store:       deps.Store,
+		authLimiter: newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
