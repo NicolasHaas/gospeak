@@ -67,8 +67,12 @@ func WriteScreenPacket(w io.Writer, pkt *ScreenPacket) error {
 	if len(data) > MaxScreenPacket {
 		return fmt.Errorf("protocol: screen packet too large: %d bytes", len(data))
 	}
+	n, err := checkUint32(len(data))
+	if err != nil {
+		return fmt.Errorf("protocol: write screen length: %w", err)
+	}
 	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, mustUint32(len(data)))
+	binary.BigEndian.PutUint32(lenBuf, n)
 	if _, err := w.Write(lenBuf); err != nil {
 		return fmt.Errorf("protocol: write screen length: %w", err)
 	}
@@ -111,7 +115,11 @@ func MarshalScreenFrame(frame *ScreenFrame) ([]byte, error) {
 	if err := binary.Write(buf, binary.BigEndian, frame.Height); err != nil {
 		return nil, fmt.Errorf("protocol: write height: %w", err)
 	}
-	if err := buf.WriteByte(mustByte(len(frame.Format))); err != nil {
+	b, err := checkByte(len(frame.Format))
+	if err != nil {
+		return nil, err
+	}
+	if err := buf.WriteByte(b); err != nil {
 		return nil, fmt.Errorf("protocol: write format length: %w", err)
 	}
 	if _, err := buf.WriteString(frame.Format); err != nil {
@@ -127,10 +135,22 @@ func UnmarshalScreenFrame(data []byte) (*ScreenFrame, error) {
 	if len(data) < 17 {
 		return nil, errors.New("protocol: screen frame too short")
 	}
+	timestamp, err := checkInt64(binary.BigEndian.Uint64(data[0:8]))
+	if err != nil {
+		return nil, err
+	}
+	width, err := checkInt32(binary.BigEndian.Uint32(data[8:12]))
+	if err != nil {
+		return nil, err
+	}
+	height, err := checkInt32(binary.BigEndian.Uint32(data[12:16]))
+	if err != nil {
+		return nil, err
+	}
 	frame := &ScreenFrame{
-		Timestamp: mustInt64(binary.BigEndian.Uint64(data[0:8])),
-		Width:     mustInt32(binary.BigEndian.Uint32(data[8:12])),
-		Height:    mustInt32(binary.BigEndian.Uint32(data[12:16])),
+		Timestamp: timestamp,
+		Width:     width,
+		Height:    height,
 	}
 	formatLen := int(data[16])
 	if formatLen == 0 || formatLen > MaxScreenFormat || len(data) < 17+formatLen {
@@ -149,12 +169,20 @@ func WriteScreenAuth(w io.Writer, auth *ScreenAuth) error {
 	if len(auth.Token) > 512 {
 		return fmt.Errorf("protocol: screen auth token too long: %d", len(auth.Token))
 	}
+	tokenLen, err := checkUint16(len(auth.Token))
+	if err != nil {
+		return fmt.Errorf("protocol: write screen auth: %w", err)
+	}
 	payload := make([]byte, 6+len(auth.Token))
 	binary.BigEndian.PutUint32(payload[0:4], auth.SessionID)
-	binary.BigEndian.PutUint16(payload[4:6], mustUint16(len(auth.Token)))
+	binary.BigEndian.PutUint16(payload[4:6], tokenLen)
 	copy(payload[6:], auth.Token)
+	lenVal, err := checkUint32(len(payload))
+	if err != nil {
+		return fmt.Errorf("protocol: write screen auth: %w", err)
+	}
 	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, mustUint32(len(payload)))
+	binary.BigEndian.PutUint32(lenBuf, lenVal)
 	if _, err := w.Write(lenBuf); err != nil {
 		return fmt.Errorf("protocol: write screen auth length: %w", err)
 	}
@@ -187,37 +215,37 @@ func ReadScreenAuth(r io.Reader) (*ScreenAuth, error) {
 	}, nil
 }
 
-func mustUint32(value int) uint32 {
+func checkUint32(value int) (uint32, error) {
 	if value < 0 || value > math.MaxUint32 {
-		panic(fmt.Sprintf("protocol: int out of uint32 range: %d", value))
+		return 0, fmt.Errorf("protocol: value %d out of uint32 range", value)
 	}
-	return uint32(value)
+	return uint32(value), nil
 }
 
-func mustUint16(value int) uint16 {
+func checkUint16(value int) (uint16, error) {
 	if value < 0 || value > math.MaxUint16 {
-		panic(fmt.Sprintf("protocol: int out of uint16 range: %d", value))
+		return 0, fmt.Errorf("protocol: value %d out of uint16 range", value)
 	}
-	return uint16(value)
+	return uint16(value), nil
 }
 
-func mustByte(value int) byte {
+func checkByte(value int) (byte, error) {
 	if value < 0 || value > math.MaxUint8 {
-		panic(fmt.Sprintf("protocol: int out of byte range: %d", value))
+		return 0, fmt.Errorf("protocol: value %d out of byte range", value)
 	}
-	return byte(value)
+	return byte(value), nil
 }
 
-func mustInt64(value uint64) int64 {
+func checkInt64(value uint64) (int64, error) {
 	if value > math.MaxInt64 {
-		panic(fmt.Sprintf("protocol: uint64 out of int64 range: %d", value))
+		return 0, fmt.Errorf("protocol: value %d out of int64 range", value)
 	}
-	return int64(value)
+	return int64(value), nil
 }
 
-func mustInt32(value uint32) int32 {
+func checkInt32(value uint32) (int32, error) {
 	if value > math.MaxInt32 {
-		panic(fmt.Sprintf("protocol: uint32 out of int32 range: %d", value))
+		return 0, fmt.Errorf("protocol: value %d out of int32 range", value)
 	}
-	return int32(value)
+	return int32(value), nil
 }
