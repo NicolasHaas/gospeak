@@ -33,6 +33,50 @@ type ControlHandler struct {
 	tempChanTimes map[int64]time.Time
 }
 
+const (
+	authRateLimitAttempts = 30
+	authRateLimitWindow   = 1 * time.Minute
+)
+
+// authRateLimiter limits authentication attempts per remote address.
+type authRateLimiter struct {
+	mu          sync.Mutex
+	entries     map[string]*authEntry
+	maxAttempts int
+	window      time.Duration
+}
+
+type authEntry struct {
+	count   int
+	resetAt time.Time
+}
+
+func newAuthRateLimiter(maxAttempts int, window time.Duration) *authRateLimiter {
+	return &authRateLimiter{
+		entries:     make(map[string]*authEntry),
+		maxAttempts: maxAttempts,
+		window:      window,
+	}
+}
+
+func (rl *authRateLimiter) Allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	entry, ok := rl.entries[key]
+	if !ok || now.After(entry.resetAt) {
+		rl.entries[key] = &authEntry{
+			count:   1,
+			resetAt: now.Add(rl.window),
+		}
+		return true
+	}
+
+	entry.count++
+	return entry.count <= rl.maxAttempts
+}
+
 // newControlHandler creates a control handler.
 func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHandler {
 	return &ControlHandler{
@@ -123,6 +167,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	s.metrics.ActiveConnections.Add(1)
 	slog.Debug("new control connection", "remote", remoteAddr)
 
+	// Rate limit per remote address
+	if !s.authLimiter.Allow(remoteAddr) {
+		slog.Warn("rate limited", "remote", remoteAddr)
+		return
+	}
+
 	// First message must be AuthRequest
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	msg, err := protocol.ReadControlMessage(conn)
@@ -176,7 +226,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			ctx := context.Background()
 			tx, err := st.Tx(ctx)
 			if err != nil {
-				sendError(conn, 3, "could not establish transaction: "+err.Error())
+				slog.Error("transaction error", "err", err)
+				sendError(conn, 3, "could not establish transaction")
 				return
 			}
 
@@ -192,11 +243,13 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			tokenRole, err = tx.ValidateToken(tokenHash)
 			if err != nil {
 				s.metrics.FailedAuths.Add(1)
-				sendError(conn, 2, "authentication failed: "+err.Error())
+				slog.Warn("auth failed", "err", err)
+				sendError(conn, 2, "authentication failed")
 				return
 			}
 			if err := tx.Commit(); err != nil {
-				sendError(conn, 3, "error committing transaction: "+err.Error())
+				slog.Error("commit transaction", "err", err)
+				sendError(conn, 3, "database error")
 				return
 			}
 			committed = true
@@ -209,7 +262,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				sendError(conn, 2, "authentication failed: personal token required")
 				return
 			}
-			sendError(conn, 3, "failed to create user: "+err.Error())
+			slog.Error("create user", "err", err)
+			sendError(conn, 3, "could not create user")
 			return
 		}
 		sessionRole = tokenRole
@@ -512,7 +566,8 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 		AllowSubChannels: req.AllowSubChannels,
 	}
 	if err := st.NonTx().CreateChannel(ch); err != nil {
-		sendError(conn, 31, "failed to create channel: "+err.Error())
+		slog.Error("create channel", "err", err)
+		sendError(conn, 31, "could not create channel")
 		return
 	}
 
@@ -535,7 +590,8 @@ func (s *Server) handleDeleteChannel(sessionID uint32, req *pb.DeleteChannelRequ
 	}
 
 	if err := st.NonTx().DeleteChannel(req.ChannelID); err != nil {
-		sendError(conn, 31, "failed to delete channel: "+err.Error())
+		slog.Error("delete channel", "err", err)
+		sendError(conn, 31, "could not delete channel")
 		return
 	}
 
@@ -577,7 +633,8 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	role := model.ParseRole(req.Role)
 
 	if err := st.NonTx().CreateToken(hash, role, req.ChannelScope, session.UserID, int(req.MaxUses), expiresAt); err != nil {
-		sendError(conn, 31, "failed to store token: "+err.Error())
+		slog.Error("create token", "err", err)
+		sendError(conn, 31, "could not create token")
 		return
 	}
 

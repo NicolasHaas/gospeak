@@ -482,7 +482,10 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	if err != nil {
 		return fmt.Errorf("datastore: create channel: %w", err)
 	}
-	channel.ID, _ = res.LastInsertId()
+	channel.ID, err = res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("datastore: create channel last insert id: %w", err)
+	}
 	channel.CreatedAt = time.Now().UTC()
 
 	return nil
@@ -686,7 +689,10 @@ func (s *baseProvider) CreateMessage(message *model.Message) error {
 	if err != nil {
 		return fmt.Errorf("datastore: create message: %w", err)
 	}
-	message.ID, _ = res.LastInsertId()
+	message.ID, err = res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("datastore: create message last insert id: %w", err)
+	}
 	message.CreatedAt = time.Now().UTC()
 
 	return nil

@@ -416,7 +416,7 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 		// Ping/pong handled silently
 
 	case msg.CreateTokenResp != nil:
-		slog.Info("token created", "token", msg.CreateTokenResp.Token)
+		slog.Debug("token created", "token", msg.CreateTokenResp.Token)
 		if e.OnTokenCreated != nil {
 			e.OnTokenCreated(msg.CreateTokenResp.Token)
 		}

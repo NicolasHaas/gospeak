@@ -143,6 +143,7 @@ type Server struct {
 	controlConn net.Listener
 	voiceConn   *net.UDPConn
 	voiceKey    []byte // shared AES-128 key for all voice encryption
+	authLimiter *authRateLimiter
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
@@ -154,9 +155,10 @@ func New(cfg Config, deps Dependencies) *Server {
 		cfg:      cfg,
 		sessions: NewSessionManager(),
 		channels: NewChannelManager(),
-		metrics:  NewMetrics(),
-		store:    deps.Store,
-		ctx:      ctx,
+		metrics:     NewMetrics(),
+		store:       deps.Store,
+		authLimiter: newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
+		ctx:         ctx,
 		cancel:   cancel,
 	}
 }
