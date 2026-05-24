@@ -83,7 +83,7 @@ pkg/
   protocol/pb/     Message type definitions
   rbac/            Role-based access control
   server/          Server core (control, voice, config)
-  store/           DataStore interface + SQLite and in-memory implementations
+  datastore/       DataProviderFactory interface + SQLite implementation
 ui/                Fyne desktop GUI
 docs/              Documentation with Mermaid diagrams
 ```
@@ -92,15 +92,15 @@ docs/              Documentation with Mermaid diagrams
 
 GoSpeak follows an **onion architecture**, the server and client depend on interfaces, not concrete implementations:
 
-e.g. **`store.DataStore`**, the server uses this interface for all persistence. The default implementation is SQLite, but alternative backends (PostgreSQL, in-memory for tests) can be added by implementing the interface. See [`pkg/store/interface.go`](pkg/store/interface.go).
+e.g. **`datastore.DataProviderFactory`**, the server uses this interface for all persistence. The default implementation is SQLite, but alternative backends (PostgreSQL) can be added by implementing the interface. See [`pkg/datastore/interface.go`](pkg/datastore/interface.go).
 
 When contributing new features, prefer depending on interfaces rather than concrete types.
 
 ## Testing Architecture
 
-- Use `store.NewMemory()` for fast, deterministic tests that require persistence.
-- Keep tests backend-agnostic when possible by coding against `store.DataStore`.
-- Server tests can construct `server.Dependencies{Store: store.NewMemory()}` to avoid external DB setup.
+- Server tests use `datastore.NewProviderFactory(cfg.DBPath)` and `server.Dependencies{Store: st}` (see `pkg/server/server_test.go`).
+- Model tests use direct struct construction in `pkg/model/` (no DB needed).
+- Use `t.TempDir()` for isolated test databases in package-level tests (see `sql_test.go`).
 
 ## Areas for Contribution
 
