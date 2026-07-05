@@ -54,10 +54,16 @@ func (s *Server) Run() error {
 	if err := s.StartVoice(); err != nil {
 		return err
 	}
+	if s.cfg.EnableScreenShare {
+		if err := s.StartScreen(); err != nil {
+			return err
+		}
+	}
 
 	slog.Info("GoSpeak server running",
 		"control", s.cfg.ControlAddr,
 		"voice", s.cfg.VoiceAddr,
+		"screen", s.cfg.ScreenAddr,
 	)
 
 	if s.cfg.MetricsAddr != "" {
@@ -84,6 +90,10 @@ func (s *Server) Shutdown() {
 	if s.voiceConn != nil {
 		_ = s.voiceConn.Close()
 	}
+	if s.screenConn != nil {
+		_ = s.screenConn.Close()
+	}
+	s.closeScreenConns()
 }
 
 // ensureAdminToken creates an admin token only on first run (no tokens exist).

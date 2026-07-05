@@ -16,11 +16,13 @@ func main() {
 
 	flag.StringVar(&cfg.ControlAddr, "control", cfg.ControlAddr, "TCP/TLS control plane bind address")
 	flag.StringVar(&cfg.VoiceAddr, "voice", cfg.VoiceAddr, "UDP voice plane bind address")
+	flag.StringVar(&cfg.ScreenAddr, "screen", cfg.ScreenAddr, "TCP/TLS screen-share bind address")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database file path")
 	flag.StringVar(&cfg.CertFile, "cert", "", "TLS certificate file (auto-generated if empty)")
 	flag.StringVar(&cfg.KeyFile, "key", "", "TLS private key file (auto-generated if empty)")
 	flag.StringVar(&cfg.DataDir, "data", ".", "Data directory for generated files")
 	flag.BoolVar(&cfg.AllowNoToken, "open", false, "Allow users to join without a token (open server)")
+	flag.BoolVar(&cfg.EnableScreenShare, "screen-share", false, "Enable basic per-channel screen sharing")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for Prometheus /metrics (empty to disable)")
 	flag.BoolVar(&cfg.ExportUsers, "export-users", false, "Export all users as YAML and exit")

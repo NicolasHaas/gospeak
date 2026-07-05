@@ -29,6 +29,15 @@ type Metrics struct {
 	// Chat counters
 	ChatMessagesSent atomic.Int64 // total chat messages relayed
 
+	// Screen sharing counters
+	ScreenSharesStarted    atomic.Int64 // total screen shares started
+	ScreenSharesStopped    atomic.Int64 // total screen shares stopped
+	ScreenShareFramesIn    atomic.Int64 // total screen share frames received from sharers
+	ScreenShareFramesOut   atomic.Int64 // total screen share frames forwarded to viewers
+	ScreenShareBytesIn     atomic.Int64 // total screen share bytes received
+	ScreenShareBytesOut    atomic.Int64 // total screen share bytes forwarded
+	ScreenShareSubscribers atomic.Int64 // current active subscribers across all shares
+
 	// Channel counters
 	ChannelsCreated atomic.Int64 // channels created during this run
 	ChannelsDeleted atomic.Int64 // channels deleted during this run
@@ -65,6 +74,14 @@ type MetricsSnapshot struct {
 
 	ChatMessagesSent int64 `json:"chat_messages_sent"`
 
+	ScreenSharesStarted    int64 `json:"screen_shares_started"`
+	ScreenSharesStopped    int64 `json:"screen_shares_stopped"`
+	ScreenShareFramesIn    int64 `json:"screen_share_frames_in"`
+	ScreenShareFramesOut   int64 `json:"screen_share_frames_out"`
+	ScreenShareBytesIn     int64 `json:"screen_share_bytes_in"`
+	ScreenShareBytesOut    int64 `json:"screen_share_bytes_out"`
+	ScreenShareSubscribers int64 `json:"screen_share_subscribers"`
+
 	ChannelsCreated int64 `json:"channels_created"`
 	ChannelsDeleted int64 `json:"channels_deleted"`
 
@@ -77,24 +94,31 @@ type MetricsSnapshot struct {
 func (m *Metrics) Snapshot() MetricsSnapshot {
 	uptime := time.Since(m.startTime)
 	return MetricsSnapshot{
-		Uptime:              uptime.Truncate(time.Second).String(),
-		UptimeSeconds:       int64(uptime.Seconds()),
-		ActiveConnections:   m.ActiveConnections.Load(),
-		TotalConnections:    m.TotalConnections.Load(),
-		SuccessfulAuths:     m.SuccessfulAuths.Load(),
-		FailedAuths:         m.FailedAuths.Load(),
-		TotalDisconnects:    m.TotalDisconnects.Load(),
-		VoicePacketsIn:      m.VoicePacketsIn.Load(),
-		VoicePacketsOut:     m.VoicePacketsOut.Load(),
-		VoicePacketsDropped: m.VoicePacketsDropped.Load(),
-		VoiceBytesIn:        m.VoiceBytesIn.Load(),
-		VoiceBytesOut:       m.VoiceBytesOut.Load(),
-		ChatMessagesSent:    m.ChatMessagesSent.Load(),
-		ChannelsCreated:     m.ChannelsCreated.Load(),
-		ChannelsDeleted:     m.ChannelsDeleted.Load(),
-		TokensCreated:       m.TokensCreated.Load(),
-		KickCount:           m.KickCount.Load(),
-		BanCount:            m.BanCount.Load(),
+		Uptime:                 uptime.Truncate(time.Second).String(),
+		UptimeSeconds:          int64(uptime.Seconds()),
+		ActiveConnections:      m.ActiveConnections.Load(),
+		TotalConnections:       m.TotalConnections.Load(),
+		SuccessfulAuths:        m.SuccessfulAuths.Load(),
+		FailedAuths:            m.FailedAuths.Load(),
+		TotalDisconnects:       m.TotalDisconnects.Load(),
+		VoicePacketsIn:         m.VoicePacketsIn.Load(),
+		VoicePacketsOut:        m.VoicePacketsOut.Load(),
+		VoicePacketsDropped:    m.VoicePacketsDropped.Load(),
+		VoiceBytesIn:           m.VoiceBytesIn.Load(),
+		VoiceBytesOut:          m.VoiceBytesOut.Load(),
+		ChatMessagesSent:       m.ChatMessagesSent.Load(),
+		ScreenSharesStarted:    m.ScreenSharesStarted.Load(),
+		ScreenSharesStopped:    m.ScreenSharesStopped.Load(),
+		ScreenShareFramesIn:    m.ScreenShareFramesIn.Load(),
+		ScreenShareFramesOut:   m.ScreenShareFramesOut.Load(),
+		ScreenShareBytesIn:     m.ScreenShareBytesIn.Load(),
+		ScreenShareBytesOut:    m.ScreenShareBytesOut.Load(),
+		ScreenShareSubscribers: m.ScreenShareSubscribers.Load(),
+		ChannelsCreated:        m.ChannelsCreated.Load(),
+		ChannelsDeleted:        m.ChannelsDeleted.Load(),
+		TokensCreated:          m.TokensCreated.Load(),
+		KickCount:              m.KickCount.Load(),
+		BanCount:               m.BanCount.Load(),
 	}
 }
 
@@ -118,6 +142,9 @@ func (m *Metrics) LogSummary() {
 		"voice_pkts_out", s.VoicePacketsOut,
 		"voice_pkts_dropped", s.VoicePacketsDropped,
 		"chat_msgs", s.ChatMessagesSent,
+		"screen_shares_started", s.ScreenSharesStarted,
+		"screen_share_frames_out", s.ScreenShareFramesOut,
+		"screen_share_subscribers", s.ScreenShareSubscribers,
 	)
 }
 

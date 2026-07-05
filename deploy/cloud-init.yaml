@@ -45,6 +45,7 @@ write_files:
       ContainerName=gospeak
       PublishPort=9600:9600
       PublishPort=9601:9601/udp
+      PublishPort=9603:9603
       Volume=/var/lib/gospeak:/data:Z
       AutoUpdate=registry
       PodmanArgs=--cap-drop=ALL --security-opt=no-new-privileges
@@ -104,6 +105,7 @@ runcmd:
   - [ firewall-cmd, --permanent, --add-service=ssh ]
   - [ firewall-cmd, --permanent, --add-port=9600/tcp ]
   - [ firewall-cmd, --permanent, --add-port=9601/udp ]
+  - [ firewall-cmd, --permanent, --add-port=9603/tcp ]
   - [ firewall-cmd, --reload ]
   - [ systemctl, enable, --now, fail2ban ]
   - [ systemctl, enable, --now, dnf-automatic.timer ]

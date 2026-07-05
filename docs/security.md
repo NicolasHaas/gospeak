@@ -1,15 +1,15 @@
 # GoSpeak Security & Encryption
 
-GoSpeak is designed with security as a core principle. All communication is encrypted and the server operates as a relay without decoding audio.
+GoSpeak is designed with security as a core principle. All communication is encrypted and the server operates as a relay for voice and screen-sharing media.
 
-> **Note on the shared key model:** The current design uses a single server-wide AES-128 key distributed to all clients. The server generates and holds this key, so a compromised server _could_ theoretically decrypt voice traffic. This is a known trade-off for simplicity. A future improvement could use per-pair Diffie-Hellman key exchange to achieve true end-to-end encryption where the server cannot decrypt.
+> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server _could_ theoretically decrypt media. This is a known trade-off for simplicity.
 
 ## Threat Model
 
 | Threat | Mitigation |
 |--------|-----------|
-| Network eavesdropping | TLS 1.3 for control plane, AES-128-GCM for voice |
-| Server compromise (voice) | Server holds the shared key and _could_ decrypt — see note above. Mitigated by running your own trusted server |
+| Network eavesdropping | TLS 1.3 for control and screen planes, AES-128-GCM for voice and screen media |
+| Server compromise (media) | Server holds the generated media keys and _could_ decrypt — see note above. Mitigated by running your own trusted server |
 | Replay attacks | Deterministic nonces from SessionID + SeqNum prevent replay |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
@@ -21,19 +21,26 @@ GoSpeak is designed with security as a core principle. All communication is encr
 ```mermaid
 graph TB
     subgraph "Key Distribution"
-        SRV[Server] -->|AuthResponse over TLS 1.3| KEY[AES-128 Key<br/>16 bytes random]
-        KEY --> CA[Client A]
-        KEY --> CB[Client B]
-        KEY --> CC[Client C]
+        SRV[Server] -->|AuthResponse over TLS 1.3| VKEY[Voice AES-128 Key]
+        SRV -->|ScreenShareEvent over TLS 1.3| SKEY[Per-share AES-128 Key]
+        VKEY --> CA[Client A]
+        VKEY --> CB[Client B]
+        VKEY --> CC[Client C]
+        SKEY --> CA
+        SKEY --> CB
     end
 
-    subgraph "Voice Encryption"
+    subgraph "Media Encryption"
         CA -->|Encrypt with shared key| PKT[UDP Packet]
         PKT -->|Relay unmodified| SRV2[Server SFU]
         SRV2 -->|Forward as-is| CB
         SRV2 -->|Forward as-is| CC
         CB -->|Decrypt with shared key| AUDIO1[Opus Audio]
         CC -->|Decrypt with shared key| AUDIO2[Opus Audio]
+
+        CA -->|Encrypt with per-share key| SCR[Screen Packet]
+        SCR -->|Relay unmodified| SRV3[Screen Relay]
+        SRV3 -->|Forward as-is| CB
     end
 ```
 
@@ -106,6 +113,16 @@ For each voice packet:
 | **Anti-replay** | Monotonic sequence numbers in nonce prevent reuse |
 | **Forward secrecy** | New key generated on each server restart |
 
+## Screen Share Encryption (AES-128-GCM)
+
+- One AES-128 key is generated for each active screen share.
+- The key is delivered over the TLS control plane to the sharer and to users already in the channel when the share starts.
+- If additional users join later, the sharer can share the active key with the current channel members again in one action.
+- Encrypted screen packets travel on the dedicated screen TLS connection.
+- The server forwards opaque encrypted packets to subscribed viewers without decoding frame contents.
+
+Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a monotonically increasing screen packet sequence number.
+
 ## Authentication & Token System
 
 ```mermaid
@@ -177,5 +194,5 @@ Used internally for potential future password-based auth:
 1. **Use proper TLS certificates** (e.g., Let's Encrypt) instead of self-signed
 2. **Restart the server** periodically to generate fresh voice encryption keys (a new key is generated on every startup)
 3. **Use strong tokens** (the default 256-bit random is good)
-4. **Restrict network access** — only expose ports 9600/tcp and 9601/udp
+4. **Restrict network access** — only expose ports 9600/tcp, 9601/udp, and 9603/tcp when screen sharing is enabled
 5. **Monitor admin token usage** — the auto-generated admin token is logged at startup

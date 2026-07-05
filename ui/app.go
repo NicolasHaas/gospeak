@@ -3,6 +3,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"log/slog"
 	"net"
@@ -38,23 +39,36 @@ type App struct {
 	engine  *client.Engine
 
 	// UI components
-	channelList   *widget.List
-	statusLabel   *widget.Label
-	muteBtn       *widget.Button
-	deafenBtn     *widget.Button
-	connectBtn    *widget.Button
-	disconnectBtn *widget.Button
-	serverBtn     *widget.Button
-	vuMeter       *widget.ProgressBar
-	vadIndicator  *widget.Label
+	channelList     *widget.List
+	statusLabel     *widget.Label
+	muteBtn         *widget.Button
+	deafenBtn       *widget.Button
+	shareBtn        *widget.Button
+	shareChannelBtn *widget.Button
+	joinChannelBtn  *widget.Button
+	connectBtn      *widget.Button
+	disconnectBtn   *widget.Button
+	serverBtn       *widget.Button
+	vuMeter         *widget.ProgressBar
+	vadIndicator    *widget.Label
 
 	// Chat UI
-	chatBox    *fyne.Container
-	chatScroll *container.Scroll
-	chatEntry  *widget.Entry
+	chatBox     *fyne.Container
+	chatScroll  *container.Scroll
+	chatEntry   *widget.Entry
+	chatHeader  *widget.Label
+	watchBtn    *widget.Button
+	backBtn     *widget.Button
+	chatStack   *fyne.Container
+	screenBox   *fyne.Container
+	screenImage *canvas.Image
+	screenLabel *widget.Label
 
 	// State
-	channels []pb.ChannelInfo
+	channels           []pb.ChannelInfo
+	selectedChannelID  int64
+	activeScreenShare  *pb.ScreenShareEvent
+	watchingScreenFeed bool
 
 	// Bookmarks & Settings
 	bookmarks     *client.BookmarkStore
@@ -125,9 +139,50 @@ func (a *App) buildUI() {
 		a.updateMuteButtons()
 	})
 	a.deafenBtn.Disable()
+	a.shareBtn = widget.NewButtonWithIcon("Share Screen", theme.ComputerIcon(), func() {
+		if !a.engine.IsScreenShareEnabled() {
+			dialog.ShowInformation("Screen Sharing Disabled", "This server has screen sharing turned off.", a.window)
+			return
+		}
+		shouldStop := a.activeScreenShare != nil && a.activeScreenShare.Active && a.activeScreenShare.SessionID == a.engine.GetSessionID()
+		a.shareBtn.Disable()
+		if shouldStop {
+			a.shareBtn.SetText("Stopping...")
+		} else {
+			a.shareBtn.SetText("Starting...")
+		}
+		go func() {
+			var err error
+			if shouldStop {
+				err = a.engine.StopScreenShare()
+			} else {
+				err = a.engine.StartScreenShare(0)
+			}
+			fyne.Do(func() {
+				a.updateShareButton()
+				a.updateShareChannelButton()
+				if err != nil {
+					dialog.ShowError(err, a.window)
+				}
+			})
+		}()
+	})
+	a.shareBtn.Disable()
+	a.shareChannelBtn = widget.NewButton("Share With Channel", func() {
+		if err := a.engine.ShareScreenShareWithChannel(); err != nil {
+			dialog.ShowError(err, a.window)
+		}
+	})
+	a.shareChannelBtn.Hide()
+	a.joinChannelBtn = widget.NewButton("Join Channel", func() {
+		a.joinSelectedChannel()
+	})
+	a.joinChannelBtn.Disable()
 
 	muteFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.muteBtn)
 	deafenFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.deafenBtn)
+	shareFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(140, 36)), a.shareBtn)
+	shareChannelFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(170, 36)), a.shareChannelBtn)
 
 	settingsBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showSettingsDialog)
 	a.serverBtn = widget.NewButton("Server Settings", a.showServerSettings)
@@ -141,6 +196,8 @@ func (a *App) buildUI() {
 		a.serverBtn,
 		settingsBtn,
 		helpBtn,
+		shareChannelFixed,
+		shareFixed,
 		muteFixed,
 		deafenFixed,
 	)
@@ -177,7 +234,7 @@ func (a *App) buildUI() {
 
 	sidebar := container.NewBorder(
 		widget.NewLabelWithStyle("Channels", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		nil, nil, nil,
+		a.joinChannelBtn, nil, nil,
 		a.channelList,
 	)
 
@@ -192,6 +249,11 @@ func (a *App) buildUI() {
 	// --- Chat panel (right side) ---
 	a.chatBox = container.NewVBox()
 	a.chatScroll = container.NewVScroll(a.chatBox)
+	a.screenImage = canvas.NewImageFromImage(nil)
+	a.screenImage.FillMode = canvas.ImageFillContain
+	a.screenLabel = widget.NewLabel("No shared screen selected")
+	a.screenBox = container.NewBorder(a.screenLabel, nil, nil, nil, a.screenImage)
+	a.screenBox.Hide()
 
 	a.chatEntry = widget.NewEntry()
 	a.chatEntry.SetPlaceHolder("Type a message... (Enter to send)")
@@ -207,8 +269,33 @@ func (a *App) buildUI() {
 		a.chatEntry.SetText("")
 	}
 
-	chatHeader := widget.NewLabelWithStyle("Chat", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	chatPanel := container.NewBorder(chatHeader, a.chatEntry, nil, nil, a.chatScroll)
+	a.chatHeader = widget.NewLabelWithStyle("Chat", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	a.watchBtn = widget.NewButton("Watch", func() {
+		if a.activeScreenShare == nil || !a.activeScreenShare.Active {
+			return
+		}
+		if err := a.engine.SubscribeScreenShare(a.activeScreenShare.ChannelID); err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		a.watchingScreenFeed = true
+		a.showScreenPanel()
+	})
+	a.watchBtn.Hide()
+	a.backBtn = widget.NewButton("Back to Chat", func() {
+		a.watchingScreenFeed = false
+		if err := a.engine.UnsubscribeScreenShare(); err != nil {
+			slog.Debug("unsubscribe screen share error", "err", err)
+		}
+		a.screenImage.Image = nil
+		a.screenLabel.SetText("No active screen share")
+		a.screenImage.Refresh()
+		a.showChatPanel()
+	})
+	a.backBtn.Hide()
+	chatHeaderBar := container.NewHBox(a.chatHeader, layout.NewSpacer(), a.watchBtn, a.backBtn)
+	a.chatStack = container.NewStack(a.chatScroll, a.screenBox)
+	chatPanel := container.NewBorder(chatHeaderBar, a.chatEntry, nil, nil, a.chatStack)
 
 	// --- Main layout ---
 	mainArea := container.NewHSplit(sidebar, chatPanel)
@@ -236,10 +323,19 @@ func (a *App) bindEvents() {
 				a.disconnectBtn.Disable()
 				a.muteBtn.Disable()
 				a.deafenBtn.Disable()
+				a.shareBtn.Disable()
 				a.updateMuteButtons()
 				a.serverBtn.Hide()
 				a.chatEntry.Disable()
 				a.channels = nil
+				a.selectedChannelID = 0
+				a.activeScreenShare = nil
+				a.watchingScreenFeed = false
+				a.updateJoinChannelButton()
+				a.updateShareButton()
+				a.updateShareChannelButton()
+				a.updateWatchButton()
+				a.showChatPanel()
 				a.channelList.Refresh()
 			case client.StateConnecting:
 				a.statusLabel.SetText("Connecting...")
@@ -250,7 +346,15 @@ func (a *App) bindEvents() {
 				a.disconnectBtn.Enable()
 				a.muteBtn.Enable()
 				a.deafenBtn.Enable()
+				if a.engine.IsScreenShareEnabled() {
+					a.shareBtn.Enable()
+				} else {
+					a.shareBtn.Disable()
+				}
 				a.updateMuteButtons()
+				a.updateJoinChannelButton()
+				a.updateShareButton()
+				a.updateShareChannelButton()
 				a.chatEntry.Enable()
 				role := a.engine.GetRole()
 				if role == "admin" || role == "moderator" {
@@ -263,7 +367,16 @@ func (a *App) bindEvents() {
 	a.engine.OnChannelsUpdate = func(channels []pb.ChannelInfo) {
 		fyne.Do(func() {
 			a.channels = channels
+			if a.engine.GetState() == client.StateConnected {
+				if a.engine.IsScreenShareEnabled() {
+					a.shareBtn.Enable()
+				} else {
+					a.shareBtn.Disable()
+				}
+			}
 			a.channelList.Refresh()
+			a.syncSelectedChannel()
+			a.updateShareButton()
 		})
 	}
 
@@ -313,6 +426,33 @@ func (a *App) bindEvents() {
 				a.chatBox.Refresh()
 			}
 			a.chatScroll.ScrollToBottom()
+		})
+	}
+
+	a.engine.OnScreenShareEvent = func(event *pb.ScreenShareEvent) {
+		fyne.Do(func() {
+			a.activeScreenShare = event
+			a.updateShareButton()
+			a.updateWatchButton()
+			if event != nil && !event.Active && a.watchingScreenFeed {
+				a.watchingScreenFeed = false
+				a.showChatPanel()
+			}
+			a.updateShareChannelButton()
+		})
+	}
+
+	a.engine.OnScreenFrame = func(img image.Image) {
+		fyne.Do(func() {
+			if img == nil {
+				a.screenImage.Image = nil
+				a.screenLabel.SetText("No active screen share")
+				a.screenImage.Refresh()
+				return
+			}
+			a.screenLabel.SetText("Shared Screen")
+			a.screenImage.Image = img
+			a.screenImage.Refresh()
 		})
 	}
 
@@ -403,6 +543,140 @@ func (a *App) bindEvents() {
 			}
 		})
 	}
+}
+
+func (a *App) updateShareButton() {
+	if a.engine.GetState() != client.StateConnected {
+		a.shareBtn.SetText("Share Screen")
+		a.shareBtn.Disable()
+		return
+	}
+	if a.engine.GetChannelID() == 0 {
+		a.shareBtn.SetText("Join Channel First")
+		a.shareBtn.Disable()
+		return
+	}
+	if !a.engine.IsScreenShareEnabled() {
+		a.shareBtn.SetText("Share Disabled")
+		a.shareBtn.Disable()
+		return
+	}
+	if a.activeScreenShare != nil && a.activeScreenShare.Active && a.activeScreenShare.SessionID == a.engine.GetSessionID() {
+		a.shareBtn.SetText("Stop Sharing")
+		a.shareBtn.Enable()
+		return
+	}
+	if a.activeScreenShare != nil && a.activeScreenShare.Active {
+		a.shareBtn.SetText("Channel Busy")
+		a.shareBtn.Disable()
+		return
+	}
+	a.shareBtn.SetText("Share Screen")
+	a.shareBtn.Enable()
+}
+
+func (a *App) updateJoinChannelButton() {
+	if a.engine.GetState() != client.StateConnected || a.selectedChannelID == 0 {
+		a.joinChannelBtn.Disable()
+		return
+	}
+	if a.selectedChannelID == a.engine.GetChannelID() {
+		a.joinChannelBtn.Disable()
+		return
+	}
+	a.joinChannelBtn.Enable()
+}
+
+func (a *App) syncSelectedChannel() {
+	if len(a.channels) == 0 {
+		a.selectedChannelID = 0
+		a.updateJoinChannelButton()
+		return
+	}
+	if a.selectedChannelID != 0 {
+		if index, ok := a.channelIndexByID(a.selectedChannelID); ok {
+			a.channelList.Select(index)
+			a.updateJoinChannelButton()
+			return
+		}
+	}
+
+	selectedChannelID := a.engine.GetChannelID()
+	if selectedChannelID == 0 {
+		for _, item := range a.flattenChannels() {
+			if item.isChannel {
+				selectedChannelID = item.channelID
+				break
+			}
+		}
+	}
+	if selectedChannelID == 0 {
+		a.updateJoinChannelButton()
+		return
+	}
+
+	a.selectedChannelID = selectedChannelID
+	if index, ok := a.channelIndexByID(selectedChannelID); ok {
+		a.channelList.Select(index)
+	}
+	a.updateJoinChannelButton()
+}
+
+func (a *App) channelIndexByID(channelID int64) (widget.ListItemID, bool) {
+	items := a.flattenChannels()
+	for index, item := range items {
+		if item.isChannel && item.channelID == channelID {
+			return widget.ListItemID(index), true
+		}
+	}
+	return 0, false
+}
+
+func (a *App) updateShareChannelButton() {
+	if a.engine.GetState() != client.StateConnected {
+		a.shareChannelBtn.Hide()
+		return
+	}
+	if a.activeScreenShare == nil || !a.activeScreenShare.Active || a.activeScreenShare.SessionID != a.engine.GetSessionID() {
+		a.shareChannelBtn.Hide()
+		return
+	}
+	a.shareChannelBtn.Show()
+}
+
+func (a *App) updateWatchButton() {
+	if a.activeScreenShare == nil || !a.activeScreenShare.Active || a.activeScreenShare.ChannelID != a.engine.GetChannelID() {
+		a.watchBtn.Hide()
+		a.backBtn.Hide()
+		return
+	}
+	if a.activeScreenShare.SessionID == a.engine.GetSessionID() {
+		a.watchBtn.Hide()
+		a.backBtn.Hide()
+		return
+	}
+	a.watchBtn.SetText(fmt.Sprintf("Watch %s", a.activeScreenShare.Username))
+	if a.watchingScreenFeed {
+		a.watchBtn.Hide()
+		a.backBtn.Show()
+		return
+	}
+	a.watchBtn.Show()
+	a.backBtn.Hide()
+}
+
+func (a *App) showChatPanel() {
+	a.screenBox.Hide()
+	a.chatScroll.Show()
+	a.chatEntry.Show()
+	a.updateWatchButton()
+}
+
+func (a *App) showScreenPanel() {
+	a.chatScroll.Hide()
+	a.screenBox.Show()
+	a.chatEntry.Hide()
+	a.updateWatchButton()
 }
 
 func (a *App) startGlobalHotkeys() {
@@ -1017,21 +1291,35 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 func (a *App) onChannelListSelect(id widget.ListItemID) {
 	item := a.getItem(id)
 	if item.isChannel {
+		a.selectedChannelID = item.channelID
+		a.updateJoinChannelButton()
 		if a.engine.GetState() != client.StateConnected {
 			return
 		}
-		if err := a.engine.JoinChannel(item.channelID); err != nil {
-			dialog.ShowError(err, a.window)
-		}
-		a.chatBox.Objects = nil
-		a.chatBox.Refresh()
 		return
 	}
+	a.updateJoinChannelButton()
 
 	// Clicking on a user shows admin actions (for admin/mod)
 	if a.engine.GetRole() == "admin" || a.engine.GetRole() == "moderator" {
 		a.showUserContextMenu(item.user)
 	}
+}
+
+func (a *App) joinSelectedChannel() {
+	if a.engine.GetState() != client.StateConnected {
+		return
+	}
+	if a.selectedChannelID == 0 {
+		return
+	}
+	if err := a.engine.JoinChannel(a.selectedChannelID); err != nil {
+		dialog.ShowError(err, a.window)
+		return
+	}
+	a.chatBox.Objects = nil
+	a.chatBox.Refresh()
+	a.updateJoinChannelButton()
 }
 
 func (a *App) showUserContextMenu(user pb.UserInfo) {

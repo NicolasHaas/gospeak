@@ -1,6 +1,6 @@
 # GoSpeak Protocol
 
-GoSpeak uses two transport layers: a **TCP/TLS 1.3 control plane** for signalling and a **UDP voice plane** for real-time audio.
+GoSpeak uses three transport layers: a **TCP/TLS 1.3 control plane** for signalling, a **UDP voice plane** for real-time audio, and a **TCP/TLS screen plane** for low-rate screen-share media.
 
 ## Control Plane (TCP/TLS)
 
@@ -29,6 +29,11 @@ Every control message is a `ControlMessage` struct with exactly one field set:
 - `KickUserRequest`
 - `BanUserRequest`
 - `ChatMessage`
+- `ScreenShareStartRequest`
+- `ScreenShareStopRequest`
+- `ScreenShareSubscribeRequest`
+- `ScreenShareUnsubscribeRequest`
+- `ScreenShareEvent`
 - `SetUserRoleRequest`
 - `ExportDataRequest`
 - `ImportChannelsRequest`
@@ -58,13 +63,13 @@ sequenceDiagram
         S->>S: Create user + personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, channels, autoToken}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels, autoToken}
         Note over C: Store personal token for reconnect
     else Existing user
         S->>S: Require personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, channels}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels}
     else Invalid token / banned
         S->>C: ErrorResponse{code, message}
         S->>S: Close connection
@@ -114,6 +119,19 @@ sequenceDiagram
     S->>A: ChatEvent (echo back)
     S->>B: ChatEvent (to all in channel)
 ```
+
+### Screen Sharing Signalling
+
+The control plane carries screen-share lifecycle messages only:
+
+- `ScreenShareStartRequest`
+- `ScreenShareStopRequest`
+- `ScreenShareSubscribeRequest`
+- `ScreenShareShareRequest`
+- `ScreenShareUnsubscribeRequest`
+- `ScreenShareEvent`
+
+`ScreenShareEvent` is broadcast to channel members for presence updates. A targeted copy with an `encryption_key` is sent to the active sharer, to users already in the channel when sharing starts, and to current channel members if the sharer later shares the active key with the channel again.
 
 ### Admin Operations
 
@@ -204,3 +222,40 @@ Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 
 - `SessionID` is unique per connection (assigned by server)
 - `SeqNum` is a monotonically increasing `uint32` per sender (~994 days at 50 packets/sec before wrap)
+
+---
+
+## Screen Plane (TCP/TLS)
+
+- **Port**: 9603 (default)
+- **Transport**: Dedicated TCP/TLS connection per authenticated session
+- **Authentication**: Ephemeral `screen_auth_token` issued in `AuthResponse`
+- **Encryption**: AES-128-GCM with one key per active screen share
+- **Usage**: Low-rate JPEG frames, forwarded only to subscribed viewers
+
+### Connection Flow
+
+1. Client authenticates on the control plane.
+2. Server returns `screen_addr` and a session-scoped `screen_auth_token`.
+3. Client opens the screen-plane TLS connection and authenticates with that token.
+4. Screen-share start/stop/subscribe still happen on the control plane.
+5. Actual encrypted frame packets flow over the screen plane.
+
+### Relay Logic
+
+The server does not need to decode screen frames. It:
+
+1. Authenticates a screen-plane connection against the existing control session.
+2. Accepts encrypted packets from the active sharer only.
+3. Looks up the sharer's subscribed viewers.
+4. Forwards each packet as-is to those viewers.
+
+### Packet Format
+
+Each screen packet is length-prefixed on the TCP stream:
+
+```
+[Length:4B][SessionID:4B][SeqNum:4B][Ciphertext+AuthTag]
+```
+
+The AES-GCM additional data is the 8-byte packet header `[SessionID|SeqNum]`. The encrypted payload contains timestamp, frame dimensions, frame format, and frame bytes.

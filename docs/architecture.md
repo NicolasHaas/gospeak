@@ -1,6 +1,6 @@
 # GoSpeak Architecture
 
-GoSpeak is a privacy-focused voice communication server and client built in Go. It follows a Selective Forwarding Unit (SFU) architecture, the server relays encrypted voice packets between clients without decoding them.
+GoSpeak is a privacy-focused voice communication server and client built in Go. It uses a split transport architecture: a TLS control plane for signalling, a UDP SFU for voice, and a TLS relay plane for encrypted screen sharing.
 
 ## High-Level Overview
 
@@ -15,6 +15,7 @@ graph TB
     subgraph Server
         CTRL[Control Plane<br/>TCP/TLS 1.3<br/>:9600]
         SFU[Voice Plane<br/>UDP SFU<br/>:9601]
+        SCR[Screen Plane<br/>TCP/TLS Relay<br/>:9603]
         DB[(SQLite<br/>Users, Channels,<br/>Tokens, Bans)]
     end
 
@@ -25,6 +26,9 @@ graph TB
     C1 <-->|AES-128-GCM<br/>Opus packets| SFU
     C2 <-->|AES-128-GCM<br/>Opus packets| SFU
     C3 <-->|AES-128-GCM<br/>Opus packets| SFU
+
+    C1 <-->|AES-128-GCM<br/>Screen packets| SCR
+    C2 <-->|AES-128-GCM<br/>Screen packets| SCR
 
     CTRL --- DB
 ```
@@ -47,6 +51,7 @@ graph LR
         CRYPTO[pkg/crypto]
         MODEL[pkg/model]
         RBAC[pkg/rbac]
+        SCREEN[pkg/screenshare]
         STORE[pkg/store]
     end
 
@@ -63,6 +68,7 @@ graph LR
     CLT --> PB
     CLT -.->|audio interfaces| AUDIO
     CLT --> CRYPTO
+    CLT --> SCREEN
 
     UI --> CLT
     UI --> AUDIO
@@ -83,10 +89,11 @@ graph LR
 | `cmd/client` | Client entry point — launches the Fyne GUI |
 | `pkg/server` | Server core: TLS listener, control handler, voice SFU, channel/session management, YAML config |
 | `pkg/client` | Client engine: connection management, voice pipeline, jitter buffer, bookmarks, settings, hotkeys |
-| `pkg/protocol` | Length-prefixed JSON framing for the control plane |
+| `pkg/protocol` | Framing and packet formats for control, voice, and screen-share transports |
 | `pkg/protocol/pb` | All control message type definitions (structs with JSON tags) |
 | `pkg/audio` | Audio interfaces (`Capturer`, `Player`, `AudioEncoder`, `AudioDecoder`, `VoiceDetector`, `DecoderFactory`, `DeviceLister`) + PortAudio/Opus default implementations |
 | `pkg/crypto` | AES-128-GCM voice encryption, key generation, token hashing (SHA-256), password hashing (Argon2id) |
+| `pkg/screenshare` | Platform-specific screen capture and JPEG encoding helpers |
 | `pkg/model` | Core domain types: User, Channel, Token, Ban, Session, Role, Permission |
 | `pkg/rbac` | Role-based access control — permission matrix for User/Moderator/Admin |
 | `pkg/store` | `DataStore` interface + SQLite and in-memory implementations |
@@ -107,6 +114,7 @@ sequenceDiagram
     participant Store as DataStore
     participant TLS as TLS Listener
     participant UDP as UDP Listener
+    participant SCR as Screen Listener
 
     Main->>Store: Open database
     Main->>Srv: New(config, deps)
@@ -117,10 +125,12 @@ sequenceDiagram
     Srv->>Store: Ensure admin token exists (first run only)
     Srv->>TLS: StartControl(:9600)
     Srv->>UDP: StartVoice(:9601)
+    Srv->>SCR: StartScreen(:9603)
     Note over Srv: Server running — accepting connections
     Srv-->>Main: Block until SIGINT/SIGTERM
     Srv->>TLS: Close
     Srv->>UDP: Close
+    Srv->>SCR: Close
     Srv->>Store: Close
 ```
 
@@ -132,16 +142,18 @@ sequenceDiagram
     participant Eng as Engine
     participant TLS as TLS Connection
     participant UDP as UDP Voice
+    participant SCR as Screen TLS
     participant Srv as Server
 
     UI->>Eng: Connect(host, token?, username)
     Eng->>TLS: Dial TCP/TLS (skip verify for self-signed)
     TLS->>Srv: TLS 1.3 Handshake
     Eng->>Srv: AuthRequest{token?, username}
-    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, channels, autoToken?}
+    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels, autoToken?}
     Note over Eng: Store autoToken for future logins
     Eng->>Eng: Create VoiceCipher from encryptionKey
     Eng->>UDP: Dial UDP to server:9601
+    Eng->>SCR: Dial TCP/TLS to server:9603
     Eng->>Eng: Start audio capture + playback
     Eng->>UI: OnStateChange(Connected)
     Eng->>UI: OnChannelsUpdate(channels)
