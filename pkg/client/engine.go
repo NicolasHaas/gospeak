@@ -29,6 +29,7 @@ var (
 const (
 	defaultScreenShareCaptureTimeout = 15 * time.Second
 	defaultScreenShareStartTimeout   = 10 * time.Second
+	keepAliveInterval = 5 * time.Second
 )
 
 // State represents the client's connection state.
@@ -90,6 +91,10 @@ type Engine struct {
 
 	// Audio initialization function (allows platform-specific audio backends)
 	initAudioFn func() error
+
+	// Keep-alive state
+	lastSendTime time.Time
+	silenceBuf   []int16
 
 	// Callbacks for UI updates
 	OnStateChange      func(state State)
@@ -237,6 +242,14 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		e.OnChannelsUpdate(authResp.Channels)
 	}
 
+	// Auto-join the first available channel so the user isn't stuck in "no channel"
+	if len(authResp.Channels) > 0 {
+		firstCh := authResp.Channels[0]
+		if err := e.JoinChannel(firstCh.ID); err != nil {
+			slog.Warn("auto-join channel failed", "channel", firstCh.Name, "err", err)
+		}
+	}
+
 	// Notify if server auto-generated a token for this user
 	if authResp.AutoToken != "" && e.OnAutoToken != nil {
 		e.OnAutoToken(authResp.AutoToken)
@@ -292,6 +305,8 @@ func (e *Engine) initAudioDefault() error {
 	e.capture = capture
 	e.playback = playback
 	e.encoder = encoder
+	e.lastSendTime = time.Now()
+	e.silenceBuf = make([]int16, 960)
 	e.mu.Unlock()
 
 	return nil
@@ -339,6 +354,14 @@ func (e *Engine) captureLoop() {
 
 		// Only send if VAD active, not muted, and in a channel
 		if !active || muted || channelID == 0 {
+			// Send keep-alive silence packets so the server knows our UDP address
+			if channelID != 0 && time.Since(e.lastSendTime) >= keepAliveInterval {
+				silenceData, err := encoder.Encode(e.silenceBuf)
+				if err == nil {
+					_ = voice.SendVoice(silenceData, timestamp)
+				}
+				e.lastSendTime = time.Now()
+			}
 			timestamp += 960
 			continue
 		}
@@ -353,6 +376,7 @@ func (e *Engine) captureLoop() {
 		if err := voice.SendVoice(opusData, timestamp); err != nil {
 			slog.Debug("voice send error", "err", err)
 		}
+		e.lastSendTime = time.Now()
 
 		timestamp += 960
 	}
