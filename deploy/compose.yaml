@@ -16,7 +16,7 @@ services:
     volumes:
       - gospeak-data:/data
     restart: unless-stopped
-    command: ["-open"]
+    command: ["-open", "-screen-share"]
 
 volumes:
   gospeak-data:
