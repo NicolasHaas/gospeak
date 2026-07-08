@@ -11,7 +11,7 @@ Files
    - Replace the SSH public key placeholder.
    - Adjust the open mode, schedules, and ports to your needs.
 2. In your cloud provider console, create a server with a Rocky Linux 10 image and paste the contents of `deploy/cloud-init.yaml` into the user-data field.
-3. At the cloud provider firewall, only allow inbound `9600/tcp` and `9601/udp` from the internet. Allow `22/tcp` only from your public IP for admin access.
+3. At the cloud provider firewall, only allow inbound `9600/tcp`, `9601/udp`, and `9603/tcp` from the internet. Allow `22/tcp` only from your public IP for admin access.
 4. Boot the server and check the service:
 
 ```bash
@@ -23,13 +23,13 @@ systemctl status gospeak
 This configuration is designed to be hands-off after first boot while staying secure.
 
 - SSH key-only access, root login disabled.
-- Firewall allows only SSH, the control port, and the voice port.
+- Firewall allows only SSH, the control port, the voice port, and the screen-share port.
 - OS updates are applied automatically via `dnf-automatic` with a reboot when needed.
 - The GoSpeak container auto-updates via Podman auto-update and a systemd timer.
 
 ## Open server mode
 
-The provided cloud-init starts GoSpeak with `-open`, which allows anyone to join without a token.
+The provided cloud-init starts GoSpeak with `-open` and `-screen-share`, which allows anyone to join without a token and enables per-channel screen sharing.
 To require tokens, remove `-open` from `deploy/cloud-init.yaml` and then use the admin token
 printed on first start to generate user tokens.
 
@@ -64,6 +64,8 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-key` | *(auto-generated)* | TLS private key file (use with `-cert`) |
 | `-data` | `.` | Data directory for generated files (certs, DB, etc.) |
 | `-open` | `false` | Allow users to join without a token |
+| `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
+| `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(empty)* | YAML file defining channels created on startup |
 | `-metrics` | `:9602` | Prometheus /metrics bind address (empty to disable) |
 | `-export-users` | `false` | Export all users as YAML and exit |
@@ -75,4 +77,5 @@ These flags map directly to `gospeak-server` and are all supported options.
 
 - `9600/tcp`: TLS control plane
 - `9601/udp`: encrypted voice
+- `9603/tcp`: encrypted screen-share relay (required when `-screen-share` is enabled)
 - `9602/tcp`: metrics (optional; not exposed by default)

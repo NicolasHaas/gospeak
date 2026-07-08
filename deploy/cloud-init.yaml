@@ -49,7 +49,7 @@ write_files:
       Volume=/var/lib/gospeak:/data:Z
       AutoUpdate=registry
       PodmanArgs=--cap-drop=ALL --security-opt=no-new-privileges
-      Exec=-open -data /data -db /data/gospeak.db
+      Exec=-open -screen-share -data /data -db /data/gospeak.db
 
       [Service]
       Restart=always
