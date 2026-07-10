@@ -105,7 +105,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-addr` | `:9600` | TCP/TLS bind address |
+| `-control` | `:9600` | TCP/TLS control plane bind address |
 | `-voice` | `:9601` | UDP voice bind address |
 | `-db` | `gospeak.db` | SQLite database path |
 | `-data` | `.` | Directory for auto-generated TLS certs |

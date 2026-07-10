@@ -29,7 +29,7 @@ var (
 const (
 	defaultScreenShareCaptureTimeout = 15 * time.Second
 	defaultScreenShareStartTimeout   = 10 * time.Second
-	keepAliveInterval = 5 * time.Second
+	keepAliveInterval                = 5 * time.Second
 )
 
 // State represents the client's connection state.
@@ -518,7 +518,7 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 		// Ping/pong handled silently
 
 	case msg.CreateTokenResp != nil:
-		slog.Info("token created", "token", msg.CreateTokenResp.Token)
+		slog.Debug("token created", "token", msg.CreateTokenResp.Token)
 		if e.OnTokenCreated != nil {
 			e.OnTokenCreated(msg.CreateTokenResp.Token)
 		}

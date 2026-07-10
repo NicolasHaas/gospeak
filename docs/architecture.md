@@ -52,7 +52,7 @@ graph LR
         MODEL[pkg/model]
         RBAC[pkg/rbac]
         SCREEN[pkg/screenshare]
-        STORE[pkg/store]
+        STORE[pkg/datastore]
     end
 
     UI[ui/app.go]
@@ -62,7 +62,7 @@ graph LR
     SRV --> CRYPTO
     SRV --> MODEL
     SRV --> RBAC
-    SRV -.->|store.DataStore| STORE
+    SRV -.->|datastore.DataProviderFactory| STORE
 
     CLT --> PROTO
     CLT --> PB
@@ -96,14 +96,14 @@ graph LR
 | `pkg/screenshare` | Platform-specific screen capture and JPEG encoding helpers |
 | `pkg/model` | Core domain types: User, Channel, Token, Ban, Session, Role, Permission |
 | `pkg/rbac` | Role-based access control — permission matrix for User/Moderator/Admin |
-| `pkg/store` | `DataStore` interface + SQLite and in-memory implementations |
+| `pkg/datastore` | `DataProviderFactory` interface + SQLite implementation |
 | `ui` | Fyne v2 desktop GUI with channel tree, chat, settings, admin tools |
 
 ## Onion Architecture
 
 GoSpeak follows an **onion (hexagonal) architecture** core business logic depends on interfaces. This allows swapping backends without touching the server or client logic.
 
-The server receives its dependencies (notably `store.DataStore`) from `cmd/server` via `server.Dependencies`. This keeps `pkg/server` free of concrete implementations and makes tests easy to write with the in-memory store.
+The server receives its dependencies (notably `datastore.DataProviderFactory`) from `cmd/server` via `server.Dependencies`. This keeps `pkg/server` free of concrete implementations.
 
 ## Server Lifecycle
 
