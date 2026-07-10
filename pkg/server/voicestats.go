@@ -79,11 +79,11 @@ func (s *Server) LogVoiceDebug() {
 
 		hints := ""
 		if recv == 0 && snap.Muted {
-			hints = "no packets sent — user is muted"
+			hints = "no packets sent, user is muted"
 		} else if recv == 0 {
-			hints = "no packets sent — possibly not in a channel or mic inactive"
+			hints = "no packets sent, possibly not in a channel or mic inactive"
 		} else if recv > 0 && fwd == 0 {
-			hints = "packets forwarded to no one — no other non-deafened users in channel"
+			hints = "packets not forwarded, no other listener in channel"
 		}
 
 		attrs := []any{

@@ -506,9 +506,9 @@ func (e *Engine) logVoiceDebug() {
 	case muted:
 		hints = append(hints, "muted")
 	case sentVoice == 0 && sentKeepalive == 0:
-		hints = append(hints, "no packets sent — check mic or not in a channel")
+		hints = append(hints, "no packets sent, check mic or not in a channel")
 	case sentVoice == 0 && sentKeepalive > 0:
-		hints = append(hints, "only keepalive packets — VAD may need adjustment")
+		hints = append(hints, "only keepalive packets, VAD may need adjustment")
 	default:
 		hints = append(hints, "sending audio")
 	}
@@ -516,7 +516,7 @@ func (e *Engine) logVoiceDebug() {
 	case deafened:
 		hints = append(hints, "deafened")
 	case recv == 0 && speakerCount == 0:
-		hints = append(hints, "no audio received — check speaker or deafen status")
+		hints = append(hints, "no audio received, nobody else is speaking")
 	case recv > 0:
 		hints = append(hints, fmt.Sprintf("receiving audio from %d speaker(s)", speakerCount))
 	}
