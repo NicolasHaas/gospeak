@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +27,10 @@ func (s *Server) Run() error {
 		return fmt.Errorf("server: generate voice key: %w", err)
 	}
 	s.voiceKey = voiceKey
+
+	// Enable voice debug counters before listeners start so voiceLoop reads a
+	// stable value (avoids a data race with the assignment below).
+	s.voiceDebugEnabled = slog.Default().Enabled(context.Background(), slog.LevelDebug)
 
 	// Ensure default "Lobby" channel exists
 	channels, _ := st.NonTx().ListChannels()
@@ -72,8 +77,10 @@ func (s *Server) Run() error {
 		s.StartMetricsHTTP()
 	}
 
-	// Start periodic voice debug logging (stopped via s.ctx cancellation)
-	s.startVoiceDebugLogging(10 * time.Second)
+	// Start periodic voice debug logging (only when log level is debug)
+	if s.voiceDebugEnabled {
+		s.startVoiceDebugLogging(10 * time.Second)
+	}
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)

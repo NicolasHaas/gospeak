@@ -92,7 +92,8 @@ type Engine struct {
 	// Audio initialization function (allows platform-specific audio backends)
 	initAudioFn func() error
 
-	// Voice debug counters (reset each log interval)
+	// Voice debug counters (reset each log interval; only used when debug is enabled)
+	voiceDebugEnabled   bool
 	voiceDebugMu        sync.Mutex
 	voiceDebugSent      int64
 	voiceDebugKeepalive int64
@@ -263,8 +264,11 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		e.OnAutoToken(authResp.AutoToken)
 	}
 
-	// Start periodic voice debug logging and keepalive loop
-	e.startVoiceDebugLogging()
+	// Start periodic voice debug logging (only when log level is debug)
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		e.voiceDebugEnabled = true
+		e.startVoiceDebugLogging()
+	}
 	go e.keepaliveLoop()
 
 	// Initialize audio devices asynchronously (PortAudio init is slow on Windows)
@@ -379,12 +383,14 @@ func (e *Engine) captureLoop() {
 
 		if err := voice.SendVoice(opusData, timestamp); err != nil {
 			slog.Debug("voice send error", "err", err)
-		} else {
+		} else if e.voiceDebugEnabled {
 			e.voiceDebugMu.Lock()
 			e.voiceDebugSent++
 			e.voiceDebugMu.Unlock()
 		}
+		e.mu.Lock()
 		e.lastSendTime = time.Now()
+		e.mu.Unlock()
 
 		timestamp += 960
 	}
@@ -449,10 +455,12 @@ func (e *Engine) processIncomingVoice(pkt *protocol.VoicePacket, playback audio.
 	}
 
 	// Track received packet for debug logging
-	e.voiceDebugMu.Lock()
-	e.voiceDebugRecv++
-	e.voiceDebugSpeakers[pkt.SessionID] = struct{}{}
-	e.voiceDebugMu.Unlock()
+	if e.voiceDebugEnabled {
+		e.voiceDebugMu.Lock()
+		e.voiceDebugRecv++
+		e.voiceDebugSpeakers[pkt.SessionID] = struct{}{}
+		e.voiceDebugMu.Unlock()
+	}
 
 	// Push to jitter buffer
 	jb.Push(pkt.SeqNum, opusData)
@@ -595,9 +603,11 @@ func (e *Engine) keepaliveLoop() {
 			}
 			timestamp += 960
 
-			e.voiceDebugMu.Lock()
-			e.voiceDebugKeepalive++
-			e.voiceDebugMu.Unlock()
+			if e.voiceDebugEnabled {
+				e.voiceDebugMu.Lock()
+				e.voiceDebugKeepalive++
+				e.voiceDebugMu.Unlock()
+			}
 
 			e.mu.Lock()
 			e.lastSendTime = time.Now()

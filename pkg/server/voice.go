@@ -103,9 +103,12 @@ func (s *Server) voiceLoop() {
 		}
 
 		// Track per-session voice debug stats
-		stat := s.getOrCreateStat(pkt.SessionID)
-		stat.packetsReceived.Add(1)
-		stat.lastActivity.Store(time.Now().UnixNano())
+		var stat *perSessionVoiceStat
+		if s.voiceDebugEnabled {
+			stat = s.getOrCreateStat(pkt.SessionID)
+			stat.packetsReceived.Add(1)
+			stat.lastActivity.Store(time.Now().UnixNano())
+		}
 
 		channelID := actualChannel
 		members := s.channels.Members(channelID)
@@ -131,7 +134,9 @@ func (s *Server) voiceLoop() {
 			} else {
 				s.metrics.VoicePacketsOut.Add(1)
 				s.metrics.VoiceBytesOut.Add(int64(n))
-				stat.packetsForwarded.Add(1)
+				if stat != nil {
+					stat.packetsForwarded.Add(1)
+				}
 			}
 		}
 	}

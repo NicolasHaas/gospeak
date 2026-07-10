@@ -27,6 +27,14 @@ func (s *Server) getOrCreateStat(sessionID uint32) *perSessionVoiceStat {
 	return stat
 }
 
+// removeVoiceStat deletes a session's counters. Called on disconnect so the
+// map does not grow unbounded on long-running servers.
+func (s *Server) removeVoiceStat(sessionID uint32) {
+	s.voiceStatsMu.Lock()
+	defer s.voiceStatsMu.Unlock()
+	delete(s.voiceStats, sessionID)
+}
+
 // resetVoiceStats zeroes all per-session counters. It keeps the map
 // entries so they are reused across intervals.
 func (s *Server) resetVoiceStats() {

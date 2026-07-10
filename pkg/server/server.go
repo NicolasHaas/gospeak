@@ -154,9 +154,10 @@ type Server struct {
 	voiceKey    []byte // shared AES-128 key for all voice encryption
 	authLimiter *authRateLimiter
 
-	// Per-session voice debug counters (reset each debug interval)
-	voiceStats   map[uint32]*perSessionVoiceStat
-	voiceStatsMu sync.Mutex
+	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
+	voiceDebugEnabled bool
+	voiceStats        map[uint32]*perSessionVoiceStat
+	voiceStatsMu      sync.Mutex
 
 	ctx    context.Context
 	cancel context.CancelFunc
