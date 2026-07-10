@@ -9,10 +9,14 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
+
+// connectTimeout bounds the control-plane TCP+TLS handshake.
+const connectTimeout = 3 * time.Second
 
 // EventHandler is a callback for incoming control events.
 type EventHandler func(msg *pb.ControlMessage)
@@ -33,7 +37,9 @@ func NewControlClient(addr string) (*ControlClient, error) {
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}
-	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: connect control: %w", err)
 	}
