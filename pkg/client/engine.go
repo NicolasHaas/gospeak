@@ -92,6 +92,13 @@ type Engine struct {
 	// Audio initialization function (allows platform-specific audio backends)
 	initAudioFn func() error
 
+	// Voice debug counters (reset each log interval)
+	voiceDebugMu        sync.Mutex
+	voiceDebugSent      int64
+	voiceDebugKeepalive int64
+	voiceDebugRecv      int64
+	voiceDebugSpeakers  map[uint32]struct{}
+
 	// Keep-alive state
 	lastSendTime time.Time
 	silenceBuf   []int16
@@ -117,16 +124,17 @@ type Engine struct {
 func NewEngine() *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		state:             StateDisconnected,
-		decoders:          make(map[uint32]audio.AudioDecoder),
-		jitterBufs:        make(map[uint32]*JitterBuffer),
-		ctx:               ctx,
-		cancel:            cancel,
-		vad:               audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
-		decoderFactory:    &defaultDecoderFactory{},
-		encodeScreenFn:    screenshare.EncodeJPEG,
-		screenCaptureWait: defaultScreenShareCaptureTimeout,
-		screenStartWait:   defaultScreenShareStartTimeout,
+		state:              StateDisconnected,
+		decoders:           make(map[uint32]audio.AudioDecoder),
+		jitterBufs:         make(map[uint32]*JitterBuffer),
+		voiceDebugSpeakers: make(map[uint32]struct{}),
+		ctx:                ctx,
+		cancel:             cancel,
+		vad:                audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
+		decoderFactory:     &defaultDecoderFactory{},
+		encodeScreenFn:     screenshare.EncodeJPEG,
+		screenCaptureWait:  defaultScreenShareCaptureTimeout,
+		screenStartWait:    defaultScreenShareStartTimeout,
 	}
 	e.captureScreenFn = func(displayIndex int) (image.Image, error) {
 		return screenshare.CaptureDisplay(displayIndex)
@@ -255,6 +263,10 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		e.OnAutoToken(authResp.AutoToken)
 	}
 
+	// Start periodic voice debug logging and keepalive loop
+	e.startVoiceDebugLogging()
+	go e.keepaliveLoop()
+
 	// Initialize audio devices asynchronously (PortAudio init is slow on Windows)
 	go func() {
 		if err := e.initAudioFn(); err != nil {
@@ -352,16 +364,8 @@ func (e *Engine) captureLoop() {
 			e.OnVoiceActivity(active)
 		}
 
-		// Only send if VAD active, not muted, and in a channel
+		// Skip sending when VAD is idle, muted, or not in a channel
 		if !active || muted || channelID == 0 {
-			// Send keep-alive silence packets so the server knows our UDP address
-			if channelID != 0 && time.Since(e.lastSendTime) >= keepAliveInterval {
-				silenceData, err := encoder.Encode(e.silenceBuf)
-				if err == nil {
-					_ = voice.SendVoice(silenceData, timestamp)
-				}
-				e.lastSendTime = time.Now()
-			}
 			timestamp += 960
 			continue
 		}
@@ -375,6 +379,10 @@ func (e *Engine) captureLoop() {
 
 		if err := voice.SendVoice(opusData, timestamp); err != nil {
 			slog.Debug("voice send error", "err", err)
+		} else {
+			e.voiceDebugMu.Lock()
+			e.voiceDebugSent++
+			e.voiceDebugMu.Unlock()
 		}
 		e.lastSendTime = time.Now()
 
@@ -440,6 +448,12 @@ func (e *Engine) processIncomingVoice(pkt *protocol.VoicePacket, playback audio.
 		return
 	}
 
+	// Track received packet for debug logging
+	e.voiceDebugMu.Lock()
+	e.voiceDebugRecv++
+	e.voiceDebugSpeakers[pkt.SessionID] = struct{}{}
+	e.voiceDebugMu.Unlock()
+
 	// Push to jitter buffer
 	jb.Push(pkt.SeqNum, opusData)
 
@@ -464,6 +478,130 @@ func (e *Engine) processIncomingVoice(pkt *protocol.VoicePacket, playback audio.
 
 		if err := playback.WriteFrame(pcm); err != nil {
 			slog.Debug("playback error", "err", err)
+		}
+	}
+}
+
+// logVoiceDebug logs voice activity for the last interval with diagnostic hints.
+func (e *Engine) logVoiceDebug() {
+	e.voiceDebugMu.Lock()
+	sentVoice := e.voiceDebugSent
+	sentKeepalive := e.voiceDebugKeepalive
+	recv := e.voiceDebugRecv
+	speakerCount := len(e.voiceDebugSpeakers)
+	e.voiceDebugSent = 0
+	e.voiceDebugKeepalive = 0
+	e.voiceDebugRecv = 0
+	e.voiceDebugSpeakers = make(map[uint32]struct{})
+	e.voiceDebugMu.Unlock()
+
+	e.mu.RLock()
+	muted := e.muted
+	deafened := e.deafened
+	channelID := e.channelID
+	e.mu.RUnlock()
+
+	var hints []string
+	switch {
+	case muted:
+		hints = append(hints, "muted")
+	case sentVoice == 0 && sentKeepalive == 0:
+		hints = append(hints, "no packets sent — check mic or not in a channel")
+	case sentVoice == 0 && sentKeepalive > 0:
+		hints = append(hints, "only keepalive packets — VAD may need adjustment")
+	default:
+		hints = append(hints, "sending audio")
+	}
+	switch {
+	case deafened:
+		hints = append(hints, "deafened")
+	case recv == 0 && speakerCount == 0:
+		hints = append(hints, "no audio received — check speaker or deafen status")
+	case recv > 0:
+		hints = append(hints, fmt.Sprintf("receiving audio from %d speaker(s)", speakerCount))
+	}
+
+	attrs := []any{
+		"sent_voice", sentVoice,
+		"sent_keepalive", sentKeepalive,
+		"recv", recv,
+		"speakers", speakerCount,
+		"muted", muted,
+		"deafened", deafened,
+		"channel", channelID,
+	}
+	if len(hints) > 0 {
+		attrs = append(attrs, "hint", strings.Join(hints, "; "))
+	}
+	slog.Debug("voice_debug", attrs...)
+}
+
+// startVoiceDebugLogging starts a periodic goroutine that logs voice debug stats.
+func (e *Engine) startVoiceDebugLogging() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-ticker.C:
+				e.logVoiceDebug()
+			}
+		}
+	}()
+}
+
+// keepaliveLoop sends silence packets every keepAliveInterval to keep the
+// server aware of our UDP address. It is independent of VAD state so that
+// the connection is maintained during silence.
+func (e *Engine) keepaliveLoop() {
+	var timestamp uint32
+
+	ticker := time.NewTicker(keepAliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			e.mu.RLock()
+			voice := e.voice
+			encoder := e.encoder
+			channelID := e.channelID
+			lastSend := e.lastSendTime
+			silenceBuf := e.silenceBuf
+			e.mu.RUnlock()
+
+			if voice == nil || encoder == nil || channelID == 0 || silenceBuf == nil {
+				continue
+			}
+
+			// Skip if a real voice or keepalive packet was sent recently
+			if time.Since(lastSend) < keepAliveInterval {
+				continue
+			}
+
+			silenceData, err := encoder.Encode(silenceBuf)
+			if err != nil {
+				slog.Debug("keepalive encode error", "err", err)
+				continue
+			}
+
+			if err := voice.SendVoice(silenceData, timestamp); err != nil {
+				slog.Debug("keepalive send error", "err", err)
+				continue
+			}
+			timestamp += 960
+
+			e.voiceDebugMu.Lock()
+			e.voiceDebugKeepalive++
+			e.voiceDebugMu.Unlock()
+
+			e.mu.Lock()
+			e.lastSendTime = time.Now()
+			e.mu.Unlock()
 		}
 	}
 }

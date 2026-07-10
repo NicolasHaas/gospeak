@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
@@ -101,6 +102,11 @@ func (s *Server) voiceLoop() {
 			continue // not in this channel, discard
 		}
 
+		// Track per-session voice debug stats
+		stat := s.getOrCreateStat(pkt.SessionID)
+		stat.packetsReceived.Add(1)
+		stat.lastActivity.Store(time.Now().UnixNano())
+
 		channelID := actualChannel
 		members := s.channels.Members(channelID)
 
@@ -125,6 +131,7 @@ func (s *Server) voiceLoop() {
 			} else {
 				s.metrics.VoicePacketsOut.Add(1)
 				s.metrics.VoiceBytesOut.Add(int64(n))
+				stat.packetsForwarded.Add(1)
 			}
 		}
 	}

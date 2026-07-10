@@ -153,8 +153,13 @@ type Server struct {
 	screenConns map[uint32]net.Conn
 	voiceKey    []byte // shared AES-128 key for all voice encryption
 	authLimiter *authRateLimiter
-	ctx         context.Context
-	cancel      context.CancelFunc
+
+	// Per-session voice debug counters (reset each debug interval)
+	voiceStats   map[uint32]*perSessionVoiceStat
+	voiceStatsMu sync.Mutex
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New creates a new Server instance.
@@ -167,6 +172,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		screenShare: NewScreenShareManager(),
 		metrics:     NewMetrics(),
 		screenConns: make(map[uint32]net.Conn),
+		voiceStats:  make(map[uint32]*perSessionVoiceStat),
 		store:       deps.Store,
 		authLimiter: newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
 		ctx:         ctx,
