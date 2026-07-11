@@ -361,6 +361,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 		handler.removeConn(sessionID)
 		s.sessions.Remove(sessionID)
+		s.removeVoiceStat(sessionID)
 		s.metrics.ActiveConnections.Add(-1)
 		s.metrics.TotalDisconnects.Add(1)
 		slog.Info("client disconnected", "user", user.Username, "session", sessionID)
