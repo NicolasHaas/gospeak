@@ -90,14 +90,22 @@ func WriteControlMessage(w io.Writer, msg *pb.ControlMessage) error {
 		return fmt.Errorf("protocol: message too large: %d bytes", len(data))
 	}
 
-	// Write length prefix
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(data))) //nolint:gosec // length already bounds-checked above
-	if _, err := w.Write(lenBuf); err != nil {
-		return fmt.Errorf("protocol: write length: %w", err)
-	}
-	if _, err := w.Write(data); err != nil {
-		return fmt.Errorf("protocol: write payload: %w", err)
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data))) //nolint:gosec // length already bounds-checked above
+	copy(frame[4:], data)
+
+	for len(frame) > 0 {
+		n, writeErr := w.Write(frame)
+		if n < 0 || n > len(frame) {
+			return fmt.Errorf("protocol: invalid write count: %d", n)
+		}
+		frame = frame[n:]
+		if writeErr != nil {
+			return fmt.Errorf("protocol: write frame: %w", writeErr)
+		}
+		if n == 0 {
+			return fmt.Errorf("protocol: write frame: %w", io.ErrShortWrite)
+		}
 	}
 	return nil
 }

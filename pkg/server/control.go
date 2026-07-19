@@ -26,7 +26,7 @@ type ControlHandler struct {
 	server  *Server
 	store   datastore.DataProviderFactory
 	mu      sync.RWMutex
-	connMap map[uint32]net.Conn // sessionID -> TLS conn for sending events
+	connMap map[uint32]*controlClient // sessionID -> serialized outbound connection
 
 	// Rate limiting for temp sub-channel creation: userID -> last creation time
 	tempChanMu    sync.Mutex
@@ -38,7 +38,117 @@ const (
 	screenShareIdleSweep   = 5 * time.Second
 	authRateLimitAttempts  = 30
 	authRateLimitWindow    = 1 * time.Minute
+	controlWriteTimeout    = 5 * time.Second
+	controlSendQueueSize   = 64
 )
+
+var (
+	errControlClientClosed = errors.New("control client closed")
+	errControlQueueFull    = errors.New("control client send queue full")
+)
+
+type queuedControlMessage struct {
+	message *pb.ControlMessage
+	result  chan error
+}
+
+type controlClient struct {
+	net.Conn
+	sessionID uint32
+	sendQueue chan queuedControlMessage
+	done      chan struct{}
+	mu        sync.Mutex
+	closed    bool
+}
+
+func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
+	client := &controlClient{
+		Conn:      conn,
+		sessionID: sessionID,
+		sendQueue: make(chan queuedControlMessage, controlSendQueueSize),
+		done:      make(chan struct{}),
+	}
+	go client.writeLoop()
+	return client
+}
+
+func (c *controlClient) send(msg *pb.ControlMessage) error {
+	return c.enqueue(queuedControlMessage{message: msg})
+}
+
+func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
+	result := make(chan error, 1)
+	if err := c.enqueue(queuedControlMessage{message: msg, result: result}); err == nil {
+		select {
+		case <-result:
+		case <-time.After(controlWriteTimeout):
+		}
+	}
+	_ = c.Close()
+}
+
+func (c *controlClient) enqueue(item queuedControlMessage) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errControlClientClosed
+	}
+	select {
+	case c.sendQueue <- item:
+		c.mu.Unlock()
+		return nil
+	default:
+		c.mu.Unlock()
+		_ = c.Close()
+		return errControlQueueFull
+	}
+}
+
+func (c *controlClient) writeLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case item := <-c.sendQueue:
+			err := c.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
+			if err == nil {
+				err = protocol.WriteControlMessage(c.Conn, item.message)
+			}
+			_ = c.SetWriteDeadline(time.Time{})
+			if item.result != nil {
+				item.result <- err
+			}
+			if err != nil {
+				slog.Error("control write failed", "session", c.sessionID, "err", err)
+				_ = c.Close()
+				return
+			}
+		}
+	}
+}
+
+func (c *controlClient) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	close(c.done)
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func writeControlMessage(conn net.Conn, msg *pb.ControlMessage) error {
+	if client, ok := conn.(*controlClient); ok {
+		return client.send(msg)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(controlWriteTimeout)); err != nil {
+		return fmt.Errorf("set control write deadline: %w", err)
+	}
+	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+	return protocol.WriteControlMessage(conn, msg)
+}
 
 // authRateLimiter limits authentication attempts per remote address.
 type authRateLimiter struct {
@@ -84,33 +194,43 @@ func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHa
 	return &ControlHandler{
 		server:        srv,
 		store:         st,
-		connMap:       make(map[uint32]net.Conn),
+		connMap:       make(map[uint32]*controlClient),
 		tempChanTimes: make(map[int64]time.Time),
 	}
 }
 
-// setConn registers a TLS connection for a session (for sending events).
-func (ch *ControlHandler) setConn(sessionID uint32, conn net.Conn) {
+// setConn registers a connection with a dedicated serialized writer.
+func (ch *ControlHandler) setConn(sessionID uint32, conn net.Conn) *controlClient {
+	client := newControlClient(sessionID, conn)
 	ch.mu.Lock()
-	ch.connMap[sessionID] = conn
+	previous := ch.connMap[sessionID]
+	ch.connMap[sessionID] = client
 	ch.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return client
 }
 
-// removeConn removes a session's connection.
+// removeConn removes and closes a session's connection.
 func (ch *ControlHandler) removeConn(sessionID uint32) {
 	ch.mu.Lock()
+	client := ch.connMap[sessionID]
 	delete(ch.connMap, sessionID)
 	ch.mu.Unlock()
+	if client != nil {
+		_ = client.Close()
+	}
 }
 
 func (ch *ControlHandler) sendToSession(sessionID uint32, msg *pb.ControlMessage) bool {
 	ch.mu.RLock()
-	conn, ok := ch.connMap[sessionID]
+	client, ok := ch.connMap[sessionID]
 	ch.mu.RUnlock()
 	if !ok {
 		return false
 	}
-	if err := protocol.WriteControlMessage(conn, msg); err != nil {
+	if err := client.send(msg); err != nil {
 		slog.Error("direct write failed", "session", sessionID, "err", err)
 		return false
 	}
@@ -120,16 +240,20 @@ func (ch *ControlHandler) sendToSession(sessionID uint32, msg *pb.ControlMessage
 // broadcastToChannel sends a control message to all sessions in a channel.
 func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMessage, excludeSession uint32) {
 	members := ch.server.channels.Members(channelID)
+	clients := make(map[uint32]*controlClient, len(members))
 	ch.mu.RLock()
-	defer ch.mu.RUnlock()
 	for _, sid := range members {
-		if sid == excludeSession {
-			continue
-		}
-		if conn, ok := ch.connMap[sid]; ok {
-			if err := protocol.WriteControlMessage(conn, msg); err != nil {
-				slog.Error("broadcast write failed", "session", sid, "err", err)
+		if sid != excludeSession {
+			if client, ok := ch.connMap[sid]; ok {
+				clients[sid] = client
 			}
+		}
+	}
+	ch.mu.RUnlock()
+
+	for sid, client := range clients {
+		if err := client.send(msg); err != nil {
+			slog.Error("broadcast write failed", "session", sid, "err", err)
 		}
 	}
 }
@@ -346,7 +470,6 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	session := s.sessions.Create(user.ID, user.Username, sessionRole)
 	sessionID := session.ID
 
-	handler.setConn(sessionID, conn)
 	defer func() {
 		stopEvent, stopped := s.screenShare.StopBySession(sessionID)
 		// Cleanup on disconnect
@@ -401,10 +524,11 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			AutoToken:          autoToken,
 		},
 	}
-	if err := protocol.WriteControlMessage(conn, authResp); err != nil {
+	if err := writeControlMessage(conn, authResp); err != nil {
 		slog.Error("auth response write failed", "err", err)
 		return
 	}
+	conn = handler.setConn(sessionID, conn)
 
 	slog.Info("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
 	s.metrics.SuccessfulAuths.Add(1)
@@ -488,7 +612,7 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 		s.handleImportChannels(sessionID, msg.ImportChannelsReq, st, conn, handler)
 
 	case msg.Ping != nil:
-		_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+		_ = writeControlMessage(conn, &pb.ControlMessage{
 			Pong: &pb.Pong{Timestamp: msg.Ping.Timestamp},
 		})
 	}
@@ -596,7 +720,7 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Conn) {
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ChannelListResponse: &pb.ChannelListResponse{Channels: infos},
 	})
 }
@@ -739,7 +863,7 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	slog.Info("token created", "role", role, "by", session.Username)
 	s.metrics.TokensCreated.Add(1)
 
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		CreateTokenResp: &pb.CreateTokenResponse{Token: rawToken},
 	})
 }
@@ -771,8 +895,9 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 	targetConn, ok := handler.connMap[target.ID]
 	handler.mu.RUnlock()
 	if ok {
-		sendError(targetConn, 99, "you have been kicked: "+reason)
-		_ = targetConn.Close()
+		targetConn.sendAndClose(&pb.ControlMessage{
+			ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been kicked: " + reason},
+		})
 	}
 
 	slog.Info("user kicked", "target", target.Username, "by", session.Username, "reason", reason)
@@ -811,8 +936,9 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 		targetConn, ok := handler.connMap[target.ID]
 		handler.mu.RUnlock()
 		if ok {
-			sendError(targetConn, 99, "you have been banned: "+reason)
-			_ = targetConn.Close()
+			targetConn.sendAndClose(&pb.ControlMessage{
+				ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been banned: " + reason},
+			})
 		}
 	}
 
@@ -906,7 +1032,7 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 
 	slog.Info("user role changed", "target_user", req.TargetUserID, "new_role", newRole, "by", session.Username)
 
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		SetUserRoleResp: &pb.SetUserRoleResponse{Success: true, Message: "role updated"},
 	})
 
@@ -918,7 +1044,7 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
 	})
 }
@@ -931,10 +1057,14 @@ func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler 
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
 	}
 	handler.mu.RLock()
-	for _, conn := range handler.connMap {
-		_ = protocol.WriteControlMessage(conn, msg)
+	clients := make([]*controlClient, 0, len(handler.connMap))
+	for _, client := range handler.connMap {
+		clients = append(clients, client)
 	}
 	handler.mu.RUnlock()
+	for _, client := range clients {
+		_ = client.send(msg)
+	}
 }
 
 // buildChannelInfos converts model channels to protocol channel infos.
@@ -981,7 +1111,7 @@ func (s *Server) cleanupTempChannel(channelID int64, st datastore.DataProviderFa
 }
 
 func sendError(conn net.Conn, code int32, message string) {
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ErrorResponse: &pb.ErrorResponse{Code: code, Message: message},
 	})
 }
@@ -1041,7 +1171,7 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 		return
 	}
 
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ExportDataResp: &pb.ExportDataResponse{
 			Type: req.Type,
 			Data: string(data),
@@ -1061,7 +1191,7 @@ func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRe
 	}
 
 	if err := ImportChannelsFromYAML([]byte(req.YAML), st); err != nil {
-		_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+		_ = writeControlMessage(conn, &pb.ControlMessage{
 			ImportChannelsResp: &pb.ImportChannelsResponse{
 				Success: false,
 				Message: "import failed: " + err.Error(),
@@ -1072,7 +1202,7 @@ func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRe
 
 	slog.Info("channels imported via UI", "by", session.Username)
 
-	_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{
+	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ImportChannelsResp: &pb.ImportChannelsResponse{
 			Success: true,
 			Message: "channels imported successfully",
