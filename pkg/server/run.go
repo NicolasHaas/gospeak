@@ -104,6 +104,7 @@ func (s *Server) Shutdown() {
 	if s.screenConn != nil {
 		_ = s.screenConn.Close()
 	}
+	s.closeAcceptedConns()
 	s.closeScreenConns()
 }
 

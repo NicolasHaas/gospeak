@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
@@ -41,6 +42,11 @@ func (s *Server) StartScreen() error {
 					continue
 				}
 			}
+			if !s.beginPreAuth(conn, preAuthScreen) {
+				slog.Warn("screen pre-auth connection limit reached", "remote", conn.RemoteAddr())
+				_ = conn.Close()
+				continue
+			}
 			go s.handleScreenConn(conn)
 		}
 	}()
@@ -50,6 +56,14 @@ func (s *Server) StartScreen() error {
 
 func (s *Server) handleScreenConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	if !s.beginPreAuth(conn, preAuthScreen) {
+		return
+	}
+	defer s.forgetAcceptedConn(conn)
+	if err := conn.SetDeadline(time.Now().Add(s.cfg.PreAuthTimeout)); err != nil {
+		slog.Error("set screen auth deadline", "err", err)
+		return
+	}
 
 	auth, err := protocol.ReadScreenAuth(conn)
 	if err != nil {
@@ -60,6 +74,11 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 		slog.Warn("screen auth rejected", "session", auth.SessionID)
 		return
 	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		slog.Error("clear screen auth deadline", "session", auth.SessionID, "err", err)
+		return
+	}
+	s.finishPreAuth(conn)
 
 	s.setScreenConn(auth.SessionID, conn)
 	defer s.removeScreenConn(auth.SessionID, conn)
