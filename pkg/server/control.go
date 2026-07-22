@@ -34,12 +34,13 @@ type ControlHandler struct {
 }
 
 const (
-	screenShareIdleTimeout = 15 * time.Second
-	screenShareIdleSweep   = 5 * time.Second
-	authRateLimitAttempts  = 30
-	authRateLimitWindow    = 1 * time.Minute
-	controlWriteTimeout    = 5 * time.Second
-	controlSendQueueSize   = 64
+	screenShareIdleTimeout  = 15 * time.Second
+	screenShareIdleSweep    = 5 * time.Second
+	authRateLimitAttempts   = 30
+	authRateLimitWindow     = 1 * time.Minute
+	authRateLimitMaxEntries = 4096
+	controlWriteTimeout     = 5 * time.Second
+	controlSendQueueSize    = 64
 )
 
 var (
@@ -150,17 +151,20 @@ func writeControlMessage(conn net.Conn, msg *pb.ControlMessage) error {
 	return protocol.WriteControlMessage(conn, msg)
 }
 
-// authRateLimiter limits authentication attempts per remote address.
+// authRateLimiter limits failed authentication attempts per remote IP.
 type authRateLimiter struct {
 	mu          sync.Mutex
 	entries     map[string]*authEntry
 	maxAttempts int
 	window      time.Duration
+	maxEntries  int
+	now         func() time.Time
 }
 
 type authEntry struct {
-	count   int
-	resetAt time.Time
+	count    int
+	inFlight int
+	resetAt  time.Time
 }
 
 func newAuthRateLimiter(maxAttempts int, window time.Duration) *authRateLimiter {
@@ -168,6 +172,8 @@ func newAuthRateLimiter(maxAttempts int, window time.Duration) *authRateLimiter 
 		entries:     make(map[string]*authEntry),
 		maxAttempts: maxAttempts,
 		window:      window,
+		maxEntries:  authRateLimitMaxEntries,
+		now:         time.Now,
 	}
 }
 
@@ -175,18 +181,60 @@ func (rl *authRateLimiter) Allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
+	now := rl.now()
 	entry, ok := rl.entries[key]
-	if !ok || now.After(entry.resetAt) {
-		rl.entries[key] = &authEntry{
-			count:   1,
-			resetAt: now.Add(rl.window),
-		}
-		return true
+	if ok && !now.Before(entry.resetAt) {
+		delete(rl.entries, key)
+		entry = nil
+		ok = false
 	}
+	if !ok {
+		if len(rl.entries) >= rl.maxEntries {
+			for entryKey, candidate := range rl.entries {
+				if !now.Before(candidate.resetAt) {
+					delete(rl.entries, entryKey)
+				}
+			}
+			if len(rl.entries) >= rl.maxEntries {
+				return false
+			}
+		}
+		entry = &authEntry{resetAt: now.Add(rl.window)}
+		rl.entries[key] = entry
+	}
+	if entry.count+entry.inFlight >= rl.maxAttempts {
+		return false
+	}
+	entry.inFlight++
+	return true
+}
 
-	entry.count++
-	return entry.count <= rl.maxAttempts
+func (rl *authRateLimiter) RecordFailure(key string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if entry, ok := rl.entries[key]; ok {
+		if entry.inFlight > 0 {
+			entry.inFlight--
+		}
+		entry.count++
+	}
+}
+
+func (rl *authRateLimiter) Reset(key string) {
+	rl.mu.Lock()
+	delete(rl.entries, key)
+	rl.mu.Unlock()
+}
+
+func authRateLimitKey(addr net.Addr) string {
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return tcpAddr.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err == nil {
+		return host
+	}
+	return addr.String()
 }
 
 // newControlHandler creates a control handler.
@@ -294,6 +342,11 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 					continue
 				}
 			}
+			if !s.beginPreAuth(conn, preAuthControl) {
+				slog.Warn("control pre-auth connection limit reached", "remote", conn.RemoteAddr())
+				_ = conn.Close()
+				continue
+			}
 			go s.handleControlConn(handler, conn, st)
 		}
 	}()
@@ -336,20 +389,31 @@ func (s *Server) runScreenShareJanitor(handler *ControlHandler) {
 // handleControlConn handles a single control connection lifecycle.
 func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st datastore.DataProviderFactory) {
 	defer func() { _ = conn.Close() }()
+	if !s.beginPreAuth(conn, preAuthControl) {
+		return
+	}
+	defer s.forgetAcceptedConn(conn)
 
 	remoteAddr := conn.RemoteAddr().String()
+	rateLimitKey := authRateLimitKey(conn.RemoteAddr())
 	s.metrics.TotalConnections.Add(1)
 	s.metrics.ActiveConnections.Add(1)
 	slog.Debug("new control connection", "remote", remoteAddr)
 
-	// Rate limit per remote address
-	if !s.authLimiter.Allow(remoteAddr) {
+	// Rate limit failed authentication attempts per remote IP.
+	if !s.authLimiter.Allow(rateLimitKey) {
 		slog.Warn("rate limited", "remote", remoteAddr)
 		return
 	}
+	authenticated := false
+	defer func() {
+		if !authenticated {
+			s.authLimiter.RecordFailure(rateLimitKey)
+		}
+	}()
 
-	// First message must be AuthRequest
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// First message must be AuthRequest.
+	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.PreAuthTimeout))
 	msg, err := protocol.ReadControlMessage(conn)
 	if err != nil {
 		slog.Error("auth read failed", "remote", remoteAddr, "err", err)
@@ -528,6 +592,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		slog.Error("auth response write failed", "err", err)
 		return
 	}
+	authenticated = true
+	s.authLimiter.Reset(rateLimitKey)
+	s.finishPreAuth(conn)
 	conn = handler.setConn(sessionID, conn)
 
 	slog.Info("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)

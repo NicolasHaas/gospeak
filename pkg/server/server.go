@@ -25,17 +25,19 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	ControlAddr       string // TCP/TLS bind address (e.g. ":9600")
-	VoiceAddr         string // UDP bind address (e.g. ":9601")
-	ScreenAddr        string // TCP/TLS screen-share bind address (e.g. ":9603")
-	DBPath            string // SQLite database path
-	CertFile          string // TLS certificate file path
-	KeyFile           string // TLS private key file path
-	DataDir           string // directory for generated certs and data
-	AllowNoToken      bool   // allow users to join without a token (open server)
-	EnableScreenShare bool   // enable per-channel screen sharing support
-	ChannelsFile      string // YAML file defining channels to create on startup
-	MetricsAddr       string // HTTP bind address for /metrics endpoint (empty = disabled)
+	ControlAddr           string        // TCP/TLS bind address (e.g. ":9600")
+	VoiceAddr             string        // UDP bind address (e.g. ":9601")
+	ScreenAddr            string        // TCP/TLS screen-share bind address (e.g. ":9603")
+	DBPath                string        // SQLite database path
+	CertFile              string        // TLS certificate file path
+	KeyFile               string        // TLS private key file path
+	DataDir               string        // directory for generated certs and data
+	AllowNoToken          bool          // allow users to join without a token (open server)
+	EnableScreenShare     bool          // enable per-channel screen sharing support
+	ChannelsFile          string        // YAML file defining channels to create on startup
+	MetricsAddr           string        // HTTP bind address for /metrics endpoint (empty = disabled)
+	PreAuthTimeout        time.Duration // maximum TLS handshake and authentication time
+	MaxPreAuthConnections int           // maximum concurrent unauthenticated connections per TCP plane
 
 	// CLI-only actions (run and exit)
 	ExportUsers    bool // export all users as YAML and exit
@@ -51,12 +53,14 @@ type Dependencies struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		ControlAddr: ":9600",
-		VoiceAddr:   ":9601",
-		ScreenAddr:  ":9603",
-		MetricsAddr: ":9602",
-		DBPath:      "gospeak.db",
-		DataDir:     ".",
+		ControlAddr:           ":9600",
+		VoiceAddr:             ":9601",
+		ScreenAddr:            ":9603",
+		MetricsAddr:           ":9602",
+		DBPath:                "gospeak.db",
+		DataDir:               ".",
+		PreAuthTimeout:        10 * time.Second,
+		MaxPreAuthConnections: 64,
 	}
 }
 
@@ -140,19 +144,22 @@ func loadOrGenerateTLS(cfg Config) (tls.Certificate, error) {
 
 // Server is the main GoSpeak server.
 type Server struct {
-	cfg         Config
-	sessions    *SessionManager
-	channels    *ChannelManager
-	screenShare *ScreenShareManager
-	metrics     *Metrics
-	store       datastore.DataProviderFactory
-	controlConn net.Listener
-	voiceConn   *net.UDPConn
-	screenConn  net.Listener
-	screenMu    sync.RWMutex
-	screenConns map[uint32]net.Conn
-	voiceKey    []byte // shared AES-128 key for all voice encryption
-	authLimiter *authRateLimiter
+	cfg           Config
+	sessions      *SessionManager
+	channels      *ChannelManager
+	screenShare   *ScreenShareManager
+	metrics       *Metrics
+	store         datastore.DataProviderFactory
+	controlConn   net.Listener
+	voiceConn     *net.UDPConn
+	screenConn    net.Listener
+	screenMu      sync.RWMutex
+	screenConns   map[uint32]net.Conn
+	voiceKey      []byte // shared AES-128 key for all voice encryption
+	authLimiter   *authRateLimiter
+	preAuthMu     sync.Mutex
+	acceptedConns map[net.Conn]trackedConn
+	preAuthCount  map[preAuthPlane]int
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -165,19 +172,88 @@ type Server struct {
 
 // New creates a new Server instance.
 func New(cfg Config, deps Dependencies) *Server {
+	if cfg.PreAuthTimeout <= 0 {
+		cfg.PreAuthTimeout = 10 * time.Second
+	}
+	if cfg.MaxPreAuthConnections <= 0 {
+		cfg.MaxPreAuthConnections = 64
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		cfg:         cfg,
-		sessions:    NewSessionManager(),
-		channels:    NewChannelManager(),
-		screenShare: NewScreenShareManager(),
-		metrics:     NewMetrics(),
-		screenConns: make(map[uint32]net.Conn),
-		voiceStats:  make(map[uint32]*perSessionVoiceStat),
-		store:       deps.Store,
-		authLimiter: newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
-		ctx:         ctx,
-		cancel:      cancel,
+		cfg:           cfg,
+		sessions:      NewSessionManager(),
+		channels:      NewChannelManager(),
+		screenShare:   NewScreenShareManager(),
+		metrics:       NewMetrics(),
+		screenConns:   make(map[uint32]net.Conn),
+		voiceStats:    make(map[uint32]*perSessionVoiceStat),
+		store:         deps.Store,
+		authLimiter:   newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
+		acceptedConns: make(map[net.Conn]trackedConn),
+		preAuthCount:  make(map[preAuthPlane]int),
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+}
+
+type preAuthPlane string
+
+type trackedConn struct {
+	plane   preAuthPlane
+	preAuth bool
+}
+
+const (
+	preAuthControl preAuthPlane = "control"
+	preAuthScreen  preAuthPlane = "screen"
+)
+
+func (s *Server) beginPreAuth(conn net.Conn, plane preAuthPlane) bool {
+	s.preAuthMu.Lock()
+	defer s.preAuthMu.Unlock()
+	if _, ok := s.acceptedConns[conn]; ok {
+		return true
+	}
+	if s.ctx.Err() != nil || s.preAuthCount[plane] >= s.cfg.MaxPreAuthConnections {
+		return false
+	}
+	s.acceptedConns[conn] = trackedConn{plane: plane, preAuth: true}
+	s.preAuthCount[plane]++
+	return true
+}
+
+func (s *Server) finishPreAuth(conn net.Conn) {
+	s.preAuthMu.Lock()
+	if tracked, ok := s.acceptedConns[conn]; ok && tracked.preAuth {
+		tracked.preAuth = false
+		s.acceptedConns[conn] = tracked
+		s.preAuthCount[tracked.plane]--
+	}
+	s.preAuthMu.Unlock()
+}
+
+func (s *Server) forgetAcceptedConn(conn net.Conn) {
+	s.preAuthMu.Lock()
+	if tracked, ok := s.acceptedConns[conn]; ok {
+		delete(s.acceptedConns, conn)
+		if tracked.preAuth {
+			s.preAuthCount[tracked.plane]--
+		}
+	}
+	s.preAuthMu.Unlock()
+}
+
+func (s *Server) closeAcceptedConns() {
+	s.preAuthMu.Lock()
+	conns := make([]net.Conn, 0, len(s.acceptedConns))
+	for conn := range s.acceptedConns {
+		conns = append(conns, conn)
+	}
+	s.acceptedConns = make(map[net.Conn]trackedConn)
+	s.preAuthCount = make(map[preAuthPlane]int)
+	s.preAuthMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
 	}
 }
 
