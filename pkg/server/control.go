@@ -285,6 +285,21 @@ func (ch *ControlHandler) sendToSession(sessionID uint32, msg *pb.ControlMessage
 	return true
 }
 
+func (ch *ControlHandler) sendAndCloseSessions(sessions []SessionSnapshot, msg *pb.ControlMessage) {
+	clients := make([]*controlClient, 0, len(sessions))
+	ch.mu.RLock()
+	for _, session := range sessions {
+		if client, ok := ch.connMap[session.ID]; ok {
+			clients = append(clients, client)
+		}
+	}
+	ch.mu.RUnlock()
+
+	for _, client := range clients {
+		client.sendAndClose(msg)
+	}
+}
+
 // broadcastToChannel sends a control message to all sessions in a channel.
 func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMessage, excludeSession uint32) {
 	members := ch.server.channels.Members(channelID)
@@ -951,23 +966,18 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 		reason = reason[:256]
 	}
 
-	target, ok := s.sessions.GetByUserIDSnapshot(req.UserID)
-	if !ok {
+	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
+	if len(targets) == 0 {
 		sendError(conn, 32, "user not online")
 		return
 	}
 
-	// Close their connection (will trigger cleanup in handleControlConn)
-	handler.mu.RLock()
-	targetConn, ok := handler.connMap[target.ID]
-	handler.mu.RUnlock()
-	if ok {
-		targetConn.sendAndClose(&pb.ControlMessage{
-			ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been kicked: " + reason},
-		})
-	}
+	// Close every connection for the user (each handleControlConn cleans up its session).
+	handler.sendAndCloseSessions(targets, &pb.ControlMessage{
+		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been kicked: " + reason},
+	})
 
-	slog.Info("user kicked", "target", target.Username, "by", session.Username, "reason", reason)
+	slog.Info("user kicked", "target", targets[0].Username, "sessions", len(targets), "by", session.Username, "reason", reason)
 	s.metrics.KickCount.Add(1)
 }
 
@@ -997,17 +1007,11 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 		return
 	}
 
-	// Also kick them if online
-	if target, ok := s.sessions.GetByUserIDSnapshot(req.UserID); ok {
-		handler.mu.RLock()
-		targetConn, ok := handler.connMap[target.ID]
-		handler.mu.RUnlock()
-		if ok {
-			targetConn.sendAndClose(&pb.ControlMessage{
-				ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been banned: " + reason},
-			})
-		}
-	}
+	// Also kick every active session for the banned user.
+	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
+	handler.sendAndCloseSessions(targets, &pb.ControlMessage{
+		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been banned: " + reason},
+	})
 
 	slog.Info("user banned", "user_id", req.UserID, "by", session.Username)
 	s.metrics.BanCount.Add(1)
@@ -1092,10 +1096,8 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 		return
 	}
 
-	// Update the session if the target user is online
-	if target, ok := s.sessions.GetByUserIDSnapshot(req.TargetUserID); ok {
-		s.sessions.UpdateRole(target.ID, newRole)
-	}
+	// Apply revocation immediately to every active session for the user.
+	s.sessions.UpdateRoleByUserID(req.TargetUserID, newRole)
 
 	slog.Info("user role changed", "target_user", req.TargetUserID, "new_role", newRole, "by", session.Username)
 

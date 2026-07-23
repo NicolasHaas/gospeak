@@ -88,13 +88,14 @@ func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) 
 	}, true
 }
 
-// GetByUserIDSnapshot retrieves a session snapshot by user ID.
-func (sm *SessionManager) GetByUserIDSnapshot(userID int64) (SessionSnapshot, bool) {
+// GetAllByUserIDSnapshots retrieves immutable snapshots for every session of a user.
+func (sm *SessionManager) GetAllByUserIDSnapshots(userID int64) []SessionSnapshot {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	snapshots := make([]SessionSnapshot, 0)
 	for _, s := range sm.sessions {
 		if s.UserID == userID {
-			return SessionSnapshot{
+			snapshots = append(snapshots, SessionSnapshot{
 				ID:              s.ID,
 				UserID:          s.UserID,
 				Username:        s.Username,
@@ -104,10 +105,10 @@ func (sm *SessionManager) GetByUserIDSnapshot(userID int64) (SessionSnapshot, bo
 				UDPAddr:         cloneUDPAddr(s.UDPAddr),
 				Muted:           s.Muted,
 				Deafened:        s.Deafened,
-			}, true
+			})
 		}
 	}
-	return SessionSnapshot{}, false
+	return snapshots
 }
 
 // ValidateScreenAuth reports whether the session exists and the auth token matches.
@@ -153,12 +154,14 @@ func (sm *SessionManager) SetChannel(id uint32, channelID int64) {
 	}
 }
 
-// UpdateRole updates the role for a session.
-func (sm *SessionManager) UpdateRole(id uint32, role model.Role) {
+// UpdateRoleByUserID updates the role for every active session of a user.
+func (sm *SessionManager) UpdateRoleByUserID(userID int64, role model.Role) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if s, ok := sm.sessions[id]; ok {
-		s.Role = role
+	for _, s := range sm.sessions {
+		if s.UserID == userID {
+			s.Role = role
+		}
 	}
 }
 
