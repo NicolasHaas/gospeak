@@ -31,7 +31,7 @@ func NewTestSqlConn(t *testing.T) (*datastore.ProviderFactory, error) {
 
 	t.Cleanup(func() {
 		if err := st.Close(); err != nil {
-			fmt.Printf("Error closing database: %v\n", err)
+			t.Errorf("Close datastore: %v", err)
 		}
 	})
 
@@ -50,6 +50,24 @@ func generateRandomSafeString(t *testing.T, byteLength int) string {
 
 	encoded := base64.URLEncoding.EncodeToString(bytes)
 	return encoded
+}
+
+func TestProviderFactoryCloseClosesDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "close.db")
+	store, err := datastore.NewProviderFactory(dbPath)
+	if err != nil {
+		t.Fatalf("NewProviderFactory: %v", err)
+	}
+	if _, err := store.NonTx().ListUsers(); err != nil {
+		t.Fatalf("ListUsers before Close: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := store.NonTx().ListUsers(); err == nil {
+		t.Fatal("ListUsers after Close succeeded, want closed database error")
+	}
 }
 
 func TestZeroTime(t *testing.T) {

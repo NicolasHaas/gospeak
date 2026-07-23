@@ -104,9 +104,12 @@ func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 	return s, nil
 }
 
-// Close closes the database connection.
+// Close closes the database connection pool.
 func (s *ProviderFactory) Close() error {
-	return nil
+	if s == nil || s.DB == nil {
+		return nil
+	}
+	return s.DB.Close()
 }
 
 func (s *ProviderFactory) migrate() error {

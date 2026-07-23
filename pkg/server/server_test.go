@@ -57,6 +57,11 @@ func newTestServer(t *testing.T) (*Server, datastore.DataProviderFactory, *Contr
 	if err != nil {
 		t.Fatalf("Could not start datastore: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("Close datastore: %v", err)
+		}
+	})
 	srv := New(cfg, Dependencies{Store: st})
 	handler := newControlHandler(srv, st)
 	return srv, st, handler
