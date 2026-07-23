@@ -45,7 +45,7 @@ type Config struct {
 }
 
 // Dependencies holds external dependencies for the server.
-// Server assumes ownership of Store and will Close() it on shutdown.
+// The caller retains ownership of Store and must close it after Run returns.
 type Dependencies struct {
 	Store datastore.DataProviderFactory
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -42,43 +43,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Handle export commands (run and exit)
-	if cfg.ExportUsers || cfg.ExportChannels {
-		st, err := datastore.NewProviderFactory(cfg.DBPath)
-		if err != nil {
-			slog.Error("open database", "err", err)
-			os.Exit(1)
-		}
-		defer st.DB.Close()
-
-		if cfg.ExportUsers {
-			data, err := server.ExportUsersYAML(st)
-			if err != nil {
-				slog.Error("export users", "err", err)
-				os.Exit(1)
-			}
-			fmt.Print(string(data))
-		}
-		if cfg.ExportChannels {
-			data, err := server.ExportChannelsYAML(st)
-			if err != nil {
-				slog.Error("export channels", "err", err)
-				os.Exit(1)
-			}
-			fmt.Print(string(data))
-		}
-		return
-	}
-
-	st, err := datastore.NewProviderFactory(cfg.DBPath)
-	if err != nil {
-		slog.Error("open database", "err", err)
-		os.Exit(1)
-	}
-
-	srv := server.New(cfg, server.Dependencies{Store: st})
-	if err := srv.Run(); err != nil {
+	if err := run(cfg); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func run(cfg server.Config) (err error) {
+	st, err := datastore.NewProviderFactory(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close database: %w", closeErr))
+		}
+	}()
+
+	if cfg.ExportUsers {
+		data, exportErr := server.ExportUsersYAML(st)
+		if exportErr != nil {
+			return fmt.Errorf("export users: %w", exportErr)
+		}
+		fmt.Print(string(data))
+	}
+	if cfg.ExportChannels {
+		data, exportErr := server.ExportChannelsYAML(st)
+		if exportErr != nil {
+			return fmt.Errorf("export channels: %w", exportErr)
+		}
+		fmt.Print(string(data))
+	}
+	if cfg.ExportUsers || cfg.ExportChannels {
+		return nil
+	}
+
+	srv := server.New(cfg, server.Dependencies{Store: st})
+	return srv.Run()
 }
