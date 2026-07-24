@@ -37,6 +37,22 @@ func TestResolveAdvertisedAddr(t *testing.T) {
 	}
 }
 
+func TestSelectAutoJoinChannelHonorsScope(t *testing.T) {
+	channels := []pb.ChannelInfo{{ID: 1, Name: "first"}, {ID: 2, Name: "scoped"}}
+
+	got, ok := selectAutoJoinChannel(channels, 2)
+	if !ok || got.ID != 2 {
+		t.Fatalf("selectAutoJoinChannel(scope=2) = (%#v, %t), want channel 2", got, ok)
+	}
+	got, ok = selectAutoJoinChannel(channels, 0)
+	if !ok || got.ID != 1 {
+		t.Fatalf("selectAutoJoinChannel(scope=0) = (%#v, %t), want first channel", got, ok)
+	}
+	if _, ok := selectAutoJoinChannel(channels, 3); ok {
+		t.Fatal("selectAutoJoinChannel accepted a missing scoped channel")
+	}
+}
+
 func TestClearScreenShareStateResetsCallbacks(t *testing.T) {
 	e := NewEngine()
 	e.activeScreenShare = &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1}

@@ -206,6 +206,12 @@ func (s *ProviderFactory) migrate() error {
 			},
 			ignoreErrors: true,
 		},
+		{
+			version: 5,
+			statements: []string{
+				"ALTER TABLE users ADD COLUMN channel_scope INTEGER NOT NULL DEFAULT 0",
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -278,6 +284,11 @@ func parseDBTime(value string) (time.Time, error) {
 // CreateUser creates a new user and returns it with the assigned ID.
 // It validates the username format and role before inserting.
 func (s *baseProvider) CreateUser(username string, role model.Role) (*model.User, error) {
+	return s.CreateUserWithChannelScope(username, role, 0)
+}
+
+// CreateUserWithChannelScope creates a user whose personal token retains an invite's channel restriction.
+func (s *baseProvider) CreateUserWithChannelScope(username string, role model.Role, channelScope int64) (*model.User, error) {
 	if err := model.ValidateUsername(username); err != nil {
 		return nil, fmt.Errorf("datastore: create user: %w", err)
 	}
@@ -286,9 +297,10 @@ func (s *baseProvider) CreateUser(username string, role model.Role) (*model.User
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO users (username, role, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO users (username, role, channel_scope, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?, ?)",
 		username,
 		int(role),
+		channelScope,
 		"",
 		formatDBTime(time.Now().UTC()),
 	)
@@ -300,10 +312,11 @@ func (s *baseProvider) CreateUser(username string, role model.Role) (*model.User
 	}
 	id, _ := res.LastInsertId()
 	return &model.User{
-		ID:        id,
-		Username:  username,
-		Role:      role,
-		CreatedAt: time.Now().UTC(),
+		ID:           id,
+		Username:     username,
+		Role:         role,
+		ChannelScope: channelScope,
+		CreatedAt:    time.Now().UTC(),
 	}, nil
 }
 
@@ -315,9 +328,9 @@ func (s *baseProvider) GetUserByUsername(username string) (*model.User, error) {
 	var personalTokenCreatedAt string
 	err := s.QueryRowContext(
 		context.Background(),
-		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE username = ?",
+		"SELECT id, username, role, channel_scope, personal_token_hash, personal_token_created_at, created_at FROM users WHERE username = ?",
 		username,
-	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
+	).Scan(&u.ID, &u.Username, &roleInt, &u.ChannelScope, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -345,9 +358,9 @@ func (s *baseProvider) GetUserByID(id int64) (*model.User, error) {
 	var personalTokenCreatedAt string
 	err := s.QueryRowContext(
 		context.Background(),
-		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE id = ?",
+		"SELECT id, username, role, channel_scope, personal_token_hash, personal_token_created_at, created_at FROM users WHERE id = ?",
 		id,
-	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
+	).Scan(&u.ID, &u.Username, &roleInt, &u.ChannelScope, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -374,9 +387,9 @@ func (s *baseProvider) GetUserByPersonalTokenHash(hash string) (*model.User, err
 	var personalTokenCreatedAt string
 	err := s.QueryRowContext(
 		context.Background(),
-		"SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users WHERE personal_token_hash = ?",
+		"SELECT id, username, role, channel_scope, personal_token_hash, personal_token_created_at, created_at FROM users WHERE personal_token_hash = ?",
 		hash,
-	).Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
+	).Scan(&u.ID, &u.Username, &roleInt, &u.ChannelScope, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -427,7 +440,7 @@ func (s *baseProvider) UpdateUserPersonalToken(userID int64, hash string, create
 
 // ListUsers returns all users.
 func (s *baseProvider) ListUsers() ([]model.User, error) {
-	rows, err := s.QueryContext(context.Background(), "SELECT id, username, role, personal_token_hash, personal_token_created_at, created_at FROM users ORDER BY id")
+	rows, err := s.QueryContext(context.Background(), "SELECT id, username, role, channel_scope, personal_token_hash, personal_token_created_at, created_at FROM users ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("datastore: list users: %w", err)
 	}
@@ -439,7 +452,7 @@ func (s *baseProvider) ListUsers() ([]model.User, error) {
 		var roleInt int
 		var createdAt string
 		var personalTokenCreatedAt string
-		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &roleInt, &u.ChannelScope, &u.PersonalTokenHash, &personalTokenCreatedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("datastore: scan user: %w", err)
 		}
 		u.Role = model.Role(roleInt)
@@ -605,46 +618,54 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 	return nil
 }
 
-// ValidateToken checks if a token hash is valid and returns the associated role.
+// ValidateToken checks if a token hash is valid and returns its authorization data.
 // It increments the use count atomically.
-func (s *txProvider) ValidateToken(hash string) (model.Role, error) {
+func (s *txProvider) ValidateToken(hash string) (*model.Token, error) {
 	ctx := context.Background()
 
 	var roleInt int
+	var channelScope int64
 	var maxUses, useCount int
 	var expiresAt *string
 	err := s.QueryRowContext(ctx,
-		"SELECT role, max_uses, use_count, expires_at FROM tokens WHERE hash = ?", hash).
-		Scan(&roleInt, &maxUses, &useCount, &expiresAt)
+		"SELECT role, channel_scope, max_uses, use_count, expires_at FROM tokens WHERE hash = ?", hash).
+		Scan(&roleInt, &channelScope, &maxUses, &useCount, &expiresAt)
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("datastore: invalid token")
+		return nil, fmt.Errorf("datastore: invalid token")
 	}
 	if err != nil {
-		return 0, fmt.Errorf("datastore: validate token: %w", err)
+		return nil, fmt.Errorf("datastore: validate token: %w", err)
 	}
 
-	// Check expiration
 	if expiresAt != nil {
 		exp, err := parseDBTime(*expiresAt)
 		if err != nil {
-			return 0, fmt.Errorf("datastore: validate token: %w", err)
+			return nil, fmt.Errorf("datastore: validate token: %w", err)
 		}
 		if time.Now().After(exp) {
-			return 0, fmt.Errorf("datastore: token expired")
+			return nil, fmt.Errorf("datastore: token expired")
 		}
 	}
 
-	// Check uses
 	if maxUses > 0 && useCount >= maxUses {
-		return 0, fmt.Errorf("datastore: token exhausted")
+		return nil, fmt.Errorf("datastore: token exhausted")
 	}
 
-	// Increment use count
+	if channelScope != 0 {
+		var exists int
+		if err := s.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM channels WHERE id = ?)", channelScope).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("datastore: validate token scope: %w", err)
+		}
+		if exists == 0 {
+			return nil, fmt.Errorf("datastore: token channel scope does not exist")
+		}
+	}
+
 	if _, err := s.ExecContext(ctx, "UPDATE tokens SET use_count = use_count + 1 WHERE hash = ?", hash); err != nil {
-		return 0, fmt.Errorf("datastore: increment use: %w", err)
+		return nil, fmt.Errorf("datastore: increment use: %w", err)
 	}
 
-	return model.Role(roleInt), nil
+	return &model.Token{Role: model.Role(roleInt), ChannelScope: channelScope}, nil
 }
 
 // ---- Bans ----

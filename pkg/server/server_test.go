@@ -122,6 +122,39 @@ func TestHandleJoinLeaveChannel(t *testing.T) {
 	}
 }
 
+func TestHandleJoinChannelEnforcesSessionScope(t *testing.T) {
+	srv, st, handler := newTestServer(t)
+	scopedChannel := model.NewChannel()
+	scopedChannel.Name = "scoped"
+	if err := st.NonTx().CreateChannel(scopedChannel); err != nil {
+		t.Fatalf("CreateChannel(scoped): %v", err)
+	}
+	otherChannel := model.NewChannel()
+	otherChannel.Name = "other"
+	if err := st.NonTx().CreateChannel(otherChannel); err != nil {
+		t.Fatalf("CreateChannel(other): %v", err)
+	}
+
+	session := srv.sessions.CreateWithChannelScope(1, "scoped-user", model.RoleUser, scopedChannel.ID)
+	rejection := &bufferConn{}
+	srv.handleJoinChannel(handler, session.ID, &pb.JoinChannelRequest{ChannelID: otherChannel.ID}, st, rejection)
+	response, err := protocol.ReadControlMessage(rejection)
+	if err != nil {
+		t.Fatalf("ReadControlMessage: %v", err)
+	}
+	if response.ErrorResponse == nil || response.ErrorResponse.Code != 12 {
+		t.Fatalf("out-of-scope join returned %#v, want error code 12", response)
+	}
+	if got := srv.channels.ChannelOf(session.ID); got != 0 {
+		t.Fatalf("out-of-scope join moved session to channel %d", got)
+	}
+
+	srv.handleJoinChannel(handler, session.ID, &pb.JoinChannelRequest{ChannelID: scopedChannel.ID}, st, &nopConn{})
+	if got := srv.channels.ChannelOf(session.ID); got != scopedChannel.ID {
+		t.Fatalf("scoped join moved session to channel %d, want %d", got, scopedChannel.ID)
+	}
+}
+
 func TestHandleUserState(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 

@@ -22,6 +22,7 @@ type SessionSnapshot struct {
 	UserID          int64
 	Username        string
 	Role            model.Role
+	ChannelScope    int64
 	ChannelID       int64
 	ScreenAuthToken string
 	UDPAddr         *net.UDPAddr
@@ -38,6 +39,11 @@ func NewSessionManager() *SessionManager {
 
 // Create creates a new session for an authenticated user.
 func (sm *SessionManager) Create(userID int64, username string, role model.Role) *model.Session {
+	return sm.CreateWithChannelScope(userID, username, role, 0)
+}
+
+// CreateWithChannelScope creates a session with a persistent invite restriction.
+func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, role model.Role, channelScope int64) *model.Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -61,6 +67,7 @@ func (sm *SessionManager) Create(userID int64, username string, role model.Role)
 		UserID:          userID,
 		Username:        username,
 		Role:            role,
+		ChannelScope:    channelScope,
 		ScreenAuthToken: newScreenAuthToken(),
 	}
 	sm.sessions[id] = sess
@@ -80,6 +87,7 @@ func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) 
 		UserID:          s.UserID,
 		Username:        s.Username,
 		Role:            s.Role,
+		ChannelScope:    s.ChannelScope,
 		ChannelID:       s.ChannelID,
 		ScreenAuthToken: s.ScreenAuthToken,
 		UDPAddr:         cloneUDPAddr(s.UDPAddr),
@@ -100,6 +108,7 @@ func (sm *SessionManager) GetAllByUserIDSnapshots(userID int64) []SessionSnapsho
 				UserID:          s.UserID,
 				Username:        s.Username,
 				Role:            s.Role,
+				ChannelScope:    s.ChannelScope,
 				ChannelID:       s.ChannelID,
 				ScreenAuthToken: s.ScreenAuthToken,
 				UDPAddr:         cloneUDPAddr(s.UDPAddr),

@@ -253,11 +253,10 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 		e.OnChannelsUpdate(authResp.Channels)
 	}
 
-	// Auto-join the first available channel so the user isn't stuck in "no channel"
-	if len(authResp.Channels) > 0 {
-		firstCh := authResp.Channels[0]
-		if err := e.JoinChannel(firstCh.ID); err != nil {
-			slog.Warn("auto-join channel failed", "channel", firstCh.Name, "err", err)
+	// Auto-join the invite scope, or the first channel for server-wide users.
+	if autoJoin, ok := selectAutoJoinChannel(authResp.Channels, authResp.ChannelScope); ok {
+		if err := e.JoinChannel(autoJoin.ID); err != nil {
+			slog.Warn("auto-join channel failed", "channel", autoJoin.Name, "err", err)
 		}
 	}
 
@@ -296,6 +295,21 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 	}()
 
 	return nil
+}
+
+func selectAutoJoinChannel(channels []pb.ChannelInfo, channelScope int64) (pb.ChannelInfo, bool) {
+	if channelScope == 0 {
+		if len(channels) == 0 {
+			return pb.ChannelInfo{}, false
+		}
+		return channels[0], true
+	}
+	for _, channel := range channels {
+		if channel.ID == channelScope {
+			return channel, true
+		}
+	}
+	return pb.ChannelInfo{}, false
 }
 
 // initAudioDefault initializes PortAudio devices and Opus codec (the default backend).

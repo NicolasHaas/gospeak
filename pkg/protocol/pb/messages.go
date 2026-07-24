@@ -52,6 +52,7 @@ type AuthResponse struct {
 	SessionID          uint32        `json:"session_id"`
 	Username           string        `json:"username"`
 	Role               string        `json:"role"`
+	ChannelScope       int64         `json:"channel_scope,omitempty"`
 	EncryptionKey      []byte        `json:"encryption_key"`
 	Channels           []ChannelInfo `json:"channels"`
 	ScreenAddr         string        `json:"screen_addr,omitempty"`

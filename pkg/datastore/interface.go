@@ -62,6 +62,7 @@ type UserReadProvider interface {
 
 type UserWriteProvider interface {
 	CreateUser(username string, role model.Role) (*model.User, error)
+	CreateUserWithChannelScope(username string, role model.Role, channelScope int64) (*model.User, error)
 	UpdateUserRole(userID int64, role model.Role) error
 	UpdateUserPersonalToken(userID int64, hash string, createdAt time.Time) error
 }
@@ -86,7 +87,7 @@ type TokenWriteProvider interface {
 }
 
 type TokenTransactionProvider interface {
-	ValidateToken(hash string) (model.Role, error)
+	ValidateToken(hash string) (*model.Token, error)
 }
 
 type BanReadProvider interface {
