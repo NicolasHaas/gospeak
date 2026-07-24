@@ -142,7 +142,7 @@ graph TB
 
 - Tokens are 256-bit random values (64 hex characters)
 - Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
-- Tokens can have: role assignment, channel scope, max uses, expiration
+- Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide. Older clients remain wire-compatible but must be upgraded to select the scoped channel automatically.
 - On first server run, an admin token is automatically generated and logged
 
 ### Open Server Mode

@@ -8,6 +8,7 @@ type Session struct {
 	UserID          int64
 	Username        string
 	Role            Role
+	ChannelScope    int64
 	ChannelID       int64
 	ScreenAuthToken string
 	UDPAddr         *net.UDPAddr

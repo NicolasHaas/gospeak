@@ -460,8 +460,10 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	var tokenRole model.Role
+	var channelScope int64
 	if user != nil {
 		sessionRole = user.Role
+		channelScope = user.ChannelScope
 	} else {
 		if !isValidUsername(authReq.Username) {
 			sendError(conn, 2, "invalid username: must be 1-32 letters, digits, underscores, or hyphens")
@@ -494,13 +496,16 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				}
 			}()
 
-			tokenRole, err = tx.ValidateToken(tokenHash)
+			tokenAuth, validateErr := tx.ValidateToken(tokenHash)
+			err = validateErr
 			if err != nil {
 				s.metrics.FailedAuths.Add(1)
 				slog.Warn("auth failed", "err", err)
 				sendError(conn, 2, "authentication failed")
 				return
 			}
+			tokenRole = tokenAuth.Role
+			channelScope = tokenAuth.ChannelScope
 			if err := tx.Commit(); err != nil {
 				slog.Error("commit transaction", "err", err)
 				sendError(conn, 3, "database error")
@@ -509,7 +514,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			committed = true
 		}
 
-		user, err = st.NonTx().CreateUser(authReq.Username, tokenRole)
+		user, err = st.NonTx().CreateUserWithChannelScope(authReq.Username, tokenRole, channelScope)
 		if err != nil {
 			if errors.Is(err, datastore.ErrUsernameTaken) {
 				s.metrics.FailedAuths.Add(1)
@@ -546,7 +551,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	// Create session (voice key is shared server-wide for SFU model)
-	session := s.sessions.Create(user.ID, user.Username, sessionRole)
+	session := s.sessions.CreateWithChannelScope(user.ID, user.Username, sessionRole, channelScope)
 	sessionID := session.ID
 
 	defer func() {
@@ -595,6 +600,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			SessionID:          sessionID,
 			Username:           user.Username,
 			Role:               sessionRole.String(),
+			ChannelScope:       channelScope,
 			EncryptionKey:      s.voiceKey,
 			Channels:           channelInfos,
 			ScreenAddr:         s.cfg.ScreenAddr,
@@ -704,6 +710,10 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
+		return
+	}
+	if session.ChannelScope != 0 && req.ChannelID != session.ChannelScope {
+		sendError(conn, 12, "channel is outside your invite scope")
 		return
 	}
 	// Verify channel exists

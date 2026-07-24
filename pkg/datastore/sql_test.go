@@ -945,6 +945,15 @@ func TestValidateToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
+			if tc.token.channelScope != 0 {
+				channel := model.NewChannel()
+				if err := store.NonTx().CreateChannel(channel); err != nil {
+					t.Fatalf("CreateChannel: %v", err)
+				}
+				if channel.ID != tc.token.channelScope {
+					t.Fatalf("seeded channel ID = %d, want scope %d", channel.ID, tc.token.channelScope)
+				}
+			}
 
 			if err := store.NonTx().CreateToken(tc.token.hash, tc.token.role, tc.token.channelScope, tc.token.createdBy, tc.token.maxUses, tc.token.expiresAt); err != nil {
 				t.Fatalf("CreateToken: failed to create token: %v", err)
@@ -982,6 +991,88 @@ func TestValidateToken(t *testing.T) {
 				t.Fatalf("Tx: Commit: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateTokenReturnsChannelScope(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+
+	channel := model.NewChannel()
+	if err := store.NonTx().CreateChannel(channel); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	hash := crypto.HashToken("scoped-token")
+	if err := store.NonTx().CreateToken(hash, model.RoleUser, channel.ID, 1, 1, time.Time{}); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	tx, err := store.Tx(context.Background())
+	if err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+	token, err := tx.ValidateToken(hash)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if token.Role != model.RoleUser || token.ChannelScope != channel.ID {
+		t.Fatalf("ValidateToken returned role=%s scope=%d, want role=%s scope=%d", token.Role, token.ChannelScope, model.RoleUser, channel.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestValidateTokenRejectsMissingChannelScope(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+	hash := crypto.HashToken("missing-channel-token")
+	if err := store.NonTx().CreateToken(hash, model.RoleUser, 999, 1, 1, time.Time{}); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	tx, err := store.Tx(context.Background())
+	if err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+	if _, err := tx.ValidateToken(hash); err == nil {
+		t.Fatal("ValidateToken accepted a token scoped to a missing channel")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+}
+
+func TestScopedUserPersonalTokenPreservesChannelScope(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+	user, err := store.NonTx().CreateUserWithChannelScope("scoped-user", model.RoleUser, 42)
+	if err != nil {
+		t.Fatalf("CreateUserWithChannelScope: %v", err)
+	}
+	hash := crypto.HashToken("personal-token")
+	if err := store.NonTx().UpdateUserPersonalToken(user.ID, hash, time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateUserPersonalToken: %v", err)
+	}
+
+	got, err := store.NonTx().GetUserByPersonalTokenHash(hash)
+	if err != nil {
+		t.Fatalf("GetUserByPersonalTokenHash: %v", err)
+	}
+	if got == nil || got.ChannelScope != 42 {
+		t.Fatalf("personal-token user scope = %v, want 42", got)
 	}
 }
 

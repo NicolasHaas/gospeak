@@ -20,6 +20,7 @@ type User struct {
 	ID                     int64     `json:"id"`
 	Username               string    `json:"username"`
 	Role                   Role      `json:"role"`
+	ChannelScope           int64     `json:"channel_scope"` // 0 = server-wide
 	PersonalTokenHash      string    `json:"-"`
 	PersonalTokenCreatedAt time.Time `json:"-"`
 	CreatedAt              time.Time `json:"created_at"`
