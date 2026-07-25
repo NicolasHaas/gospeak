@@ -187,7 +187,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 	)
 
 	// Set up voice connection
-	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey)
+	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey, authResp.VoiceRegistrationKey)
 	if err != nil {
 		_ = ctrl.Close()
 		e.setState(StateDisconnected)
@@ -597,10 +597,23 @@ func (e *Engine) keepaliveLoop() {
 		case <-e.ctx.Done():
 			return
 		case <-e.keepaliveNow:
+			e.tryRegisterVoiceEndpoint()
 			// Immediate keepalive (e.g. just joined a channel); ignore recency.
 			e.trySendKeepalive(&timestamp, false)
 		case <-ticker.C:
+			e.tryRegisterVoiceEndpoint()
 			e.trySendKeepalive(&timestamp, true)
+		}
+	}
+}
+
+func (e *Engine) tryRegisterVoiceEndpoint() {
+	e.mu.RLock()
+	voice := e.voice
+	e.mu.RUnlock()
+	if voice != nil {
+		if err := voice.SendRegistration(); err != nil {
+			slog.Debug("voice endpoint registration error", "err", err)
 		}
 	}
 }

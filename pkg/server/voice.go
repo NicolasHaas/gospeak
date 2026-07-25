@@ -9,6 +9,8 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
+const voiceRebindInterval = 5 * time.Second
+
 // StartVoice starts the UDP voice forwarder.
 func (s *Server) StartVoice() error {
 	addr, err := net.ResolveUDPAddr("udp", s.cfg.VoiceAddr)
@@ -59,6 +61,13 @@ func (s *Server) voiceLoop() {
 			}
 		}
 
+		if protocol.IsVoiceRegistration(buf[:n]) {
+			if !s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now()) {
+				s.metrics.VoicePacketsDropped.Add(1)
+			}
+			continue
+		}
+
 		if n < protocol.VoiceHeaderSize {
 			s.metrics.VoicePacketsDropped.Add(1)
 			continue // too short, discard
@@ -80,13 +89,10 @@ func (s *Server) voiceLoop() {
 			continue // unknown session, discard
 		}
 
-		// Verify UDP source matches registered address (prevent session hijacking).
-		// Only the first packet from a session registers the address; subsequent
-		// packets from different sources are rejected.
-		if session.UDPAddr == nil {
-			s.sessions.SetUDPAddr(pkt.SessionID, remoteAddr)
-		} else if !session.UDPAddr.IP.Equal(remoteAddr.IP) || session.UDPAddr.Port != remoteAddr.Port {
-			continue // source mismatch, drop (prevents UDP session hijack)
+		// Voice is accepted only after a control-authenticated registration proof.
+		if !udpAddrEqual(session.UDPAddr, remoteAddr) {
+			s.metrics.VoicePacketsDropped.Add(1)
+			continue // unregistered or mismatched source
 		}
 
 		// Don't forward if muted
@@ -140,4 +146,12 @@ func (s *Server) voiceLoop() {
 			}
 		}
 	}
+}
+
+func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) bool {
+	registration, err := protocol.UnmarshalVoiceRegistration(data)
+	if err != nil {
+		return false
+	}
+	return s.sessions.RegisterUDPAddr(registration.SessionID, registration, remoteAddr, now, voiceRebindInterval)
 }

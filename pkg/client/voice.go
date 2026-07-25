@@ -12,13 +12,15 @@ import (
 
 // VoiceClient manages the UDP voice connection.
 type VoiceClient struct {
-	conn       *net.UDPConn
-	serverAddr *net.UDPAddr
-	sessionID  uint32
-	channelID  uint16
-	cipher     *gospeakCrypto.VoiceCipher
-	seqNum     uint32
-	mu         sync.Mutex
+	conn                *net.UDPConn
+	serverAddr          *net.UDPAddr
+	sessionID           uint32
+	channelID           uint16
+	cipher              *gospeakCrypto.VoiceCipher
+	seqNum              uint32
+	registrationKey     []byte
+	registrationCounter uint64
+	mu                  sync.Mutex
 
 	// Incoming voice packets are sent here
 	IncomingPackets chan *protocol.VoicePacket
@@ -27,7 +29,7 @@ type VoiceClient struct {
 }
 
 // NewVoiceClient creates a new UDP voice client.
-func NewVoiceClient(serverAddr string, sessionID uint32, encKey []byte) (*VoiceClient, error) {
+func NewVoiceClient(serverAddr string, sessionID uint32, encKey, registrationKey []byte) (*VoiceClient, error) {
 	addr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("client: resolve voice addr: %w", err)
@@ -48,14 +50,33 @@ func NewVoiceClient(serverAddr string, sessionID uint32, encKey []byte) (*VoiceC
 	_ = conn.SetReadBuffer(512 * 1024)
 	_ = conn.SetWriteBuffer(512 * 1024)
 
-	return &VoiceClient{
+	client := &VoiceClient{
 		conn:            conn,
 		serverAddr:      addr,
 		sessionID:       sessionID,
 		cipher:          cipher,
+		registrationKey: append([]byte(nil), registrationKey...),
 		IncomingPackets: make(chan *protocol.VoicePacket, 100),
 		done:            make(chan struct{}),
-	}, nil
+	}
+	if err := client.SendRegistration(); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("client: register voice endpoint: %w", err)
+	}
+	return client, nil
+}
+
+// SendRegistration proves ownership of this session from the current UDP endpoint.
+func (v *VoiceClient) SendRegistration() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.registrationCounter++
+	packet, err := protocol.MarshalVoiceRegistration(v.sessionID, v.registrationCounter, v.registrationKey)
+	if err != nil {
+		return err
+	}
+	_, err = v.conn.Write(packet)
+	return err
 }
 
 // SetChannel sets the current channel ID for outgoing packets.

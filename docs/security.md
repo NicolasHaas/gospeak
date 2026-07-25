@@ -12,6 +12,7 @@ GoSpeak is designed with security as a core principle. All communication is encr
 | Server compromise (media) | Server holds the generated media keys and _could_ decrypt — see note above. Mitigated by running your own trusted server |
 | Replay attacks | Deterministic nonces from SessionID + SeqNum prevent replay |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
+| UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
 | Password attacks | Argon2id with hardened parameters (64MB memory, 4 iterations) |
 | Privilege escalation | Server-side RBAC checks on every admin operation |
@@ -82,6 +83,12 @@ sequenceDiagram
 - One shared key per server session (generated at server startup)
 - Key is distributed to each client during authentication, inside the encrypted TLS tunnel
 - All clients in the server share the same voice key
+
+### UDP Endpoint Registration
+
+The shared media key does not authorize a UDP source address. Each control session receives a separate random 256-bit registration key in `AuthResponse`, protected by TLS. The client sends an HMAC-SHA-256 registration proof immediately and every five seconds. A monotonic 64-bit counter makes accepted proofs one-use, and the server rate-limits authenticated endpoint changes to one per five seconds. Ordinary voice packets never establish or change the endpoint.
+
+This prevents another client from binding a victim's visible session ID to the attacker's UDP address. It does not prevent an on-path attacker from dropping UDP traffic, and it does not add NAT traversal: connectivity remains direct UDP with no STUN or TURN service.
 
 ### Encryption Process
 

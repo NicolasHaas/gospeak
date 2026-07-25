@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/model"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
 // SessionManager manages active client sessions.
@@ -47,28 +49,31 @@ func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Generate random session ID
+	// Generate random session ID and its independent UDP registration secret.
 	var id uint32
+	var registrationKey []byte
 	for {
-		b := make([]byte, 4)
+		b := make([]byte, 4+protocol.VoiceRegistrationKeySize)
 		if _, err := rand.Read(b); err != nil {
 			panic("crypto/rand failure: " + err.Error())
 		}
 		id = binary.BigEndian.Uint32(b)
-		if id != 0 {
+		if id != 0 && id != protocol.VoiceRegistrationMagic {
 			if _, exists := sm.sessions[id]; !exists {
+				registrationKey = append([]byte(nil), b[4:]...)
 				break
 			}
 		}
 	}
 
 	sess := &model.Session{
-		ID:              id,
-		UserID:          userID,
-		Username:        username,
-		Role:            role,
-		ChannelScope:    channelScope,
-		ScreenAuthToken: newScreenAuthToken(),
+		ID:                   id,
+		UserID:               userID,
+		Username:             username,
+		Role:                 role,
+		ChannelScope:         channelScope,
+		ScreenAuthToken:      newScreenAuthToken(),
+		VoiceRegistrationKey: registrationKey,
 	}
 	sm.sessions[id] = sess
 	return sess
@@ -135,13 +140,24 @@ func (sm *SessionManager) Remove(id uint32) {
 	delete(sm.sessions, id)
 }
 
-// SetUDPAddr sets the UDP address for a session (called after first voice packet).
-func (sm *SessionManager) SetUDPAddr(id uint32, addr *net.UDPAddr) {
+// RegisterUDPAddr authenticates and atomically updates a session's UDP endpoint.
+func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.VoiceRegistration, addr *net.UDPAddr, now time.Time, rebindInterval time.Duration) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if s, ok := sm.sessions[id]; ok {
-		s.UDPAddr = cloneUDPAddr(addr)
+	s, ok := sm.sessions[id]
+	if !ok || registration == nil || registration.SessionID != id || !registration.Verify(s.VoiceRegistrationKey) {
+		return false
 	}
+	if registration.Counter <= s.VoiceRegistrationCounter {
+		return false
+	}
+	if s.UDPAddr != nil && !udpAddrEqual(s.UDPAddr, addr) && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
+		return false
+	}
+	s.UDPAddr = cloneUDPAddr(addr)
+	s.VoiceRegistrationCounter = registration.Counter
+	s.VoiceEndpointUpdatedAt = now
+	return true
 }
 
 // UpdateUserState updates muted/deafened for a session.
@@ -190,6 +206,10 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 		clone.IP = append([]byte(nil), addr.IP...)
 	}
 	return &clone
+}
+
+func udpAddrEqual(left, right *net.UDPAddr) bool {
+	return left != nil && right != nil && left.IP.Equal(right.IP) && left.Port == right.Port && left.Zone == right.Zone
 }
 
 func newScreenAuthToken() string {
