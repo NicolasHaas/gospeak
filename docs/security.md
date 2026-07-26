@@ -48,9 +48,11 @@ graph TB
 ## Control Plane Security (TLS 1.3)
 
 - The control plane uses **TLS 1.3** (the latest version) for all TCP connections
-- On first run, the server automatically generates a **self-signed ECDSA P-256 certificate**
+- On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
 - Certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
-- Custom certificates can be provided via `-cert` and `-key` flags
+- Custom matching certificate/key pairs, including self-signed pairs, can be provided via `-cert` and `-key`
+- Certificate handling fails closed: partial configuration, missing files, malformed PEM, mismatched keys, or damaged automatic files stop startup without overwriting existing material
+- Automatically generated files are published without replacing existing paths; the private key is created with mode `0600`
 - Client currently uses `InsecureSkipVerify` for self-signed certs (suitable for private deployments)
 
 ### TLS Configuration
