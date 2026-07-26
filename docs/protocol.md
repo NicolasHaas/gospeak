@@ -63,13 +63,13 @@ sequenceDiagram
         S->>S: Create user + personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels, autoToken}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenAddr, screenAuthToken, channels, autoToken}
         Note over C: Store personal token for reconnect
     else Existing user
         S->>S: Require personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenAddr, screenAuthToken, channels}
     else Invalid token / banned
         S->>C: ErrorResponse{code, message}
         S->>S: Close connection
@@ -156,6 +156,18 @@ The control plane carries screen-share lifecycle messages only:
 - **Transport**: Raw UDP
 - **Encryption**: AES-128-GCM (shared key distributed in `AuthResponse`)
 - **Codec**: Opus at 48 kHz mono, 20ms frames (960 samples)
+
+### Authenticated Endpoint Registration
+
+A voice endpoint is not learned from an ordinary voice packet. During control authentication, the server creates a random 32-byte `voice_registration_key` for that session and returns it inside the TLS-protected `AuthResponse`. The client immediately sends this registration datagram and refreshes it every five seconds:
+
+```
+[Magic "GSR1":4B][SessionID:4B][Counter:8B][HMAC-SHA-256:32B]
+```
+
+The HMAC covers the first 16 bytes. The server accepts only a valid proof for the named active session with a counter greater than every previously accepted counter. Once a registration is accepted, the same datagram cannot be replayed. A source-address change requires a fresh proof and is accepted at most once per five seconds; this permits controlled NAT rebinding without STUN or TURN. Voice packets from unregistered or mismatched endpoints are dropped.
+
+This field is required: clients and servers from before authenticated UDP registration are not voice-compatible with this protocol revision and fail closed rather than falling back to first-packet binding.
 
 ### Packet Format
 

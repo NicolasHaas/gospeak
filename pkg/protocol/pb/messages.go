@@ -49,16 +49,17 @@ type AuthRequest struct {
 }
 
 type AuthResponse struct {
-	SessionID          uint32        `json:"session_id"`
-	Username           string        `json:"username"`
-	Role               string        `json:"role"`
-	ChannelScope       int64         `json:"channel_scope,omitempty"`
-	EncryptionKey      []byte        `json:"encryption_key"`
-	Channels           []ChannelInfo `json:"channels"`
-	ScreenAddr         string        `json:"screen_addr,omitempty"`
-	ScreenAuthToken    string        `json:"screen_auth_token,omitempty"`
-	ScreenShareEnabled bool          `json:"screen_share_enabled,omitempty"`
-	AutoToken          string        `json:"auto_token,omitempty"` // set when server generated a token for this user
+	SessionID            uint32        `json:"session_id"`
+	Username             string        `json:"username"`
+	Role                 string        `json:"role"`
+	ChannelScope         int64         `json:"channel_scope,omitempty"`
+	EncryptionKey        []byte        `json:"encryption_key"`
+	VoiceRegistrationKey []byte        `json:"voice_registration_key"`
+	Channels             []ChannelInfo `json:"channels"`
+	ScreenAddr           string        `json:"screen_addr,omitempty"`
+	ScreenAuthToken      string        `json:"screen_auth_token,omitempty"`
+	ScreenShareEnabled   bool          `json:"screen_share_enabled,omitempty"`
+	AutoToken            string        `json:"auto_token,omitempty"` // set when server generated a token for this user
 }
 
 // ----- Channels -----

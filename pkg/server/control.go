@@ -597,16 +597,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	// Send auth response
 	authResp := &pb.ControlMessage{
 		AuthResponse: &pb.AuthResponse{
-			SessionID:          sessionID,
-			Username:           user.Username,
-			Role:               sessionRole.String(),
-			ChannelScope:       channelScope,
-			EncryptionKey:      s.voiceKey,
-			Channels:           channelInfos,
-			ScreenAddr:         s.cfg.ScreenAddr,
-			ScreenAuthToken:    session.ScreenAuthToken,
-			ScreenShareEnabled: s.cfg.EnableScreenShare,
-			AutoToken:          autoToken,
+			SessionID:            sessionID,
+			Username:             user.Username,
+			Role:                 sessionRole.String(),
+			ChannelScope:         channelScope,
+			EncryptionKey:        s.voiceKey,
+			VoiceRegistrationKey: append([]byte(nil), session.VoiceRegistrationKey...),
+			Channels:             channelInfos,
+			ScreenAddr:           s.cfg.ScreenAddr,
+			ScreenAuthToken:      session.ScreenAuthToken,
+			ScreenShareEnabled:   s.cfg.EnableScreenShare,
+			AutoToken:            autoToken,
 		},
 	}
 	if err := writeControlMessage(conn, authResp); err != nil {
