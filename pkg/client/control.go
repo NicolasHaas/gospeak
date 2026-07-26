@@ -23,17 +23,18 @@ type EventHandler func(msg *pb.ControlMessage)
 
 // ControlClient manages the TCP/TLS control plane connection.
 type ControlClient struct {
-	conn    net.Conn
-	mu      sync.Mutex
-	handler EventHandler
-	done    chan struct{}
+	conn           net.Conn
+	serverIdentity string
+	mu             sync.Mutex
+	handler        EventHandler
+	done           chan struct{}
 }
 
 // NewControlClient connects to the server's control plane via TLS.
-func NewControlClient(addr string) (*ControlClient, error) {
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, // MVP: accept self-signed certs (TOFU model)
-		MinVersion:         tls.VersionTLS13,
+func NewControlClient(addr, expectedPin string) (*ControlClient, error) {
+	tlsCfg, err := tlsConfig(addr, expectedPin)
+	if err != nil {
+		return nil, err
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}
@@ -43,10 +44,16 @@ func NewControlClient(addr string) (*ControlClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("client: connect control: %w", err)
 	}
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok || len(tlsConn.ConnectionState().PeerCertificates) == 0 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("client: control connection has no TLS peer identity")
+	}
 
 	return &ControlClient{
-		conn: conn,
-		done: make(chan struct{}),
+		conn:           conn,
+		serverIdentity: SPKIFingerprint(tlsConn.ConnectionState().PeerCertificates[0]),
+		done:           make(chan struct{}),
 	}, nil
 }
 

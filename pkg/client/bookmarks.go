@@ -19,8 +19,9 @@ type Bookmark struct {
 
 // BookmarkStore manages server bookmarks stored next to the binary.
 type BookmarkStore struct {
-	path      string
-	Bookmarks []Bookmark `yaml:"bookmarks"`
+	path              string
+	Bookmarks         []Bookmark        `yaml:"bookmarks"`
+	TrustedServerPins map[string]string `yaml:"trusted_server_pins,omitempty"`
 }
 
 // NewBookmarkStore creates a bookmark store using a file next to the executable.
@@ -54,7 +55,24 @@ func (bs *BookmarkStore) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(bs.path, data, 0600)
+	if err := os.WriteFile(bs.path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(bs.path, 0600)
+}
+
+// PinForAddr returns the saved TOFU identity for a control address.
+func (bs *BookmarkStore) PinForAddr(controlAddr string) string {
+	return bs.TrustedServerPins[controlAddr]
+}
+
+// TrustServer records an explicitly accepted TOFU identity for a control
+// address. Calling it again is the explicit re-trust operation.
+func (bs *BookmarkStore) TrustServer(controlAddr, fingerprint string) {
+	if bs.TrustedServerPins == nil {
+		bs.TrustedServerPins = make(map[string]string)
+	}
+	bs.TrustedServerPins[controlAddr] = fingerprint
 }
 
 // Add adds or updates a bookmark. Returns true if it was a new entry.
