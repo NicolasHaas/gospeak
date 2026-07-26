@@ -60,8 +60,8 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-control` | `:9600` | TCP/TLS control plane bind address |
 | `-voice` | `:9601` | UDP voice plane bind address |
 | `-db` | `gospeak.db` | SQLite database file path |
-| `-cert` | *(auto-generated)* | TLS certificate file (use with `-key`) |
-| `-key` | *(auto-generated)* | TLS private key file (use with `-cert`) |
+| `-cert` | *(empty)* | Custom TLS certificate, including self-signed; must be used with `-key` |
+| `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, a self-signed pair is loaded or generated in `-data` |
 | `-data` | `.` | Data directory for generated files (certs, DB, etc.) |
 | `-open` | `false` | Allow users to join without a token |
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |

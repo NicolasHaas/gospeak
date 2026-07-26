@@ -110,7 +110,7 @@ Enter the server address, your username, and (optionally) an invite token to con
 | `-open` | `false` | Allow connections without a token |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | | YAML file for initial channel setup |
-| `-cert` / `-key` | *(auto-generated)* | Custom TLS certificate |
+| `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data` |
 | `-metrics` | `:9602` | Prometheus /metrics HTTP endpoint (empty to disable) |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
