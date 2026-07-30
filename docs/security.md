@@ -11,7 +11,7 @@ GoSpeak is designed with security as a core principle. All communication is encr
 | Network eavesdropping | TLS 1.3 for control and screen planes, AES-128-GCM for voice and screen media |
 | Active network MITM | System-PKI hostname verification or an explicitly confirmed TOFU public-key pin, shared by control and screen connections |
 | Server compromise (media) | Server holds the generated media keys and _could_ decrypt — see note above. Mitigated by running your own trusted server |
-| Replay attacks | Deterministic nonces from SessionID + SeqNum prevent replay |
+| GCM nonce reuse | Session IDs are never reissued while a voice key is active, and clients fail closed before sequence-number wrap |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
 | UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
@@ -110,15 +110,17 @@ For each voice packet:
    - Bytes 4-7: `SeqNum` (uint32, big-endian)
    - Bytes 8-11: `0x00000000` (padding)
 
+   Session IDs are allocated without reuse for the lifetime of the shared voice key, including after disconnect. Sequence numbers start at one and may not wrap; an exhausted sender must reconnect before sending more voice data.
+
 2. **Authenticated encryption**:
    - **Algorithm**: AES-128-GCM
    - **Plaintext**: Opus-encoded audio frame
-   - **Additional Data (AD)**: 8-byte packet header (SessionID + SeqNum)
+   - **Additional Data (AD)**: 14-byte packet header (SessionID + SeqNum + Timestamp + ChannelID)
    - **Output**: Ciphertext + 16-byte authentication tag
 
 3. **Packet assembly**:
    ```
-   [SessionID:4B][SeqNum:4B][Ciphertext + AuthTag]
+   [SessionID:4B][SeqNum:4B][Timestamp:4B][ChannelID:2B][Ciphertext + AuthTag]
    ```
 
 ### Security Properties
@@ -127,8 +129,8 @@ For each voice packet:
 |----------|------------------|
 | **Confidentiality** | AES-128-GCM encryption of Opus frames |
 | **Integrity** | GCM authentication tag (16 bytes) |
-| **Authenticity** | Header (SessionID + SeqNum) is authenticated as additional data |
-| **Anti-replay** | Monotonic sequence numbers in nonce prevent reuse |
+| **Authenticity** | The complete 14-byte voice header is authenticated as additional data |
+| **Nonce uniqueness** | Session IDs are not reissued under the same key, and sequence wrap fails closed |
 | **Forward secrecy** | New key generated on each server restart |
 
 ## Screen Share Encryption (AES-128-GCM)

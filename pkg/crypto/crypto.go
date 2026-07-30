@@ -67,8 +67,9 @@ func NewVoiceCipher(key []byte) (*VoiceCipher, error) {
 }
 
 // buildNonce constructs a 12-byte nonce from sessionID and seqNum.
-// Format: [sessionID(4) | seqNum(4) | zeros(4)]
-// uint32 seqNum gives ~994 days at 50 pkt/s before wrap (vs ~21 min with uint16).
+// Format: [sessionID(4) | seqNum(4) | zeros(4)].
+// The server never reissues a session ID during a voice-key lifetime, and the
+// client refuses to send when the uint32 sequence space is exhausted.
 func buildNonce(sessionID uint32, seqNum uint32) []byte {
 	nonce := make([]byte, 12)
 	binary.BigEndian.PutUint32(nonce[0:4], sessionID)

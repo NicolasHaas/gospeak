@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,8 @@ import (
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
+
+var ErrVoiceSequenceExhausted = errors.New("client: voice sequence exhausted; reconnect required")
 
 // VoiceClient manages the UDP voice connection.
 type VoiceClient struct {
@@ -89,6 +92,10 @@ func (v *VoiceClient) SetChannel(channelID int64) {
 // SendVoice encrypts and sends an Opus frame over UDP.
 func (v *VoiceClient) SendVoice(opusData []byte, timestamp uint32) error {
 	v.mu.Lock()
+	if v.seqNum == ^uint32(0) {
+		v.mu.Unlock()
+		return ErrVoiceSequenceExhausted
+	}
 	v.seqNum++
 	seqNum := v.seqNum
 	channelID := v.channelID

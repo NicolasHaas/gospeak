@@ -91,7 +91,7 @@ func TestHandleJoinLeaveChannel(t *testing.T) {
 		t.Fatalf("CreateChannel: %v", err)
 	}
 
-	session := srv.sessions.Create(1, "johndoe", model.RoleUser)
+	session := mustCreateSession(t, srv.sessions, 1, "johndoe", model.RoleUser)
 
 	srv.handleJoinChannel(handler, session.ID, &pb.JoinChannelRequest{ChannelID: ch.ID}, st, conn)
 	joinedChannel := srv.channels.ChannelOf(session.ID)
@@ -135,7 +135,7 @@ func TestHandleJoinChannelEnforcesSessionScope(t *testing.T) {
 		t.Fatalf("CreateChannel(other): %v", err)
 	}
 
-	session := srv.sessions.CreateWithChannelScope(1, "scoped-user", model.RoleUser, scopedChannel.ID)
+	session := mustCreateScopedSession(t, srv.sessions, 1, "scoped-user", model.RoleUser, scopedChannel.ID)
 	rejection := &bufferConn{}
 	srv.handleJoinChannel(handler, session.ID, &pb.JoinChannelRequest{ChannelID: otherChannel.ID}, st, rejection)
 	response, err := protocol.ReadControlMessage(rejection)
@@ -158,7 +158,7 @@ func TestHandleJoinChannelEnforcesSessionScope(t *testing.T) {
 func TestHandleUserState(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 
-	session := srv.sessions.Create(1, "johndoe", model.RoleUser)
+	session := mustCreateSession(t, srv.sessions, 1, "johndoe", model.RoleUser)
 
 	srv.handleUserState(handler, session.ID, &pb.UserStateUpdate{Muted: true, Deafened: true}, st)
 
@@ -173,9 +173,9 @@ func TestHandleUserState(t *testing.T) {
 
 func TestHandleKickUserClosesEverySession(t *testing.T) {
 	srv, _, handler := newTestServer(t)
-	admin := srv.sessions.Create(1, "admin", model.RoleAdmin)
-	targetOne := srv.sessions.Create(2, "target", model.RoleUser)
-	targetTwo := srv.sessions.Create(2, "target", model.RoleUser)
+	admin := mustCreateSession(t, srv.sessions, 1, "admin", model.RoleAdmin)
+	targetOne := mustCreateSession(t, srv.sessions, 2, "target", model.RoleUser)
+	targetTwo := mustCreateSession(t, srv.sessions, 2, "target", model.RoleUser)
 	connOne := registerTestConn(handler, targetOne.ID)
 	connTwo := registerTestConn(handler, targetTwo.ID)
 
@@ -195,9 +195,9 @@ func TestHandleBanUserClosesEverySession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser(target): %v", err)
 	}
-	admin := srv.sessions.Create(adminUser.ID, adminUser.Username, adminUser.Role)
-	targetOne := srv.sessions.Create(targetUser.ID, targetUser.Username, targetUser.Role)
-	targetTwo := srv.sessions.Create(targetUser.ID, targetUser.Username, targetUser.Role)
+	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	targetOne := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
+	targetTwo := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
 	connOne := registerTestConn(handler, targetOne.ID)
 	connTwo := registerTestConn(handler, targetTwo.ID)
 
@@ -217,9 +217,9 @@ func TestHandleSetUserRoleUpdatesEverySession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser(target): %v", err)
 	}
-	admin := srv.sessions.Create(adminUser.ID, adminUser.Username, adminUser.Role)
-	targetOne := srv.sessions.Create(targetUser.ID, targetUser.Username, targetUser.Role)
-	targetTwo := srv.sessions.Create(targetUser.ID, targetUser.Username, targetUser.Role)
+	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	targetOne := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
+	targetTwo := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
 
 	srv.handleSetUserRole(handler, admin.ID, &pb.SetUserRoleRequest{TargetUserID: targetUser.ID, NewRole: model.RoleUser.String()}, st, &nopConn{})
 

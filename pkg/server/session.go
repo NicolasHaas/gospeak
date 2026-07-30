@@ -4,6 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -14,9 +17,16 @@ import (
 
 // SessionManager manages active client sessions.
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[uint32]*model.Session // sessionID -> session
+	mu               sync.RWMutex
+	sessions         map[uint32]*model.Session // sessionID -> session
+	nextSessionID    uint32
+	issuedSessionIDs uint64
+	sessionIDSeeded  bool
 }
+
+var ErrSessionIDExhausted = errors.New("server: session ID space exhausted")
+
+const usableSessionIDs = uint64(math.MaxUint32) - 1 // zero and the registration magic are reserved
 
 // SessionSnapshot is an immutable view of a session.
 type SessionSnapshot struct {
@@ -40,30 +50,26 @@ func NewSessionManager() *SessionManager {
 }
 
 // Create creates a new session for an authenticated user.
-func (sm *SessionManager) Create(userID int64, username string, role model.Role) *model.Session {
+func (sm *SessionManager) Create(userID int64, username string, role model.Role) (*model.Session, error) {
 	return sm.CreateWithChannelScope(userID, username, role, 0)
 }
 
 // CreateWithChannelScope creates a session with a persistent invite restriction.
-func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, role model.Role, channelScope int64) *model.Session {
+func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, role model.Role, channelScope int64) (*model.Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Generate random session ID and its independent UDP registration secret.
-	var id uint32
-	var registrationKey []byte
-	for {
-		b := make([]byte, 4+protocol.VoiceRegistrationKeySize)
-		if _, err := rand.Read(b); err != nil {
-			panic("crypto/rand failure: " + err.Error())
-		}
-		id = binary.BigEndian.Uint32(b)
-		if id != 0 && id != protocol.VoiceRegistrationMagic {
-			if _, exists := sm.sessions[id]; !exists {
-				registrationKey = append([]byte(nil), b[4:]...)
-				break
-			}
-		}
+	id, err := sm.nextIDLocked()
+	if err != nil {
+		return nil, err
+	}
+	registrationKey := make([]byte, protocol.VoiceRegistrationKeySize)
+	if _, err := rand.Read(registrationKey); err != nil {
+		return nil, fmt.Errorf("server: generate voice registration key: %w", err)
+	}
+	screenAuthToken, err := newScreenAuthToken()
+	if err != nil {
+		return nil, err
 	}
 
 	sess := &model.Session{
@@ -72,11 +78,37 @@ func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, 
 		Username:             username,
 		Role:                 role,
 		ChannelScope:         channelScope,
-		ScreenAuthToken:      newScreenAuthToken(),
+		ScreenAuthToken:      screenAuthToken,
 		VoiceRegistrationKey: registrationKey,
 	}
 	sm.sessions[id] = sess
-	return sess
+	return sess, nil
+}
+
+// nextIDLocked allocates each usable uint32 exactly once for this manager's
+// lifetime. The server voice key is scoped to the same server lifecycle, so a
+// reused (session ID, sequence number) GCM nonce is impossible.
+func (sm *SessionManager) nextIDLocked() (uint32, error) {
+	if sm.issuedSessionIDs >= usableSessionIDs {
+		return 0, ErrSessionIDExhausted
+	}
+	if !sm.sessionIDSeeded {
+		var seed [4]byte
+		if _, err := rand.Read(seed[:]); err != nil {
+			return 0, fmt.Errorf("server: seed session IDs: %w", err)
+		}
+		sm.nextSessionID = binary.BigEndian.Uint32(seed[:])
+		sm.sessionIDSeeded = true
+	}
+	for {
+		id := sm.nextSessionID
+		sm.nextSessionID++
+		if id == 0 || id == protocol.VoiceRegistrationMagic {
+			continue
+		}
+		sm.issuedSessionIDs++
+		return id, nil
+	}
 }
 
 // GetSnapshot returns an immutable snapshot of the session by session ID.
@@ -212,10 +244,10 @@ func udpAddrEqual(left, right *net.UDPAddr) bool {
 	return left != nil && right != nil && left.IP.Equal(right.IP) && left.Port == right.Port && left.Zone == right.Zone
 }
 
-func newScreenAuthToken() string {
+func newScreenAuthToken() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failure: " + err.Error())
+		return "", fmt.Errorf("server: generate screen auth token: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }

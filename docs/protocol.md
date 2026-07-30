@@ -226,14 +226,15 @@ The server does **not** decode voice packets. It:
 
 ### Nonce Construction
 
-The AES-128-GCM nonce (12 bytes) is deterministic and never reused:
+The AES-128-GCM nonce (12 bytes) is deterministic and never reused while a voice key is active:
 
 ```
 Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 ```
 
-- `SessionID` is unique per connection (assigned by server)
-- `SeqNum` is a monotonically increasing `uint32` per sender (~994 days at 50 packets/sec before wrap)
+- `SessionID` is allocated from a random starting point and is never issued again during the server lifecycle, even after its session disconnects
+- the shared voice key is generated for that same server lifecycle, so historical sessions cannot repeat a nonce under the same key
+- `SeqNum` starts at one and increases monotonically per sender; the client refuses to send after `uint32` exhaustion and requires a reconnect instead of wrapping to zero
 
 ---
 
