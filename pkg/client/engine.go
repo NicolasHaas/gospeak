@@ -154,7 +154,7 @@ func (f *defaultDecoderFactory) NewDecoder() (audio.AudioDecoder, error) {
 }
 
 // Connect authenticates to the server and starts audio/voice pipelines.
-func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
+func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin string) error {
 	e.mu.Lock()
 	if e.state != StateDisconnected {
 		e.mu.Unlock()
@@ -166,7 +166,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 	e.notifyStateChange(StateConnecting)
 
 	// Connect control plane
-	ctrl, err := NewControlClient(controlAddr)
+	ctrl, err := NewControlClient(controlAddr, serverPin)
 	if err != nil {
 		e.setState(StateDisconnected)
 		return err
@@ -211,7 +211,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username string) error {
 			e.setState(StateDisconnected)
 			return fmt.Errorf("resolve screen address: %w", err)
 		} else {
-			screen, err = NewScreenClient(screenAddr, authResp.SessionID, authResp.ScreenAuthToken)
+			screen, err = NewScreenClient(screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverIdentity)
 			if err != nil {
 				_ = ctrl.Close()
 				_ = voice.Close()

@@ -8,7 +8,7 @@ GoSpeak uses a selective forwarding architecture: the control plane handles sign
 
 - **Real-time voice chat**: Opus codec at 48 kHz, 20ms frames via PortAudio
 - **Encrypted voice**: AES-128-GCM with authenticated headers; server relays without decoding (see [Security](docs/security.md) for key model caveats)
-- **TLS 1.3 control plane**: auto-generated self-signed certificates or bring your own
+- **Authenticated TLS 1.3 control plane**: system PKI for public certificates and explicit TOFU fingerprint pinning for self-signed servers
 - **Channel system**: hierarchical channels with sub-channels, temporary channels, max-user limits
 - **Role-based access control**: Admin, Moderator, User roles with granular permissions
 - **Token-based authentication**: 256-bit random tokens, SHA-256 hashed storage
@@ -60,6 +60,10 @@ Download the appropriate binary for your platform from [Releases](https://github
 ```
 
 Enter the server address, your username, and (optionally) an invite token to connect. On first login the server issues a personal token; keep it to reconnect with the same username.
+
+For a self-signed server, the client displays its SHA-256 public-key fingerprint before sending credentials. Verify that fingerprint with the server operator through a trusted channel, then choose **Trust and Connect**. The saved pin is checked for both control and screen connections. A later identity change is a hard connection failure and requires an explicit **Re-trust and Connect** confirmation after the new fingerprint has been verified. Publicly trusted certificates are validated with the operating system's CA store and hostname checks without a TOFU prompt.
+
+Existing bookmark files remain compatible. They gain a `trusted_server_pins` section after the first self-signed server is trusted; no pin is silently created during migration.
 
 ## Architecture
 

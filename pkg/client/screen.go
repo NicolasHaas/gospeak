@@ -22,10 +22,10 @@ type ScreenClient struct {
 	done    chan struct{}
 }
 
-func NewScreenClient(addr string, sessionID uint32, authToken string) (*ScreenClient, error) {
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
+func NewScreenClient(addr string, sessionID uint32, authToken, serverIdentity string) (*ScreenClient, error) {
+	tlsCfg, err := tlsConfig(addr, serverIdentity)
+	if err != nil {
+		return nil, err
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}

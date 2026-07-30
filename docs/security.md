@@ -9,6 +9,7 @@ GoSpeak is designed with security as a core principle. All communication is encr
 | Threat | Mitigation |
 |--------|-----------|
 | Network eavesdropping | TLS 1.3 for control and screen planes, AES-128-GCM for voice and screen media |
+| Active network MITM | System-PKI hostname verification or an explicitly confirmed TOFU public-key pin, shared by control and screen connections |
 | Server compromise (media) | Server holds the generated media keys and _could_ decrypt — see note above. Mitigated by running your own trusted server |
 | Replay attacks | Deterministic nonces from SessionID + SeqNum prevent replay |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
@@ -53,7 +54,9 @@ graph TB
 - Custom matching certificate/key pairs, including self-signed pairs, can be provided via `-cert` and `-key`
 - Certificate handling fails closed: partial configuration, missing files, malformed PEM, mismatched keys, or damaged automatic files stop startup without overwriting existing material
 - Automatically generated files are published without replacing existing paths; the private key is created with mode `0600`
-- Client currently uses `InsecureSkipVerify` for self-signed certs (suitable for private deployments)
+- Clients first try normal system-PKI and hostname verification. A certificate that is not publicly trusted is rejected until the user verifies and explicitly accepts its SHA-256 SubjectPublicKeyInfo fingerprint
+- Accepted TOFU pins are stored by normalized control address in the bookmark file. Subsequent control connections require the same public key; screen connections require the exact identity established by the control connection
+- A changed TOFU pin is treated as a possible MITM and blocks the connection. Replacing it requires an explicit re-trust confirmation that displays both fingerprints
 
 ### TLS Configuration
 
@@ -63,6 +66,12 @@ tlsCfg := &tls.Config{
     MinVersion:   tls.VersionTLS13,
 }
 ```
+
+The client uses `VerifyConnection` as the mandatory verification path. Public certificates are checked against the operating-system roots and requested hostname. For a saved self-signed server, the callback compares the peer's SHA-256 SPKI fingerprint to the stored pin and also rejects certificates outside their validity period. `InsecureSkipVerify` is set only to delegate the built-in verification to that non-optional callback; it never means unconditional acceptance.
+
+### Self-Signed Upgrade and Recovery
+
+Existing bookmarks load without a pin and therefore prompt on their first connection after upgrading. Compare the displayed fingerprint with a value obtained directly from the server operator before accepting it. If a server certificate or key is intentionally replaced, the next connection fails with an identity-change warning. Verify the new fingerprint independently before using the explicit re-trust action. Do not re-trust an unexpected change merely to restore connectivity.
 
 ## Voice Encryption (AES-128-GCM)
 

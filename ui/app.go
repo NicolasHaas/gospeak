@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -900,31 +901,72 @@ func (a *App) showConnectDialog() {
 			a.connectServer = controlAddr
 			a.connectVoice = voiceAddr
 
-			go func() {
-				if err := a.engine.Connect(controlAddr, voiceAddr, token, username); err != nil {
-					slog.Error("connect failed", "err", err)
-					fyne.Do(func() {
-						dialog.ShowError(fmt.Errorf("connection failed: %v", err), a.window)
-					})
-					return
-				}
-				if saveCheck.Checked {
-					a.saveCurrentBookmark(username)
-					return
-				}
-				if selectedBookmark != nil {
-					if a.bookmarks.Touch(selectedBookmark.ControlAddr, selectedBookmark.Username, time.Now().Unix()) {
-						if err := a.bookmarks.Save(); err != nil {
-							slog.Error("failed to save bookmark", "err", err)
+			saveServer := saveCheck.Checked
+			var connect func(string)
+			connect = func(serverPin string) {
+				go func() {
+					if err := a.engine.Connect(controlAddr, voiceAddr, token, username, serverPin); err != nil {
+						var untrusted *client.UntrustedServerError
+						var changed *client.ServerIdentityChangedError
+						if errors.As(err, &untrusted) {
+							fyne.Do(func() {
+								a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
+							})
+							return
+						}
+						if errors.As(err, &changed) {
+							fyne.Do(func() {
+								a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
+							})
+							return
+						}
+						slog.Error("connect failed", "err", err)
+						fyne.Do(func() {
+							dialog.ShowError(fmt.Errorf("connection failed: %v", err), a.window)
+						})
+						return
+					}
+					if saveServer {
+						a.saveCurrentBookmark(username)
+						return
+					}
+					if selectedBookmark != nil {
+						if a.bookmarks.Touch(selectedBookmark.ControlAddr, selectedBookmark.Username, time.Now().Unix()) {
+							if err := a.bookmarks.Save(); err != nil {
+								slog.Error("failed to save bookmark", "err", err)
+							}
 						}
 					}
-				}
-			}()
+				}()
+			}
+			connect(a.bookmarks.PinForAddr(controlAddr))
 		},
 		a.window,
 	)
 	d.Resize(fyne.NewSize(420, 420))
 	d.Show()
+}
+
+func (a *App) confirmServerTrust(controlAddr, received, expected string, connect func(string)) {
+	title := "Trust New Server Identity"
+	confirm := "Trust and Connect"
+	message := fmt.Sprintf("Verify this server fingerprint through a trusted channel before continuing:\n\n%s\n\nServer: %s", received, controlAddr)
+	if expected != "" {
+		title = "Server Identity Changed"
+		confirm = "Re-trust and Connect"
+		message = fmt.Sprintf("WARNING: the saved server identity changed. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nSaved: %s\nNew:   %s\n\nServer: %s", expected, received, controlAddr)
+	}
+	dialog.NewCustomConfirm(title, confirm, "Cancel", widget.NewLabel(message), func(ok bool) {
+		if !ok {
+			return
+		}
+		a.bookmarks.TrustServer(controlAddr, received)
+		if err := a.bookmarks.Save(); err != nil {
+			dialog.ShowError(fmt.Errorf("save trusted server identity: %w", err), a.window)
+			return
+		}
+		connect(received)
+	}, a.window).Show()
 }
 
 // ----- Admin / Settings dialogs -----

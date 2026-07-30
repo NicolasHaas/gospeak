@@ -41,12 +41,6 @@ linters:
         linters:
           - gosec
 
-      # Ignore "G402: TLS InsecureSkipVerify" in client (self-signed certs)
-      - path: pkg/client/
-        linters:
-          - gosec
-        text: "G402"
-
 formatters:
   enable:
     - gofmt
