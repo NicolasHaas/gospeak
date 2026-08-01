@@ -2,12 +2,35 @@ package client
 
 import (
 	"bytes"
+	"errors"
+	"math"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
+
+func TestSendVoiceRefusesSequenceWrap(t *testing.T) {
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer listener.Close()
+
+	registrationKey := bytes.Repeat([]byte{0x42}, protocol.VoiceRegistrationKeySize)
+	voiceKey := bytes.Repeat([]byte{0x24}, 16)
+	client, err := NewVoiceClient(listener.LocalAddr().String(), 1234, voiceKey, registrationKey)
+	if err != nil {
+		t.Fatalf("NewVoiceClient: %v", err)
+	}
+	defer client.Close()
+
+	client.seqNum = math.MaxUint32
+	if err := client.SendVoice([]byte("frame"), 1); !errors.Is(err, ErrVoiceSequenceExhausted) {
+		t.Fatalf("SendVoice error = %v, want %v", err, ErrVoiceSequenceExhausted)
+	}
+}
 
 func TestNewVoiceClientRegistersEndpointImmediately(t *testing.T) {
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})

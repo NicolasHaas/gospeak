@@ -551,7 +551,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	// Create session (voice key is shared server-wide for SFU model)
-	session := s.sessions.CreateWithChannelScope(user.ID, user.Username, sessionRole, channelScope)
+	session, err := s.sessions.CreateWithChannelScope(user.ID, user.Username, sessionRole, channelScope)
+	if err != nil {
+		slog.Error("create session", "err", err)
+		sendError(conn, 3, "could not create session")
+		return
+	}
 	sessionID := session.ID
 
 	defer func() {

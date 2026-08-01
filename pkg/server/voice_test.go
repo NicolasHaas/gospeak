@@ -12,7 +12,7 @@ import (
 
 func TestVoiceEndpointRequiresAuthenticatedRegistration(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	session := srv.sessions.Create(1, "speaker", model.RoleUser)
+	session := mustCreateSession(t, srv.sessions, 1, "speaker", model.RoleUser)
 	legitimate := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 	attacker := &net.UDPAddr{IP: net.ParseIP("198.51.100.20"), Port: 50000}
 
@@ -47,7 +47,7 @@ func TestVoiceEndpointRequiresAuthenticatedRegistration(t *testing.T) {
 
 func TestVoiceRegistrationRejectsReplayAndRateLimitsRebind(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	session := srv.sessions.Create(1, "speaker", model.RoleUser)
+	session := mustCreateSession(t, srv.sessions, 1, "speaker", model.RoleUser)
 	first := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 	rebound := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40001}
 	now := time.Now()

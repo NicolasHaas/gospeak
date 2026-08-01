@@ -124,7 +124,7 @@ func TestScreenShareManager_ExpireInactiveStopsShare(t *testing.T) {
 
 func TestSessionManager_ValidateScreenAuth(t *testing.T) {
 	sm := NewSessionManager()
-	session := sm.Create(1, "alice", 0)
+	session := mustCreateSession(t, sm, 1, "alice", 0)
 
 	if !sm.ValidateScreenAuth(session.ID, session.ScreenAuthToken) {
 		t.Fatalf("ValidateScreenAuth(valid) = false, want true")
