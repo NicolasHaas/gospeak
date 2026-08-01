@@ -23,16 +23,22 @@ type ScreenClient struct {
 }
 
 func NewScreenClient(addr string, sessionID uint32, authToken, serverIdentity string) (*ScreenClient, error) {
+	return NewScreenClientContext(context.Background(), addr, sessionID, authToken, serverIdentity)
+}
+
+func NewScreenClientContext(ctx context.Context, addr string, sessionID uint32, authToken, serverIdentity string) (*ScreenClient, error) {
 	tlsCfg, err := tlsConfig(addr, serverIdentity)
 	if err != nil {
 		return nil, err
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}
-	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: connect screen: %w", err)
 	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	if err := protocol.WriteScreenAuth(conn, &protocol.ScreenAuth{SessionID: sessionID, Token: authToken}); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: authenticate screen: %w", err)
