@@ -24,13 +24,29 @@ import (
 var (
 	errScreenShareCaptureTimedOut = errors.New("screen capture timed out")
 	errScreenShareStartTimedOut   = errors.New("screen share start timed out")
+	screenCaptureSlot             = make(chan struct{}, 1)
 )
 
 const (
 	defaultScreenShareCaptureTimeout = 15 * time.Second
 	defaultScreenShareStartTimeout   = 10 * time.Second
 	keepAliveInterval                = 5 * time.Second
+	maxCallbackQueue                 = 256
+	maxReliableCallbackQueue         = 1024
 )
+
+type callbackKind uint8
+
+const (
+	callbackRMS callbackKind = iota
+	callbackVoiceActivity
+	callbackScreenFrame
+)
+
+type latestCallbackKey struct {
+	generation *connectionGeneration
+	kind       callbackKind
+}
 
 // State represents the client's connection state.
 type State int
@@ -41,9 +57,125 @@ const (
 	StateConnected
 )
 
+type audioResources struct {
+	capture  audio.Capturer
+	playback audio.Player
+	encoder  audio.AudioEncoder
+}
+
+func (r *audioResources) close() {
+	if r == nil {
+		return
+	}
+	if r.playback != nil {
+		_ = r.playback.Stop()
+	}
+	if r.capture != nil {
+		_ = r.capture.Close()
+	}
+}
+
+type connectionGeneration struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	done   chan struct{}
+
+	disconnectOnce sync.Once
+	doneOnce       sync.Once
+	mu             sync.Mutex
+	control        *ControlClient
+	voice          *VoiceClient
+	screen         *ScreenClient
+	cipher         *gospeakCrypto.VoiceCipher
+	audio          *audioResources
+	keepaliveNow   chan struct{}
+}
+
+func newConnectionGeneration() *connectionGeneration {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &connectionGeneration{
+		ctx:          ctx,
+		cancel:       cancel,
+		done:         make(chan struct{}),
+		keepaliveNow: make(chan struct{}, 1),
+	}
+}
+
+func (g *connectionGeneration) finish() {
+	g.doneOnce.Do(func() { close(g.done) })
+}
+
+func (g *connectionGeneration) begin() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ctx.Err() != nil {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+func (g *connectionGeneration) run(fn func(context.Context)) bool {
+	if !g.begin() {
+		return false
+	}
+	go func() {
+		defer g.wg.Done()
+		fn(g.ctx)
+	}()
+	return true
+}
+
+func (g *connectionGeneration) startTrackedReceiver(start func(), wait func()) bool {
+	if !g.begin() {
+		return false
+	}
+	start()
+	go func() {
+		defer g.wg.Done()
+		wait()
+	}()
+	return true
+}
+
+func (g *connectionGeneration) closeResources() {
+	g.mu.Lock()
+	g.cancel()
+	resources := g.audio
+	g.audio = nil
+	control := g.control
+	g.control = nil
+	voice := g.voice
+	g.voice = nil
+	screen := g.screen
+	g.screen = nil
+	g.cipher = nil
+	g.mu.Unlock()
+
+	resources.close()
+	if voice != nil {
+		_ = voice.Close()
+	}
+	if screen != nil {
+		_ = screen.Close()
+	}
+	if control != nil {
+		_ = control.Close()
+	}
+}
+
 // Engine is the main client engine that wires together audio, networking, and state.
 type Engine struct {
-	mu sync.RWMutex
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	callbackMu  sync.Mutex
+
+	callbackQueueMu      sync.Mutex
+	callbackQueue        []func()
+	callbackQueueRunning bool
+	latestCallbacks      map[latestCallbackKey]func()
+	latestCallbackQueued map[latestCallbackKey]bool
 
 	state     State
 	sessionID uint32
@@ -53,15 +185,9 @@ type Engine struct {
 	muted     bool
 	deafened  bool
 
-	control *ControlClient
-	voice   *VoiceClient
-	screen  *ScreenClient
-	cipher  *gospeakCrypto.VoiceCipher
-
-	capture  audio.Capturer
-	playback audio.Player
-	encoder  audio.AudioEncoder
-	vad      audio.VoiceDetector
+	generation    *connectionGeneration
+	disconnecting *connectionGeneration
+	vad           audio.VoiceDetector
 
 	// Per-speaker decoders and jitter buffers
 	decoders       map[uint32]audio.AudioDecoder
@@ -70,9 +196,6 @@ type Engine struct {
 	decoderFactory audio.DecoderFactory
 
 	channels []pb.ChannelInfo
-
-	ctx    context.Context
-	cancel context.CancelFunc
 
 	screenMu           sync.Mutex
 	screenSharePending bool
@@ -90,7 +213,7 @@ type Engine struct {
 	screenStartWait    time.Duration
 
 	// Audio initialization function (allows platform-specific audio backends)
-	initAudioFn func() error
+	initAudioFn func() (*audioResources, error)
 
 	// Voice debug counters (reset each log interval; only used when debug is enabled)
 	voiceDebugEnabled   bool
@@ -103,9 +226,11 @@ type Engine struct {
 	// Keep-alive state
 	lastSendTime time.Time
 	silenceBuf   []int16
-	keepaliveNow chan struct{} // signals keepaliveLoop to send immediately
 
-	// Callbacks for UI updates
+	// Callbacks for UI updates. Callbacks are serialized asynchronously and may
+	// safely call synchronous Engine methods such as Connect and Disconnect.
+	// To keep memory bounded when a callback blocks indefinitely, high-rate updates
+	// are coalesced or dropped and even lifecycle notifications have a hard backlog cap.
 	OnStateChange      func(state State)
 	OnChannelsUpdate   func(channels []pb.ChannelInfo)
 	OnError            func(err error)
@@ -124,15 +249,11 @@ type Engine struct {
 
 // NewEngine creates a new client engine.
 func NewEngine() *Engine {
-	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
 		state:              StateDisconnected,
 		decoders:           make(map[uint32]audio.AudioDecoder),
 		jitterBufs:         make(map[uint32]*JitterBuffer),
 		voiceDebugSpeakers: make(map[uint32]struct{}),
-		keepaliveNow:       make(chan struct{}, 1),
-		ctx:                ctx,
-		cancel:             cancel,
 		vad:                audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
 		decoderFactory:     &defaultDecoderFactory{},
 		encodeScreenFn:     screenshare.EncodeJPEG,
@@ -155,77 +276,233 @@ func (f *defaultDecoderFactory) NewDecoder() (audio.AudioDecoder, error) {
 
 // Connect authenticates to the server and starts audio/voice pipelines.
 func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin string) error {
+	e.lifecycleMu.Lock()
+
 	e.mu.Lock()
 	if e.state != StateDisconnected {
 		e.mu.Unlock()
+		e.lifecycleMu.Unlock()
 		return fmt.Errorf("already connected")
 	}
-	e.state = StateConnecting
 	e.mu.Unlock()
 
-	e.notifyStateChange(StateConnecting)
+	g := newConnectionGeneration()
+	if !e.publishConnectingGeneration(g) {
+		e.lifecycleMu.Unlock()
+		return fmt.Errorf("connection canceled")
+	}
 
-	// Connect control plane
-	ctrl, err := NewControlClient(controlAddr, serverPin)
-	if err != nil {
-		e.setState(StateDisconnected)
+	fail := func(err error) error {
+		g.closeResources()
+		g.wg.Wait()
+		e.mu.Lock()
+		if e.generation == g {
+			e.generation = nil
+			e.disconnecting = g
+			e.state = StateDisconnected
+		}
+		e.mu.Unlock()
+		e.notifyStateChange(StateDisconnected)
+		e.finishGeneration(g)
+		e.lifecycleMu.Unlock()
 		return err
 	}
 
-	// Authenticate
+	ctrl, err := NewControlClientContext(g.ctx, controlAddr, serverPin)
+	if err != nil {
+		return fail(err)
+	}
+	ctrlInstalled := false
+	g.mu.Lock()
+	if g.ctx.Err() == nil {
+		g.control = ctrl
+		ctrlInstalled = true
+	}
+	g.mu.Unlock()
+	if !ctrlInstalled {
+		_ = ctrl.Close()
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+
 	authResp, err := ctrl.Authenticate(token, username)
 	if err != nil {
-		_ = ctrl.Close()
-		e.setState(StateDisconnected)
-		return err
+		return fail(err)
+	}
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
 	}
 
-	slog.Info("authenticated",
-		"session", authResp.SessionID,
-		"user", authResp.Username,
-		"role", authResp.Role,
-	)
+	slog.Info("authenticated", "session", authResp.SessionID, "user", authResp.Username, "role", authResp.Role)
 
-	// Set up voice connection
 	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey, authResp.VoiceRegistrationKey)
 	if err != nil {
-		_ = ctrl.Close()
-		e.setState(StateDisconnected)
-		return err
+		return fail(err)
+	}
+	voiceInstalled := false
+	g.mu.Lock()
+	if g.ctx.Err() == nil {
+		g.voice = voice
+		voiceInstalled = true
+	}
+	g.mu.Unlock()
+	if !voiceInstalled {
+		_ = voice.Close()
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
 	}
 
 	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.EncryptionKey)
 	if err != nil {
-		_ = ctrl.Close()
-		_ = voice.Close()
-		e.setState(StateDisconnected)
-		return err
+		return fail(err)
+	}
+	g.mu.Lock()
+	if g.ctx.Err() == nil {
+		g.cipher = cipher
+	}
+	g.mu.Unlock()
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
 	}
 
-	var screen *ScreenClient
 	if authResp.ScreenShareEnabled {
-		screenAddr, err := resolveAdvertisedAddr(controlAddr, authResp.ScreenAddr, "9603")
-		if err != nil {
-			_ = ctrl.Close()
-			_ = voice.Close()
-			e.setState(StateDisconnected)
-			return fmt.Errorf("resolve screen address: %w", err)
-		} else {
-			screen, err = NewScreenClient(screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverIdentity)
-			if err != nil {
-				_ = ctrl.Close()
-				_ = voice.Close()
-				e.setState(StateDisconnected)
-				return fmt.Errorf("connect screen plane: %w", err)
-			}
+		screenAddr, resolveErr := resolveAdvertisedAddr(controlAddr, authResp.ScreenAddr, "9603")
+		if resolveErr != nil {
+			return fail(fmt.Errorf("resolve screen address: %w", resolveErr))
+		}
+		screen, screenErr := NewScreenClientContext(g.ctx, screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverIdentity)
+		if screenErr != nil {
+			return fail(fmt.Errorf("connect screen plane: %w", screenErr))
+		}
+		screenInstalled := false
+		g.mu.Lock()
+		if g.ctx.Err() == nil {
+			g.screen = screen
+			screenInstalled = true
+		}
+		g.mu.Unlock()
+		if !screenInstalled {
+			_ = screen.Close()
+			return fail(fmt.Errorf("connection canceled"))
+		}
+		if g.ctx.Err() != nil {
+			return fail(fmt.Errorf("connection canceled"))
+		}
+	}
+	if !e.publishConnectedGeneration(g, authResp) {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+
+	ctrl.SetEventHandler(func(msg *pb.ControlMessage) { e.handleEventGeneration(g, msg) })
+	if !g.startTrackedReceiver(ctrl.StartReceiving, func() {
+		<-ctrl.Done()
+		e.requestDisconnect(g, "connection lost")
+	}) {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	if !g.startTrackedReceiver(voice.StartReceiving, func() { <-voice.done }) {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	g.mu.Lock()
+	screen := g.screen
+	g.mu.Unlock()
+	if screen != nil {
+		screen.SetPacketHandler(func(pkt *protocol.ScreenPacket) { e.handleScreenPacketGeneration(g, pkt) })
+		if !g.startTrackedReceiver(screen.StartReceiving, func() {
+			<-screen.Done()
+			e.handleScreenDisconnectGeneration(g)
+		}) {
+			return fail(fmt.Errorf("connection canceled"))
 		}
 	}
 
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		e.voiceDebugEnabled = true
+		e.startVoiceDebugLogging(g)
+	}
+	g.run(func(context.Context) { e.keepaliveLoop(g) })
+	e.startAudio(g)
+
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	if !current || g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	if callback := e.OnChannelsUpdate; callback != nil {
+		e.invokeGenerationCallback(g, func() { callback(authResp.Channels) })
+	}
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+
+	if autoJoin, ok := selectAutoJoinChannel(authResp.Channels, authResp.ChannelScope); ok {
+		if err := e.JoinChannel(autoJoin.ID); err != nil {
+			slog.Warn("auto-join channel failed", "channel", autoJoin.Name, "err", err)
+		}
+	}
+	if g.ctx.Err() != nil {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+	if callback := e.OnAutoToken; authResp.AutoToken != "" && callback != nil {
+		e.invokeGenerationCallback(g, func() { callback(authResp.AutoToken) })
+	}
+
+	g.mu.Lock()
+	e.mu.RLock()
+	current = g.ctx.Err() == nil && e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	g.mu.Unlock()
+	if !current {
+		return fail(fmt.Errorf("connection canceled"))
+	}
+
+	e.lifecycleMu.Unlock()
+	return nil
+}
+
+func (e *Engine) publishConnectingGeneration(g *connectionGeneration) bool {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ctx.Err() != nil {
+		return false
+	}
+
 	e.mu.Lock()
-	e.control = ctrl
-	e.voice = voice
-	e.screen = screen
-	e.cipher = cipher
+	if e.state != StateDisconnected {
+		e.mu.Unlock()
+		return false
+	}
+	e.generation = g
+	e.state = StateConnecting
+	e.mu.Unlock()
+
+	if callback := e.OnStateChange; callback != nil {
+		e.invokeCallback(func() { callback(StateConnecting) })
+	}
+	return true
+}
+
+func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *pb.AuthResponse) bool {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ctx.Err() != nil {
+		return false
+	}
+
+	e.mu.Lock()
+	if e.generation != g || e.state != StateConnecting {
+		e.mu.Unlock()
+		return false
+	}
 	e.sessionID = authResp.SessionID
 	e.username = authResp.Username
 	e.role = authResp.Role
@@ -234,67 +511,10 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 	e.state = StateConnected
 	e.mu.Unlock()
 
-	// Set up event handling
-	ctrl.SetEventHandler(e.handleEvent)
-	ctrl.StartReceiving()
-	voice.StartReceiving()
-	if screen != nil {
-		screen.SetPacketHandler(e.handleScreenPacket)
-		screen.StartReceiving()
-		go func() {
-			<-screen.Done()
-			e.handleScreenDisconnect()
-		}()
+	if callback := e.OnStateChange; callback != nil {
+		e.invokeCallback(func() { callback(StateConnected) })
 	}
-
-	// Report connected immediately — audio init happens in background
-	e.notifyStateChange(StateConnected)
-	if e.OnChannelsUpdate != nil {
-		e.OnChannelsUpdate(authResp.Channels)
-	}
-
-	// Auto-join the invite scope, or the first channel for server-wide users.
-	if autoJoin, ok := selectAutoJoinChannel(authResp.Channels, authResp.ChannelScope); ok {
-		if err := e.JoinChannel(autoJoin.ID); err != nil {
-			slog.Warn("auto-join channel failed", "channel", autoJoin.Name, "err", err)
-		}
-	}
-
-	// Notify if server auto-generated a token for this user
-	if authResp.AutoToken != "" && e.OnAutoToken != nil {
-		e.OnAutoToken(authResp.AutoToken)
-	}
-
-	// Start periodic voice debug logging (only when log level is debug)
-	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-		e.voiceDebugEnabled = true
-		e.startVoiceDebugLogging()
-	}
-	go e.keepaliveLoop()
-
-	// Initialize audio devices asynchronously (PortAudio init is slow on Windows)
-	go func() {
-		if err := e.initAudioFn(); err != nil {
-			slog.Error("audio init failed (continuing without audio)", "err", err)
-		}
-		// Audio (and thus the encoder) is now ready; announce our UDP address
-		// immediately for the channel we auto-joined during Connect.
-		select {
-		case e.keepaliveNow <- struct{}{}:
-		default:
-		}
-		// Start audio pipelines
-		go e.captureLoop()
-		go e.playbackLoop()
-	}()
-
-	// Monitor for disconnect
-	go func() {
-		<-ctrl.Done()
-		e.handleDisconnect("connection lost")
-	}()
-
-	return nil
+	return true
 }
 
 func selectAutoJoinChannel(channels []pb.ChannelInfo, channelScope int64) (pb.ChannelInfo, bool) {
@@ -312,67 +532,107 @@ func selectAutoJoinChannel(channels []pb.ChannelInfo, channelScope int64) (pb.Ch
 	return pb.ChannelInfo{}, false
 }
 
+func (e *Engine) connectionClients() (*connectionGeneration, *ControlClient, *VoiceClient, *ScreenClient) {
+	e.mu.RLock()
+	g := e.generation
+	e.mu.RUnlock()
+	if g == nil {
+		return nil, nil, nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g, g.control, g.voice, g.screen
+}
+
 // initAudioDefault initializes PortAudio devices and Opus codec (the default backend).
-func (e *Engine) initAudioDefault() error {
+func (e *Engine) initAudioDefault() (*audioResources, error) {
 	capture, err := audio.NewCaptureDevice(48000, 960)
 	if err != nil {
-		return fmt.Errorf("capture device: %w", err)
+		return nil, fmt.Errorf("capture device: %w", err)
 	}
 	if err := capture.Start(); err != nil {
-		return fmt.Errorf("start capture: %w", err)
+		_ = capture.Close()
+		return nil, fmt.Errorf("start capture: %w", err)
 	}
 
 	playback, err := audio.NewPlaybackDevice(48000, 960)
 	if err != nil {
 		_ = capture.Close()
-		return fmt.Errorf("playback device: %w", err)
+		return nil, fmt.Errorf("playback device: %w", err)
 	}
 	if err := playback.Start(); err != nil {
 		_ = capture.Close()
-		return fmt.Errorf("start playback: %w", err)
+		return nil, fmt.Errorf("start playback: %w", err)
 	}
 
 	encoder, err := audio.NewEncoder()
 	if err != nil {
 		_ = playback.Stop()
 		_ = capture.Close()
-		return fmt.Errorf("encoder: %w", err)
+		return nil, fmt.Errorf("encoder: %w", err)
 	}
+	return &audioResources{capture: capture, playback: playback, encoder: encoder}, nil
+}
 
-	e.mu.Lock()
-	e.capture = capture
-	e.playback = playback
-	e.encoder = encoder
-	e.lastSendTime = time.Now()
-	e.silenceBuf = make([]int16, 960)
-	e.mu.Unlock()
+func (e *Engine) startAudio(g *connectionGeneration) {
+	g.run(func(context.Context) {
+		resources, err := e.initAudioFn()
+		if err != nil {
+			slog.Error("audio init failed (continuing without audio)", "err", err)
+			resources.close()
+			return
+		}
 
-	return nil
+		g.mu.Lock()
+		e.mu.RLock()
+		live := e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
+		e.mu.RUnlock()
+		if live {
+			g.audio = resources
+		}
+		g.mu.Unlock()
+		if !live {
+			resources.close()
+			return
+		}
+
+		e.mu.Lock()
+		e.lastSendTime = time.Now()
+		e.silenceBuf = make([]int16, 960)
+		e.mu.Unlock()
+		select {
+		case g.keepaliveNow <- struct{}{}:
+		default:
+		}
+		g.run(func(context.Context) { e.captureLoop(g) })
+		g.run(func(context.Context) { e.playbackLoop(g) })
+	})
 }
 
 // captureLoop reads audio from the mic, runs VAD, encodes, and sends.
-func (e *Engine) captureLoop() {
+func (e *Engine) captureLoop(g *connectionGeneration) {
 	var timestamp uint32
 
 	for {
 		select {
-		case <-e.ctx.Done():
+		case <-g.ctx.Done():
 			return
 		default:
 		}
 
+		g.mu.Lock()
+		resources := g.audio
+		voice := g.voice
+		g.mu.Unlock()
 		e.mu.RLock()
-		capture := e.capture
-		encoder := e.encoder
-		voice := e.voice
 		muted := e.muted
 		channelID := e.channelID
 		e.mu.RUnlock()
-		if capture == nil || encoder == nil || voice == nil {
+		if resources == nil || resources.capture == nil || resources.encoder == nil || voice == nil {
 			return
 		}
 
-		pcm, err := capture.ReadFrame()
+		pcm, err := resources.capture.ReadFrame()
 		if err != nil {
 			slog.Debug("capture read error", "err", err)
 			return
@@ -380,14 +640,14 @@ func (e *Engine) captureLoop() {
 
 		// Compute RMS for VU meter
 		rms := audio.GetRMS(pcm)
-		if e.OnRMSLevel != nil {
-			e.OnRMSLevel(rms)
+		if callback := e.OnRMSLevel; callback != nil {
+			e.invokeLatestGenerationCallback(g, callbackRMS, func() { callback(rms) })
 		}
 
 		// VAD
 		active := e.vad.Process(pcm)
-		if e.OnVoiceActivity != nil {
-			e.OnVoiceActivity(active)
+		if callback := e.OnVoiceActivity; callback != nil {
+			e.invokeLatestGenerationCallback(g, callbackVoiceActivity, func() { callback(active) })
 		}
 
 		// Skip sending when VAD is idle, muted, or not in a channel
@@ -396,7 +656,7 @@ func (e *Engine) captureLoop() {
 			continue
 		}
 
-		opusData, err := encoder.Encode(pcm)
+		opusData, err := resources.encoder.Encode(pcm)
 		if err != nil {
 			slog.Debug("encode error", "err", err)
 			timestamp += 960
@@ -419,21 +679,23 @@ func (e *Engine) captureLoop() {
 }
 
 // playbackLoop receives voice packets, decodes, and plays them.
-func (e *Engine) playbackLoop() {
+func (e *Engine) playbackLoop(g *connectionGeneration) {
 	for {
 		select {
-		case <-e.ctx.Done():
+		case <-g.ctx.Done():
 			return
 		default:
 		}
 
+		g.mu.Lock()
+		voice := g.voice
+		resources := g.audio
+		g.mu.Unlock()
 		e.mu.RLock()
-		voice := e.voice
-		playback := e.playback
 		deafened := e.deafened
 		e.mu.RUnlock()
 
-		if voice == nil || playback == nil {
+		if voice == nil || resources == nil || resources.playback == nil {
 			return
 		}
 
@@ -442,15 +704,22 @@ func (e *Engine) playbackLoop() {
 			if deafened {
 				continue
 			}
-			e.processIncomingVoice(pkt, playback)
-		case <-e.ctx.Done():
+			e.processIncomingVoice(g, pkt, resources.playback)
+		case <-g.ctx.Done():
 			return
 		}
 	}
 }
 
 // processIncomingVoice decrypts and plays a received voice packet.
-func (e *Engine) processIncomingVoice(pkt *protocol.VoicePacket, playback audio.Player) {
+func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.VoicePacket, playback audio.Player) {
+	g.mu.Lock()
+	cipher := g.cipher
+	g.mu.Unlock()
+	if cipher == nil {
+		return
+	}
+
 	// Get or create decoder for this speaker
 	e.decoderMu.Lock()
 	dec, ok := e.decoders[pkt.SessionID]
@@ -470,7 +739,7 @@ func (e *Engine) processIncomingVoice(pkt *protocol.VoicePacket, playback audio.
 
 	// Decrypt the voice data
 	header := pkt.MarshalHeader()
-	opusData, err := e.cipher.Decrypt(pkt.SessionID, pkt.SeqNum, header, pkt.Payload)
+	opusData, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, header, pkt.Payload)
 	if err != nil {
 		slog.Debug("voice decrypt failed", "session", pkt.SessionID, "err", err)
 		return
@@ -567,26 +836,26 @@ func (e *Engine) logVoiceDebug() {
 }
 
 // startVoiceDebugLogging starts a periodic goroutine that logs voice debug stats.
-func (e *Engine) startVoiceDebugLogging() {
-	go func() {
+func (e *Engine) startVoiceDebugLogging(g *connectionGeneration) {
+	g.run(func(context.Context) {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-e.ctx.Done():
+			case <-g.ctx.Done():
 				return
 			case <-ticker.C:
 				e.logVoiceDebug()
 			}
 		}
-	}()
+	})
 }
 
 // keepaliveLoop sends silence packets every keepAliveInterval to keep the
 // server aware of our UDP address. It is independent of VAD state so that
 // the connection is maintained during silence. It also sends immediately
 // when signalled via keepaliveNow (e.g. right after joining a channel).
-func (e *Engine) keepaliveLoop() {
+func (e *Engine) keepaliveLoop(g *connectionGeneration) {
 	var timestamp uint32
 
 	ticker := time.NewTicker(keepAliveInterval)
@@ -594,23 +863,22 @@ func (e *Engine) keepaliveLoop() {
 
 	for {
 		select {
-		case <-e.ctx.Done():
+		case <-g.ctx.Done():
 			return
-		case <-e.keepaliveNow:
-			e.tryRegisterVoiceEndpoint()
-			// Immediate keepalive (e.g. just joined a channel); ignore recency.
-			e.trySendKeepalive(&timestamp, false)
+		case <-g.keepaliveNow:
+			e.tryRegisterVoiceEndpoint(g)
+			e.trySendKeepalive(g, &timestamp, false)
 		case <-ticker.C:
-			e.tryRegisterVoiceEndpoint()
-			e.trySendKeepalive(&timestamp, true)
+			e.tryRegisterVoiceEndpoint(g)
+			e.trySendKeepalive(g, &timestamp, true)
 		}
 	}
 }
 
-func (e *Engine) tryRegisterVoiceEndpoint() {
-	e.mu.RLock()
-	voice := e.voice
-	e.mu.RUnlock()
+func (e *Engine) tryRegisterVoiceEndpoint(g *connectionGeneration) {
+	g.mu.Lock()
+	voice := g.voice
+	g.mu.Unlock()
 	if voice != nil {
 		if err := voice.SendRegistration(); err != nil {
 			slog.Debug("voice endpoint registration error", "err", err)
@@ -621,25 +889,26 @@ func (e *Engine) tryRegisterVoiceEndpoint() {
 // trySendKeepalive sends a single silence keepalive packet if the voice
 // pipeline is ready and we are in a channel. When respectRecency is true it
 // skips sending if a packet was already sent within keepAliveInterval.
-func (e *Engine) trySendKeepalive(timestamp *uint32, respectRecency bool) {
+func (e *Engine) trySendKeepalive(g *connectionGeneration, timestamp *uint32, respectRecency bool) {
+	g.mu.Lock()
+	voice := g.voice
+	resources := g.audio
+	g.mu.Unlock()
 	e.mu.RLock()
-	voice := e.voice
-	encoder := e.encoder
 	channelID := e.channelID
 	lastSend := e.lastSendTime
 	silenceBuf := e.silenceBuf
 	e.mu.RUnlock()
 
-	if voice == nil || encoder == nil || channelID == 0 || silenceBuf == nil {
+	if voice == nil || resources == nil || resources.encoder == nil || channelID == 0 || silenceBuf == nil {
 		return
 	}
 
-	// Skip if a real voice or keepalive packet was sent recently.
 	if respectRecency && time.Since(lastSend) < keepAliveInterval {
 		return
 	}
 
-	silenceData, err := encoder.Encode(silenceBuf)
+	silenceData, err := resources.encoder.Encode(silenceBuf)
 	if err != nil {
 		slog.Debug("keepalive encode error", "err", err)
 		return
@@ -663,15 +932,26 @@ func (e *Engine) trySendKeepalive(timestamp *uint32, respectRecency bool) {
 }
 
 // handleEvent dispatches incoming server events.
-func (e *Engine) handleEvent(msg *pb.ControlMessage) {
+func (e *Engine) handleEventGeneration(g *connectionGeneration, msg *pb.ControlMessage) {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	if current {
+		e.handleEvent(g, msg)
+	}
+}
+
+func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 	switch {
 	case msg.ServerStateEvent != nil:
 		e.mu.Lock()
 		e.channels = msg.ServerStateEvent.Channels
 		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled
 		e.mu.Unlock()
-		if e.OnChannelsUpdate != nil {
-			e.OnChannelsUpdate(msg.ServerStateEvent.Channels)
+		if callback := e.OnChannelsUpdate; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.ServerStateEvent.Channels) })
 		}
 
 	case msg.ChannelJoinedEvent != nil:
@@ -702,10 +982,10 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 		}
 		if msg.ErrorResponse.Code == 99 {
 			// Kicked or banned
-			e.handleDisconnect(msg.ErrorResponse.Message)
+			e.requestDisconnect(g, msg.ErrorResponse.Message)
 		}
-		if e.OnError != nil {
-			e.OnError(fmt.Errorf("server: %s", msg.ErrorResponse.Message))
+		if callback := e.OnError; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(fmt.Errorf("server: %s", msg.ErrorResponse.Message)) })
 		}
 
 	case msg.Pong != nil:
@@ -713,45 +993,55 @@ func (e *Engine) handleEvent(msg *pb.ControlMessage) {
 
 	case msg.CreateTokenResp != nil:
 		slog.Debug("token created", "token", msg.CreateTokenResp.Token)
-		if e.OnTokenCreated != nil {
-			e.OnTokenCreated(msg.CreateTokenResp.Token)
+		if callback := e.OnTokenCreated; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.CreateTokenResp.Token) })
 		}
 
 	case msg.ChatEvent != nil:
-		if e.OnChatMessage != nil {
-			e.OnChatMessage(msg.ChatEvent.ChannelID, msg.ChatEvent.SenderName, msg.ChatEvent.Text, msg.ChatEvent.Timestamp)
+		if callback := e.OnChatMessage; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() {
+				callback(msg.ChatEvent.ChannelID, msg.ChatEvent.SenderName, msg.ChatEvent.Text, msg.ChatEvent.Timestamp)
+			})
 		}
 
 	case msg.ScreenShareEvent != nil:
-		e.handleScreenShareEvent(msg.ScreenShareEvent)
+		e.handleScreenShareEvent(g, msg.ScreenShareEvent)
 
 	case msg.SetUserRoleResp != nil:
-		if e.OnRoleChanged != nil {
-			e.OnRoleChanged(msg.SetUserRoleResp.Success, msg.SetUserRoleResp.Message)
+		if callback := e.OnRoleChanged; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.SetUserRoleResp.Success, msg.SetUserRoleResp.Message) })
 		}
 
 	case msg.ExportDataResp != nil:
-		if e.OnExportData != nil {
-			e.OnExportData(msg.ExportDataResp.Type, msg.ExportDataResp.Data)
+		if callback := e.OnExportData; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.ExportDataResp.Type, msg.ExportDataResp.Data) })
 		}
 
 	case msg.ImportChannelsResp != nil:
-		if e.OnImportResult != nil {
-			e.OnImportResult(msg.ImportChannelsResp.Success, msg.ImportChannelsResp.Message)
+		if callback := e.OnImportResult; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() {
+				callback(msg.ImportChannelsResp.Success, msg.ImportChannelsResp.Message)
+			})
 		}
 	}
 }
 
+func (e *Engine) beginControlOperation() (*connectionGeneration, *ControlClient, bool) {
+	g, ctrl, _, _ := e.connectionClients()
+	if g == nil || ctrl == nil || !g.begin() {
+		return nil, nil, false
+	}
+	return g, ctrl, true
+}
+
 // JoinChannel sends a request to join a channel.
 func (e *Engine) JoinChannel(channelID int64) error {
-	e.mu.RLock()
-	ctrl := e.control
-	voice := e.voice
-	e.mu.RUnlock()
+	g, ctrl, voice, _ := e.connectionClients()
 
-	if ctrl == nil {
+	if ctrl == nil || g == nil || !g.begin() {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	if err := ctrl.Send(&pb.ControlMessage{
 		JoinChannelRequest: &pb.JoinChannelRequest{ChannelID: channelID},
@@ -760,9 +1050,13 @@ func (e *Engine) JoinChannel(channelID int64) error {
 	}
 
 	e.mu.Lock()
+	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("not connected")
+	}
 	e.channelID = channelID
 	e.mu.Unlock()
-	e.clearScreenShareState()
+	e.clearScreenShareStateGeneration(g)
 
 	if voice != nil {
 		voice.SetChannel(channelID)
@@ -771,7 +1065,7 @@ func (e *Engine) JoinChannel(channelID int64) error {
 	// Ask the keepalive loop to announce our UDP address immediately so the
 	// server can route voice without waiting for the next tick.
 	select {
-	case e.keepaliveNow <- struct{}{}:
+	case g.keepaliveNow <- struct{}{}:
 	default:
 	}
 
@@ -780,13 +1074,12 @@ func (e *Engine) JoinChannel(channelID int64) error {
 
 // LeaveChannel sends a request to leave the current channel.
 func (e *Engine) LeaveChannel() error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
+	g, ctrl, _, _ := e.connectionClients()
 
-	if ctrl == nil {
+	if ctrl == nil || g == nil || !g.begin() {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	if err := ctrl.Send(&pb.ControlMessage{
 		LeaveChannelRequest: &pb.LeaveChannelRequest{},
@@ -795,46 +1088,77 @@ func (e *Engine) LeaveChannel() error {
 	}
 
 	e.mu.Lock()
+	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("not connected")
+	}
 	e.channelID = 0
 	e.mu.Unlock()
-	e.clearScreenShareState()
+	e.clearScreenShareStateGeneration(g)
 
 	return nil
 }
 
 // SetMuted toggles mute state.
 func (e *Engine) SetMuted(muted bool) {
-	e.mu.Lock()
-	e.muted = muted
-	deafened := e.deafened
-	ctrl := e.control
-	e.mu.Unlock()
-
-	if ctrl != nil {
-		_ = ctrl.Send(&pb.ControlMessage{
-			UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
-		})
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return
 	}
+	defer g.wg.Done()
+
+	deafened, current := e.updateMutedGeneration(g, muted)
+	if !current {
+		return
+	}
+	_ = ctrl.Send(&pb.ControlMessage{
+		UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
+	})
+}
+
+func (e *Engine) updateMutedGeneration(g *connectionGeneration, muted bool) (bool, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if g.ctx.Err() != nil || e.generation != g || e.state != StateConnected {
+		return e.deafened, false
+	}
+	e.muted = muted
+	return e.deafened, true
 }
 
 // SetDeafened toggles deafen state.
 func (e *Engine) SetDeafened(deafened bool) {
-	e.mu.Lock()
-	wasDeafened := e.deafened
-	e.deafened = deafened
-	muted := e.muted
-	ctrl := e.control
-	e.mu.Unlock()
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return
+	}
+	defer g.wg.Done()
 
-	if wasDeafened && !deafened {
+	muted, reset, current := e.updateDeafenedGeneration(g, deafened)
+	if !current {
+		return
+	}
+	if reset {
 		e.resetReceiveState()
 	}
+	_ = ctrl.Send(&pb.ControlMessage{
+		UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
+	})
+}
 
-	if ctrl != nil {
-		_ = ctrl.Send(&pb.ControlMessage{
-			UserStateUpdate: &pb.UserStateUpdate{Muted: muted, Deafened: deafened},
-		})
+func (e *Engine) updateDeafenedGeneration(g *connectionGeneration, deafened bool) (bool, bool, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if g.ctx.Err() != nil || e.generation != g || e.state != StateConnected {
+		return e.muted, false, false
 	}
+	reset := e.deafened && !deafened
+	e.deafened = deafened
+	return e.muted, reset, true
 }
 
 // SetVADThreshold updates the VAD sensitivity.
@@ -849,13 +1173,11 @@ func (e *Engine) CreateChannel(name, description string, maxUsers int) error {
 
 // CreateChannelAdvanced sends a create channel request with all options.
 func (e *Engine) CreateChannelAdvanced(name, description string, maxUsers int, parentID int64, isTemp bool, allowSubChannels bool) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		CreateChannelReq: &pb.CreateChannelRequest{
@@ -871,13 +1193,11 @@ func (e *Engine) CreateChannelAdvanced(name, description string, maxUsers int, p
 
 // CreateSubChannel creates a temporary sub-channel under a parent.
 func (e *Engine) CreateSubChannel(parentID int64, name string) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		CreateChannelReq: &pb.CreateChannelRequest{
@@ -890,13 +1210,11 @@ func (e *Engine) CreateSubChannel(parentID int64, name string) error {
 
 // DeleteChannel sends a delete channel request (admin only).
 func (e *Engine) DeleteChannel(channelID int64) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		DeleteChannelReq: &pb.DeleteChannelRequest{ChannelID: channelID},
@@ -905,13 +1223,11 @@ func (e *Engine) DeleteChannel(channelID int64) error {
 
 // ExportData requests the server to export data ("channels" or "users") as YAML.
 func (e *Engine) ExportData(dataType string) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		ExportDataReq: &pb.ExportDataRequest{Type: dataType},
@@ -920,13 +1236,11 @@ func (e *Engine) ExportData(dataType string) error {
 
 // ImportChannels sends a YAML blob for the server to import as channels.
 func (e *Engine) ImportChannels(yamlData string) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		ImportChannelsReq: &pb.ImportChannelsRequest{YAML: yamlData},
@@ -935,13 +1249,11 @@ func (e *Engine) ImportChannels(yamlData string) error {
 
 // CreateToken sends a create token request (admin only).
 func (e *Engine) CreateToken(role string, maxUses int, expiresInSeconds int64) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		CreateTokenReq: &pb.CreateTokenRequest{
@@ -954,12 +1266,19 @@ func (e *Engine) CreateToken(role string, maxUses int, expiresInSeconds int64) e
 
 // SendChat sends a text message to the current channel.
 func (e *Engine) SendChat(text string) error {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
+
+	g.mu.Lock()
 	e.mu.RLock()
-	ctrl := e.control
+	current := g.ctx.Err() == nil && e.generation == g && e.state == StateConnected
 	channelID := e.channelID
 	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g.mu.Unlock()
+	if !current {
 		return fmt.Errorf("not connected")
 	}
 	if channelID == 0 {
@@ -976,12 +1295,18 @@ func (e *Engine) SendChat(text string) error {
 
 // StartScreenShare announces a screen share and begins streaming once the server confirms it.
 func (e *Engine) StartScreenShare(displayIndex int) error {
+	g, ctrl, _, _ := e.connectionClients()
+	if g == nil || !g.begin() {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
 	e.mu.RLock()
-	ctrl := e.control
 	channelID := e.channelID
 	mySessionID := e.sessionID
-	active := e.activeScreenShare
 	e.mu.RUnlock()
+	e.screenMu.Lock()
+	active := e.activeScreenShare
+	e.screenMu.Unlock()
 
 	if ctrl == nil {
 		return fmt.Errorf("not connected")
@@ -1006,18 +1331,35 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 	}
 	e.screenMu.Unlock()
 
-	_, width, height, err := e.prepareScreenShareFrame(displayIndex)
+	_, width, height, err := e.prepareScreenShareFrame(g.ctx, displayIndex)
 	if err != nil {
 		return fmt.Errorf("prepare screen share: %w", err)
 	}
 
+	e.callbackMu.Lock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected && e.channelID == channelID
+	e.mu.RUnlock()
+	g.mu.Lock()
+	activeGeneration := g.ctx.Err() == nil && g.control == ctrl
+	g.mu.Unlock()
+	if !current || !activeGeneration {
+		e.callbackMu.Unlock()
+		return fmt.Errorf("not connected")
+	}
 	e.screenMu.Lock()
+	if e.screenShareRunning || e.screenSharePending {
+		e.screenMu.Unlock()
+		e.callbackMu.Unlock()
+		return fmt.Errorf("screen share already active")
+	}
 	e.screenSharePending = true
 	e.screenShareDisplay = displayIndex
 	e.screenShareAttempt++
 	attempt := e.screenShareAttempt
 	startWait := e.screenStartWait
 	e.screenMu.Unlock()
+	e.callbackMu.Unlock()
 
 	if err := ctrl.Send(&pb.ControlMessage{
 		ScreenShareStartReq: &pb.ScreenShareStartRequest{
@@ -1027,69 +1369,85 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 		},
 	}); err != nil {
 		e.screenMu.Lock()
-		e.screenSharePending = false
+		if e.screenShareAttempt == attempt {
+			e.screenSharePending = false
+		}
 		e.screenMu.Unlock()
 		return err
 	}
-	go e.watchScreenShareStart(attempt, startWait)
+	if !g.run(func(context.Context) { e.watchScreenShareStart(g, attempt, startWait) }) {
+		e.screenMu.Lock()
+		if e.screenShareAttempt == attempt {
+			e.screenSharePending = false
+		}
+		e.screenMu.Unlock()
+		return fmt.Errorf("not connected")
+	}
 
 	return nil
 }
 
 func (e *Engine) StopScreenShare() error {
+	g, ctrl, _, _ := e.connectionClients()
+	if g == nil || ctrl == nil || !g.begin() {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
+
+	e.callbackMu.Lock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	g.mu.Lock()
+	activeGeneration := g.ctx.Err() == nil && g.control == ctrl
+	g.mu.Unlock()
+	if !current || !activeGeneration {
+		e.callbackMu.Unlock()
+		return fmt.Errorf("not connected")
+	}
 	e.stopScreenShareLoop()
 	e.screenMu.Lock()
 	e.screenSharePending = false
 	e.screenMu.Unlock()
+	e.callbackMu.Unlock()
 
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-	if ctrl == nil {
-		return fmt.Errorf("not connected")
-	}
 	return ctrl.Send(&pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}})
 }
 
 func (e *Engine) SubscribeScreenShare(channelID int64) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 	return ctrl.Send(&pb.ControlMessage{ScreenShareSubReq: &pb.ScreenShareSubscribeRequest{ChannelID: channelID}})
 }
 
 func (e *Engine) ShareScreenShareWithChannel() error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 	return ctrl.Send(&pb.ControlMessage{ScreenShareShareReq: &pb.ScreenShareShareRequest{}})
 }
 
 func (e *Engine) UnsubscribeScreenShare() error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 	return ctrl.Send(&pb.ControlMessage{ScreenShareUnsubReq: &pb.ScreenShareUnsubscribeRequest{}})
 }
 
 // SetUserRole sends a role change request (admin only).
 func (e *Engine) SetUserRole(targetUserID int64, newRole string) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		SetUserRoleReq: &pb.SetUserRoleRequest{
@@ -1101,13 +1459,11 @@ func (e *Engine) SetUserRole(targetUserID int64, newRole string) error {
 
 // KickUser sends a kick request (admin/mod only).
 func (e *Engine) KickUser(userID int64, reason string) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		KickUserReq: &pb.KickUserRequest{UserID: userID, Reason: reason},
@@ -1116,13 +1472,11 @@ func (e *Engine) KickUser(userID int64, reason string) error {
 
 // BanUser sends a ban request (admin only).
 func (e *Engine) BanUser(userID int64, reason string, durationSeconds int64) error {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-
-	if ctrl == nil {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
+	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
 		BanUserReq: &pb.BanUserRequest{UserID: userID, Reason: reason, DurationSeconds: durationSeconds},
@@ -1131,7 +1485,16 @@ func (e *Engine) BanUser(userID int64, reason string, durationSeconds int64) err
 
 // Disconnect disconnects from the server.
 func (e *Engine) Disconnect() {
-	e.handleDisconnect("user disconnected")
+	e.mu.RLock()
+	g := e.generation
+	if g == nil {
+		g = e.disconnecting
+	}
+	e.mu.RUnlock()
+	if g != nil {
+		e.requestDisconnect(g, "user disconnected")
+		<-g.done
+	}
 }
 
 // GetState returns the current connection state.
@@ -1206,78 +1569,84 @@ func (e *Engine) resetReceiveState() {
 	e.decoderMu.Unlock()
 }
 
-func (e *Engine) handleDisconnect(reason string) {
+func (e *Engine) requestDisconnect(g *connectionGeneration, reason string) {
+	g.mu.Lock()
+	g.cancel()
+	g.mu.Unlock()
+	g.disconnectOnce.Do(func() {
+		go func() {
+			g.closeResources()
+			e.handleDisconnectGeneration(g, reason)
+			e.finishGeneration(g)
+		}()
+	})
+}
+
+func (e *Engine) finishGeneration(g *connectionGeneration) {
+	g.finish()
 	e.mu.Lock()
-	if e.state == StateDisconnected {
+	if e.disconnecting == g {
+		e.disconnecting = nil
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) handleDisconnectGeneration(g *connectionGeneration, reason string) {
+	e.lifecycleMu.Lock()
+	e.callbackMu.Lock()
+	e.mu.Lock()
+	if e.generation != g {
 		e.mu.Unlock()
+		e.callbackMu.Unlock()
+		e.lifecycleMu.Unlock()
 		return
 	}
-	e.state = StateDisconnected
+	e.generation = nil
+	e.disconnecting = g
 	e.channelID = 0
 	e.muted = false
 	e.deafened = false
-
-	ctrl := e.control
-	voice := e.voice
-	capture := e.capture
-	playback := e.playback
-	screen := e.screen
-
-	e.control = nil
-	e.voice = nil
-	e.screen = nil
-	e.capture = nil
-	e.playback = nil
-	e.activeScreenShare = nil
 	e.screenShareEnabled = false
 	e.mu.Unlock()
+	e.callbackMu.Unlock()
+
 	e.stopScreenShareLoop()
 	e.screenMu.Lock()
+	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
 
-	// Clean up resources
-	if playback != nil {
-		_ = playback.Stop()
-	}
-	if capture != nil {
-		_ = capture.Close()
-	}
-	if voice != nil {
-		_ = voice.Close()
-	}
-	if screen != nil {
-		_ = screen.Close()
-	}
-	if ctrl != nil {
-		_ = ctrl.Close()
-	}
-
-	e.cancel()
-	// Reset context for reconnection
-	e.ctx, e.cancel = context.WithCancel(context.Background())
-
+	g.closeResources()
+	g.wg.Wait()
 	e.resetReceiveState()
 
+	e.mu.Lock()
+	e.state = StateDisconnected
+	e.mu.Unlock()
 	slog.Info("disconnected", "reason", reason)
-	e.notifyStateChange(StateDisconnected)
-	if e.OnDisconnect != nil {
-		e.OnDisconnect(reason)
+	e.callbackMu.Lock()
+	if callback := e.OnStateChange; callback != nil {
+		e.invokeCallback(func() { callback(StateDisconnected) })
 	}
+	if callback := e.OnDisconnect; callback != nil {
+		e.invokeCallback(func() { callback(reason) })
+	}
+	e.callbackMu.Unlock()
+	e.finishGeneration(g)
+	e.lifecycleMu.Unlock()
 }
 
-func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
+func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.ScreenShareEvent) {
 	if event == nil {
-		e.clearScreenShareState()
+		e.clearScreenShareStateGenerationLocked(g)
 		return
 	}
 
-	e.mu.Lock()
-	e.activeScreenShare = event
+	e.mu.RLock()
 	mySessionID := e.sessionID
 	channelID := e.channelID
-	e.mu.Unlock()
+	e.mu.RUnlock()
 
 	if event.SessionID == mySessionID {
 		if event.Active {
@@ -1285,7 +1654,7 @@ func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
 			pending := e.screenSharePending
 			e.screenMu.Unlock()
 			if pending {
-				e.startScreenShareLoop()
+				e.startScreenShareLoop(g)
 			}
 		} else {
 			e.stopScreenShareLoop()
@@ -1296,8 +1665,10 @@ func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
 	}
 
 	e.screenMu.Lock()
+	previous := e.activeScreenShare
 	if !event.Active {
-		if e.activeScreenShare == nil || e.activeScreenShare.SessionID == event.SessionID {
+		if previous == nil || previous.SessionID == event.SessionID {
+			e.activeScreenShare = nil
 			e.screenCipher = nil
 			e.screenSeqNum = 0
 		}
@@ -1308,43 +1679,68 @@ func (e *Engine) handleScreenShareEvent(event *pb.ScreenShareEvent) {
 			slog.Error("screen cipher init failed", "err", err)
 			return
 		}
+		e.activeScreenShare = event
 		e.screenCipher = cipher
 		e.screenSeqNum = 0
-	} else if e.activeScreenShare == nil || e.activeScreenShare.SessionID != event.SessionID {
-		e.screenCipher = nil
-		e.screenSeqNum = 0
+	} else {
+		e.activeScreenShare = event
+		if previous == nil || previous.SessionID != event.SessionID {
+			e.screenCipher = nil
+			e.screenSeqNum = 0
+		}
 	}
 	e.screenMu.Unlock()
 
-	if !event.Active && e.OnScreenFrame != nil {
-		e.OnScreenFrame(nil)
+	if callback := e.OnScreenFrame; !event.Active && callback != nil {
+		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
 	}
 	if event.ChannelID != 0 && channelID != 0 && event.ChannelID != channelID {
 		return
 	}
-	if e.OnScreenShareEvent != nil {
-		e.OnScreenShareEvent(event)
+	if callback := e.OnScreenShareEvent; callback != nil {
+		e.enqueueGenerationCallbackLocked(g, func() { callback(event) })
 	}
 }
 
 func (e *Engine) clearScreenShareState() {
-	e.mu.Lock()
-	e.activeScreenShare = nil
-	e.mu.Unlock()
+	e.callbackMu.Lock()
+	e.clearScreenShareStateGenerationLocked(nil)
+	e.callbackMu.Unlock()
+}
+
+func (e *Engine) clearScreenShareStateGeneration(g *connectionGeneration) {
+	e.callbackMu.Lock()
+	e.clearScreenShareStateGenerationLocked(g)
+	e.callbackMu.Unlock()
+}
+
+func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) {
 	e.stopScreenShareLoop()
 	e.screenMu.Lock()
+	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
-	if e.OnScreenFrame != nil {
-		e.OnScreenFrame(nil)
+	if callback := e.OnScreenFrame; callback != nil {
+		e.enqueueOptionalGenerationCallbackLocked(g, func() { callback(nil) })
 	}
-	if e.OnScreenShareEvent != nil {
-		e.OnScreenShareEvent(nil)
+	if callback := e.OnScreenShareEvent; callback != nil {
+		e.enqueueOptionalGenerationCallbackLocked(g, func() { callback(nil) })
 	}
 }
 
-func (e *Engine) handleScreenPacket(pkt *protocol.ScreenPacket) {
+func (e *Engine) handleScreenPacketGeneration(g *connectionGeneration, pkt *protocol.ScreenPacket) {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	if current {
+		e.handleScreenPacket(g, pkt)
+	}
+}
+
+func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.ScreenPacket) {
 	e.screenMu.Lock()
 	cipher := e.screenCipher
 	event := e.activeScreenShare
@@ -1367,12 +1763,12 @@ func (e *Engine) handleScreenPacket(pkt *protocol.ScreenPacket) {
 		slog.Debug("screen frame decode error", "err", err)
 		return
 	}
-	if e.OnScreenFrame != nil {
-		e.OnScreenFrame(img)
+	if callback := e.OnScreenFrame; callback != nil {
+		e.enqueueLatestGenerationCallbackLocked(g, callbackScreenFrame, func() { callback(img) })
 	}
 }
 
-func (e *Engine) startScreenShareLoop() {
+func (e *Engine) startScreenShareLoop(g *connectionGeneration) {
 	e.screenMu.Lock()
 	if e.screenShareRunning {
 		e.screenSharePending = false
@@ -1380,23 +1776,23 @@ func (e *Engine) startScreenShareLoop() {
 		return
 	}
 	displayIndex := e.screenShareDisplay
-	ctx, cancel := context.WithCancel(e.ctx)
+	ctx, cancel := context.WithCancel(g.ctx)
 	e.screenShareCancel = cancel
 	e.screenShareRunning = true
 	e.screenSharePending = false
 	e.screenMu.Unlock()
 
-	go func() {
+	g.run(func(context.Context) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		defer e.stopScreenShareLoop()
 
 		for {
-			if err := e.sendScreenShareFrame(displayIndex); err != nil {
+			if err := e.sendScreenShareFrame(g, displayIndex); err != nil {
 				if errors.Is(err, errScreenShareCaptureTimedOut) {
-					e.requestScreenShareStop()
-					if e.OnError != nil {
-						e.OnError(fmt.Errorf("screen share stopped: %w", err))
+					e.requestScreenShareStop(g)
+					if callback := e.OnError; callback != nil {
+						e.invokeGenerationCallback(g, func() { callback(fmt.Errorf("screen share stopped: %w", err)) })
 					}
 					return
 				}
@@ -1409,7 +1805,7 @@ func (e *Engine) startScreenShareLoop() {
 			case <-ticker.C:
 			}
 		}
-	}()
+	})
 }
 
 func (e *Engine) stopScreenShareLoop() {
@@ -1424,47 +1820,61 @@ func (e *Engine) stopScreenShareLoop() {
 	}
 }
 
-func (e *Engine) handleScreenDisconnect() {
+func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
 	e.mu.Lock()
-	if e.state == StateDisconnected || e.screen == nil {
+	if e.generation != g || e.state != StateConnected {
 		e.mu.Unlock()
 		return
 	}
-	e.screen = nil
 	e.screenShareEnabled = false
-	e.activeScreenShare = nil
 	e.mu.Unlock()
+
+	g.mu.Lock()
+	if g.screen == nil {
+		g.mu.Unlock()
+		return
+	}
+	screen := g.screen
+	g.screen = nil
+	g.mu.Unlock()
+	_ = screen.Close()
 
 	e.stopScreenShareLoop()
 	e.screenMu.Lock()
+	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
 
-	if e.OnScreenFrame != nil {
-		e.OnScreenFrame(nil)
+	if callback := e.OnScreenFrame; callback != nil {
+		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
 	}
-	if e.OnScreenShareEvent != nil {
-		e.OnScreenShareEvent(&pb.ScreenShareEvent{Active: false})
+	if callback := e.OnScreenShareEvent; callback != nil {
+		e.enqueueGenerationCallbackLocked(g, func() { callback(&pb.ScreenShareEvent{Active: false}) })
 	}
-	if e.OnChannelsUpdate != nil {
-		e.OnChannelsUpdate(e.GetChannels())
+	if callback := e.OnChannelsUpdate; callback != nil {
+		channels := e.GetChannels()
+		e.enqueueGenerationCallbackLocked(g, func() { callback(channels) })
 	}
-	if e.OnError != nil {
-		e.OnError(fmt.Errorf("screen share connection lost"))
+	if callback := e.OnError; callback != nil {
+		e.enqueueGenerationCallbackLocked(g, func() { callback(fmt.Errorf("screen share connection lost")) })
 	}
 }
 
-func (e *Engine) sendScreenShareFrame(displayIndex int) error {
+func (e *Engine) sendScreenShareFrame(g *connectionGeneration, displayIndex int) error {
+	g.mu.Lock()
+	screen := g.screen
+	g.mu.Unlock()
 	e.mu.RLock()
-	screen := e.screen
 	sessionID := e.sessionID
 	e.mu.RUnlock()
 
 	if screen == nil {
 		return fmt.Errorf("not connected")
 	}
-	data, width, height, err := e.prepareScreenShareFrame(displayIndex)
+	data, width, height, err := e.prepareScreenShareFrame(g.ctx, displayIndex)
 	if err != nil {
 		return err
 	}
@@ -1499,14 +1909,27 @@ type screenSharePrepareResult struct {
 	err    error
 }
 
-func (e *Engine) prepareScreenShareFrame(displayIndex int) ([]byte, int32, int32, error) {
+func (e *Engine) prepareScreenShareFrame(ctx context.Context, displayIndex int) ([]byte, int32, int32, error) {
 	timeout := e.screenCaptureWait
 	if timeout <= 0 {
 		timeout = defaultScreenShareCaptureTimeout
 	}
 
+	// Native display capture cannot be force-canceled on every backend. Serialize
+	// helpers process-wide so a stuck backend cannot create an unbounded goroutine backlog.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case screenCaptureSlot <- struct{}{}:
+	case <-timer.C:
+		return nil, 0, 0, errScreenShareCaptureTimedOut
+	case <-ctx.Done():
+		return nil, 0, 0, fmt.Errorf("not connected")
+	}
+
 	resultCh := make(chan screenSharePrepareResult, 1)
 	go func() {
+		defer func() { <-screenCaptureSlot }()
 		img, err := e.captureScreenFn(displayIndex)
 		if err != nil {
 			resultCh <- screenSharePrepareResult{err: err}
@@ -1519,14 +1942,14 @@ func (e *Engine) prepareScreenShareFrame(displayIndex int) ([]byte, int32, int32
 	select {
 	case result := <-resultCh:
 		return result.data, result.width, result.height, result.err
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, 0, 0, errScreenShareCaptureTimedOut
-	case <-e.ctx.Done():
+	case <-ctx.Done():
 		return nil, 0, 0, fmt.Errorf("not connected")
 	}
 }
 
-func (e *Engine) watchScreenShareStart(attempt uint64, timeout time.Duration) {
+func (e *Engine) watchScreenShareStart(g *connectionGeneration, attempt uint64, timeout time.Duration) {
 	if timeout <= 0 {
 		timeout = defaultScreenShareStartTimeout
 	}
@@ -1536,7 +1959,7 @@ func (e *Engine) watchScreenShareStart(attempt uint64, timeout time.Duration) {
 
 	select {
 	case <-timer.C:
-	case <-e.ctx.Done():
+	case <-g.ctx.Done():
 		return
 	}
 
@@ -1548,17 +1971,18 @@ func (e *Engine) watchScreenShareStart(attempt uint64, timeout time.Duration) {
 	e.screenSharePending = false
 	e.screenMu.Unlock()
 
-	e.requestScreenShareStop()
-	if e.OnError != nil {
-		e.OnError(errScreenShareStartTimedOut)
+	e.requestScreenShareStop(g)
+	if callback := e.OnError; callback != nil {
+		e.invokeGenerationCallback(g, func() { callback(errScreenShareStartTimedOut) })
 	}
 }
 
-func (e *Engine) requestScreenShareStop() {
-	e.mu.RLock()
-	ctrl := e.control
-	e.mu.RUnlock()
-	if ctrl == nil {
+func (e *Engine) requestScreenShareStop(g *connectionGeneration) {
+	g.mu.Lock()
+	ctrl := g.control
+	active := g.ctx.Err() == nil
+	g.mu.Unlock()
+	if ctrl == nil || !active {
 		return
 	}
 	if err := ctrl.Send(&pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}}); err != nil {
@@ -1566,16 +1990,170 @@ func (e *Engine) requestScreenShareStop() {
 	}
 }
 
-func (e *Engine) setState(state State) {
-	e.mu.Lock()
-	e.state = state
-	e.mu.Unlock()
-	e.notifyStateChange(state)
+// invokeCallback serializes user callbacks outside lifecycle workers. Producers never
+// wait for callback completion, so callbacks may safely call synchronous Engine methods.
+func (e *Engine) invokeCallback(fn func()) {
+	e.enqueueCallback(fn, true)
+}
+
+func (e *Engine) enqueueCallback(fn func(), reliable bool) bool {
+	e.callbackQueueMu.Lock()
+	limit := maxCallbackQueue
+	if reliable {
+		limit = maxReliableCallbackQueue
+	}
+	if len(e.callbackQueue) >= limit {
+		e.callbackQueueMu.Unlock()
+		if reliable {
+			slog.Error("reliable client callback dropped because callback queue is full", "limit", limit)
+		}
+		return false
+	}
+	e.callbackQueue = append(e.callbackQueue, fn)
+	startRunner := !e.callbackQueueRunning
+	if startRunner {
+		e.callbackQueueRunning = true
+	}
+	e.callbackQueueMu.Unlock()
+	if startRunner {
+		go e.runCallbackQueue()
+	}
+	return true
+}
+
+func (e *Engine) runCallbackQueue() {
+	for {
+		e.callbackQueueMu.Lock()
+		if len(e.callbackQueue) == 0 {
+			e.callbackQueueRunning = false
+			e.callbackQueueMu.Unlock()
+			return
+		}
+		fn := e.callbackQueue[0]
+		e.callbackQueue[0] = nil
+		e.callbackQueue = e.callbackQueue[1:]
+		e.callbackQueueMu.Unlock()
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					slog.Error("client callback panic", "panic", recovered)
+				}
+			}()
+			fn()
+		}()
+	}
+}
+
+func (e *Engine) enqueueGenerationCallbackLocked(g *connectionGeneration, fn func()) {
+	e.enqueueQualifiedGenerationCallbackLocked(g, fn, false)
+}
+
+func (e *Engine) enqueueReliableGenerationCallbackLocked(g *connectionGeneration, fn func()) {
+	e.enqueueQualifiedGenerationCallbackLocked(g, fn, true)
+}
+
+func (e *Engine) enqueueQualifiedGenerationCallbackLocked(g *connectionGeneration, fn func(), reliable bool) {
+	e.mu.RLock()
+	current := e.generation == g
+	e.mu.RUnlock()
+	g.mu.Lock()
+	active := g.ctx.Err() == nil
+	if current && active {
+		e.enqueueCallback(fn, reliable)
+	}
+	g.mu.Unlock()
+}
+
+func (e *Engine) invokeGenerationCallback(g *connectionGeneration, fn func()) {
+	e.callbackMu.Lock()
+	e.enqueueGenerationCallbackLocked(g, fn)
+	e.callbackMu.Unlock()
+}
+
+func (e *Engine) invokeLatestGenerationCallback(g *connectionGeneration, kind callbackKind, fn func()) {
+	e.callbackMu.Lock()
+	e.mu.RLock()
+	current := e.generation == g
+	e.mu.RUnlock()
+	g.mu.Lock()
+	active := g.ctx.Err() == nil
+	if current && active {
+		e.enqueueLatestCallback(latestCallbackKey{generation: g, kind: kind}, fn)
+	}
+	g.mu.Unlock()
+	e.callbackMu.Unlock()
+}
+
+func (e *Engine) enqueueLatestGenerationCallbackLocked(g *connectionGeneration, kind callbackKind, fn func()) {
+	e.mu.RLock()
+	current := e.generation == g
+	e.mu.RUnlock()
+	g.mu.Lock()
+	active := g.ctx.Err() == nil
+	if current && active {
+		e.enqueueLatestCallback(latestCallbackKey{generation: g, kind: kind}, fn)
+	}
+	g.mu.Unlock()
+}
+
+func (e *Engine) enqueueLatestCallback(key latestCallbackKey, fn func()) {
+	e.callbackQueueMu.Lock()
+	if e.latestCallbacks == nil {
+		e.latestCallbacks = make(map[latestCallbackKey]func())
+		e.latestCallbackQueued = make(map[latestCallbackKey]bool)
+	}
+	e.latestCallbacks[key] = fn
+	if e.latestCallbackQueued[key] {
+		e.callbackQueueMu.Unlock()
+		return
+	}
+	if len(e.callbackQueue) >= maxCallbackQueue {
+		delete(e.latestCallbacks, key)
+		e.callbackQueueMu.Unlock()
+		return
+	}
+	e.latestCallbackQueued[key] = true
+	e.callbackQueue = append(e.callbackQueue, func() {
+		e.callbackQueueMu.Lock()
+		latest := e.latestCallbacks[key]
+		delete(e.latestCallbacks, key)
+		delete(e.latestCallbackQueued, key)
+		e.callbackQueueMu.Unlock()
+		if latest != nil {
+			latest()
+		}
+	})
+	startRunner := !e.callbackQueueRunning
+	if startRunner {
+		e.callbackQueueRunning = true
+	}
+	e.callbackQueueMu.Unlock()
+	if startRunner {
+		go e.runCallbackQueue()
+	}
+}
+
+func (e *Engine) enqueueOptionalGenerationCallbackLocked(g *connectionGeneration, fn func()) {
+	if g == nil {
+		e.invokeCallback(fn)
+		return
+	}
+	e.enqueueGenerationCallbackLocked(g, fn)
+}
+
+func (e *Engine) notifyGenerationState(g *connectionGeneration, state State) {
+	if callback := e.OnStateChange; callback != nil {
+		e.callbackMu.Lock()
+		e.enqueueReliableGenerationCallbackLocked(g, func() { callback(state) })
+		e.callbackMu.Unlock()
+	}
 }
 
 func (e *Engine) notifyStateChange(state State) {
-	if e.OnStateChange != nil {
-		e.OnStateChange(state)
+	if callback := e.OnStateChange; callback != nil {
+		e.callbackMu.Lock()
+		e.invokeCallback(func() { callback(state) })
+		e.callbackMu.Unlock()
 	}
 }
 

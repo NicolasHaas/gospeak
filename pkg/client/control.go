@@ -32,15 +32,19 @@ type ControlClient struct {
 
 // NewControlClient connects to the server's control plane via TLS.
 func NewControlClient(addr, expectedPin string) (*ControlClient, error) {
+	return NewControlClientContext(context.Background(), addr, expectedPin)
+}
+
+func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*ControlClient, error) {
 	tlsCfg, err := tlsConfig(addr, expectedPin)
 	if err != nil {
 		return nil, err
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}
-	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := dialer.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: connect control: %w", err)
 	}
