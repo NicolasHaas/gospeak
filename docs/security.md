@@ -115,12 +115,12 @@ For each voice packet:
 2. **Authenticated encryption**:
    - **Algorithm**: AES-128-GCM
    - **Plaintext**: Opus-encoded audio frame
-   - **Additional Data (AD)**: 14-byte packet header (SessionID + SeqNum + Timestamp + ChannelID)
+   - **Additional Data (AD)**: 20-byte packet header (SessionID + SeqNum + Timestamp + ChannelID)
    - **Output**: Ciphertext + 16-byte authentication tag
 
 3. **Packet assembly**:
    ```
-   [SessionID:4B][SeqNum:4B][Timestamp:4B][ChannelID:2B][Ciphertext + AuthTag]
+   [SessionID:4B][SeqNum:4B][Timestamp:4B][ChannelID:8B][Ciphertext + AuthTag]
    ```
 
 ### Security Properties
@@ -129,7 +129,7 @@ For each voice packet:
 |----------|------------------|
 | **Confidentiality** | AES-128-GCM encryption of Opus frames |
 | **Integrity** | GCM authentication tag (16 bytes) |
-| **Authenticity** | The complete 14-byte voice header is authenticated as additional data |
+| **Authenticity** | The complete 20-byte voice header is authenticated as additional data |
 | **Nonce uniqueness** | Session IDs are not reissued under the same key, and sequence wrap fails closed |
 | **Forward secrecy** | New key generated on each server restart |
 

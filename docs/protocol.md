@@ -17,6 +17,7 @@ Every control message is a `ControlMessage` struct with exactly one field set:
 - `ChannelListRequest`
 - `ChannelListResponse`
 - `JoinChannelRequest`
+- `ChannelJoinResponse`
 - `LeaveChannelRequest`
 - `ChannelJoinedEvent`
 - `ChannelLeftEvent`
@@ -86,7 +87,8 @@ sequenceDiagram
 
     Note over C,S: Join Channel
     C->>S: JoinChannelRequest{channelID}
-    S->>S: Check max_users, validate channel
+    S->>S: Validate and atomically reserve capacity
+    S->>C: ChannelJoinResponse{channelID, success, message}
     S->>Others: ChannelJoinedEvent{channelID, user}
     S->>C: ServerStateEvent{channels} (full refresh)
 
@@ -173,10 +175,10 @@ This field is required: clients and servers from before authenticated UDP regist
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Header (8 bytes, sent as plaintext additional data)    │
-│  ┌─────────────────┬───────────────────┐                │
-│  │ SessionID (4B)  │ SeqNum (4B)       │                │
-│  └─────────────────┴───────────────────┘                │
+│  Header (20 bytes, sent as plaintext additional data)   │
+│  ┌───────────────┬─────────────┬──────────────┬────────┐ │
+│  │SessionID (4B) │SeqNum (4B)  │Timestamp (4B)│Chan(8B)│ │
+│  └───────────────┴─────────────┴──────────────┴────────┘ │
 ├─────────────────────────────────────────────────────────┤
 │  Payload: AES-128-GCM(opus_frame)                       │
 │  ┌──────────────────────────────────────────────┐       │
@@ -184,6 +186,10 @@ This field is required: clients and servers from before authenticated UDP regist
 │  └──────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────┘
 ```
+
+The 64-bit unsigned channel field carries positive SQLite channel IDs without
+truncation. The 20-byte header is authenticated as AES-GCM additional data.
+Clients and servers using the former 14-byte voice header are not wire-compatible.
 
 ### Voice Pipeline
 

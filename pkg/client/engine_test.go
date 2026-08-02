@@ -1,16 +1,36 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"image"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
+
+type recordingConn struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (*recordingConn) Read([]byte) (int, error) { return 0, errors.New("not implemented") }
+func (c *recordingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.Write(p)
+}
+func (*recordingConn) Close() error                     { return nil }
+func (*recordingConn) LocalAddr() net.Addr              { return &net.IPAddr{} }
+func (*recordingConn) RemoteAddr() net.Addr             { return &net.IPAddr{} }
+func (*recordingConn) SetDeadline(time.Time) error      { return nil }
+func (*recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (*recordingConn) SetWriteDeadline(time.Time) error { return nil }
 
 type lifecycleCapturer struct {
 	closed atomic.Bool
@@ -45,6 +65,91 @@ func setTestGeneration(e *Engine) *connectionGeneration {
 	e.generation = g
 	e.state = StateConnected
 	return g
+}
+
+func TestJoinChannelWaitsForSuccessfulResponseBeforeChangingState(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	g.control = &ControlClient{conn: &recordingConn{}}
+	g.voice = &VoiceClient{channelID: 1}
+	e.mu.Lock()
+	e.generation = g
+	e.state = StateConnected
+	e.channelID = 1
+	e.mu.Unlock()
+
+	if err := e.JoinChannel(2); err != nil {
+		t.Fatalf("JoinChannel: %v", err)
+	}
+	if got := e.GetChannelID(); got != 1 {
+		t.Fatalf("channel before response = %d, want 1", got)
+	}
+	if got := g.voice.channelID; got != 1 {
+		t.Fatalf("voice channel before response = %d, want 1", got)
+	}
+
+	e.handleEventGeneration(g, &pb.ControlMessage{
+		ChannelJoinResponse: &pb.ChannelJoinResponse{ChannelID: 2, Success: true},
+	})
+	if got := e.GetChannelID(); got != 2 {
+		t.Fatalf("channel after response = %d, want 2", got)
+	}
+	if got := g.voice.channelID; got != 2 {
+		t.Fatalf("voice channel after response = %d, want 2", got)
+	}
+}
+
+func TestRejectedChannelJoinDoesNotChangeState(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	g.control = &ControlClient{conn: &recordingConn{}}
+	g.voice = &VoiceClient{channelID: 1}
+	e.mu.Lock()
+	e.generation = g
+	e.state = StateConnected
+	e.channelID = 1
+	e.mu.Unlock()
+
+	if err := e.JoinChannel(2); err != nil {
+		t.Fatalf("JoinChannel: %v", err)
+	}
+	e.handleEventGeneration(g, &pb.ControlMessage{
+		ChannelJoinResponse: &pb.ChannelJoinResponse{ChannelID: 2, Success: false, Message: "channel is full"},
+	})
+	if got := e.GetChannelID(); got != 1 {
+		t.Fatalf("channel after rejection = %d, want 1", got)
+	}
+	if got := g.voice.channelID; got != 1 {
+		t.Fatalf("voice channel after rejection = %d, want 1", got)
+	}
+}
+
+func TestLeaveChannelInvalidatesPendingJoinResponse(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	g.control = &ControlClient{conn: &recordingConn{}}
+	g.voice = &VoiceClient{channelID: 1}
+	e.mu.Lock()
+	e.generation = g
+	e.state = StateConnected
+	e.channelID = 1
+	e.mu.Unlock()
+
+	if err := e.JoinChannel(2); err != nil {
+		t.Fatalf("JoinChannel: %v", err)
+	}
+	if err := e.LeaveChannel(); err != nil {
+		t.Fatalf("LeaveChannel: %v", err)
+	}
+	e.handleEventGeneration(g, &pb.ControlMessage{
+		ChannelJoinResponse: &pb.ChannelJoinResponse{ChannelID: 2, Success: true},
+	})
+	if got := e.GetChannelID(); got != 0 {
+		t.Fatalf("channel after stale join response = %d, want 0", got)
+	}
+	if got := g.voice.channelID; got != 0 {
+		t.Fatalf("voice channel after leave = %d, want 0", got)
+	}
 }
 
 func TestStaleGenerationCannotDisconnectReplacement(t *testing.T) {
@@ -750,6 +855,13 @@ func TestSelectAutoJoinChannelHonorsScope(t *testing.T) {
 	got, ok = selectAutoJoinChannel(channels, 0)
 	if !ok || got.ID != 1 {
 		t.Fatalf("selectAutoJoinChannel(scope=0) = (%#v, %t), want first channel", got, ok)
+	}
+	got, ok = selectAutoJoinChannel([]pb.ChannelInfo{
+		{ID: 1, Name: "full", MaxUsers: 1, Users: []pb.UserInfo{{ID: 1}}},
+		{ID: 2, Name: "available", MaxUsers: 1},
+	}, 0)
+	if !ok || got.ID != 2 {
+		t.Fatalf("selectAutoJoinChannel(full first channel) = (%#v, %t), want channel 2", got, ok)
 	}
 	if _, ok := selectAutoJoinChannel(channels, 3); ok {
 		t.Fatal("selectAutoJoinChannel accepted a missing scoped channel")

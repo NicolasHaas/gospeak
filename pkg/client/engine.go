@@ -90,6 +90,7 @@ type connectionGeneration struct {
 	cipher         *gospeakCrypto.VoiceCipher
 	audio          *audioResources
 	keepaliveNow   chan struct{}
+	pendingJoins   map[int64]uint32
 }
 
 func newConnectionGeneration() *connectionGeneration {
@@ -99,6 +100,7 @@ func newConnectionGeneration() *connectionGeneration {
 		cancel:       cancel,
 		done:         make(chan struct{}),
 		keepaliveNow: make(chan struct{}, 1),
+		pendingJoins: make(map[int64]uint32),
 	}
 }
 
@@ -519,10 +521,12 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 
 func selectAutoJoinChannel(channels []pb.ChannelInfo, channelScope int64) (pb.ChannelInfo, bool) {
 	if channelScope == 0 {
-		if len(channels) == 0 {
-			return pb.ChannelInfo{}, false
+		for _, channel := range channels {
+			if channel.MaxUsers <= 0 || len(channel.Users) < int(channel.MaxUsers) {
+				return channel, true
+			}
 		}
-		return channels[0], true
+		return pb.ChannelInfo{}, false
 	}
 	for _, channel := range channels {
 		if channel.ID == channelScope {
@@ -961,6 +965,48 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 			"channel", msg.ChannelJoinedEvent.ChannelID,
 		)
 
+	case msg.ChannelJoinResponse != nil:
+		response := msg.ChannelJoinResponse
+		g.mu.Lock()
+		pendingCount := g.pendingJoins[response.ChannelID]
+		pending := pendingCount > 0
+		if pendingCount <= 1 {
+			delete(g.pendingJoins, response.ChannelID)
+		} else {
+			g.pendingJoins[response.ChannelID] = pendingCount - 1
+		}
+		voice := g.voice
+		applied := false
+		if pending && response.Success && g.ctx.Err() == nil {
+			e.mu.Lock()
+			if e.generation == g && e.state == StateConnected {
+				e.channelID = response.ChannelID
+				if voice != nil {
+					voice.SetChannel(response.ChannelID)
+				}
+				applied = true
+			}
+			e.mu.Unlock()
+		}
+		g.mu.Unlock()
+		if !pending {
+			return
+		}
+		if !response.Success {
+			if callback := e.OnError; callback != nil {
+				err := fmt.Errorf("join channel: %s", response.Message)
+				e.enqueueGenerationCallbackLocked(g, func() { callback(err) })
+			}
+			return
+		}
+		if applied {
+			e.clearScreenShareStateGenerationLocked(g)
+			select {
+			case g.keepaliveNow <- struct{}{}:
+			default:
+			}
+		}
+
 	case msg.ChannelLeftEvent != nil:
 		slog.Info("user left channel",
 			"user", msg.ChannelLeftEvent.Username,
@@ -1034,39 +1080,30 @@ func (e *Engine) beginControlOperation() (*connectionGeneration, *ControlClient,
 	return g, ctrl, true
 }
 
-// JoinChannel sends a request to join a channel.
+// JoinChannel sends a request to join a channel. Local channel state changes
+// only after the server returns a successful ChannelJoinResponse.
 func (e *Engine) JoinChannel(channelID int64) error {
-	g, ctrl, voice, _ := e.connectionClients()
+	g, ctrl, _, _ := e.connectionClients()
 
 	if ctrl == nil || g == nil || !g.begin() {
 		return fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
 
+	g.mu.Lock()
+	g.pendingJoins[channelID]++
+	g.mu.Unlock()
 	if err := ctrl.Send(&pb.ControlMessage{
 		JoinChannelRequest: &pb.JoinChannelRequest{ChannelID: channelID},
 	}); err != nil {
+		g.mu.Lock()
+		if g.pendingJoins[channelID] <= 1 {
+			delete(g.pendingJoins, channelID)
+		} else {
+			g.pendingJoins[channelID]--
+		}
+		g.mu.Unlock()
 		return err
-	}
-
-	e.mu.Lock()
-	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("not connected")
-	}
-	e.channelID = channelID
-	e.mu.Unlock()
-	e.clearScreenShareStateGeneration(g)
-
-	if voice != nil {
-		voice.SetChannel(channelID)
-	}
-
-	// Ask the keepalive loop to announce our UDP address immediately so the
-	// server can route voice without waiting for the next tick.
-	select {
-	case g.keepaliveNow <- struct{}{}:
-	default:
 	}
 
 	return nil
@@ -1087,13 +1124,21 @@ func (e *Engine) LeaveChannel() error {
 		return err
 	}
 
+	g.mu.Lock()
+	clear(g.pendingJoins)
+	voice := g.voice
 	e.mu.Lock()
 	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
 		e.mu.Unlock()
+		g.mu.Unlock()
 		return fmt.Errorf("not connected")
 	}
 	e.channelID = 0
+	if voice != nil {
+		voice.SetChannel(0)
+	}
 	e.mu.Unlock()
+	g.mu.Unlock()
 	e.clearScreenShareStateGeneration(g)
 
 	return nil

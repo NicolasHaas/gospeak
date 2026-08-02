@@ -10,6 +10,7 @@ type ControlMessage struct {
 	ChannelListRequest  *ChannelListRequest            `json:"channel_list_request,omitempty"`
 	ChannelListResponse *ChannelListResponse           `json:"channel_list_response,omitempty"`
 	JoinChannelRequest  *JoinChannelRequest            `json:"join_channel_request,omitempty"`
+	ChannelJoinResponse *ChannelJoinResponse           `json:"channel_join_response,omitempty"`
 	LeaveChannelRequest *LeaveChannelRequest           `json:"leave_channel_request,omitempty"`
 	ChannelJoinedEvent  *ChannelJoinedEvent            `json:"channel_joined_event,omitempty"`
 	ChannelLeftEvent    *ChannelLeftEvent              `json:"channel_left_event,omitempty"`
@@ -91,6 +92,12 @@ type ChannelListResponse struct {
 
 type JoinChannelRequest struct {
 	ChannelID int64 `json:"channel_id"`
+}
+
+type ChannelJoinResponse struct {
+	ChannelID int64  `json:"channel_id"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message,omitempty"`
 }
 
 type LeaveChannelRequest struct{}

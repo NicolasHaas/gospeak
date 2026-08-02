@@ -18,7 +18,7 @@ type VoiceClient struct {
 	conn                *net.UDPConn
 	serverAddr          *net.UDPAddr
 	sessionID           uint32
-	channelID           uint16
+	channelID           uint64
 	cipher              *gospeakCrypto.VoiceCipher
 	seqNum              uint32
 	registrationKey     []byte
@@ -86,7 +86,7 @@ func (v *VoiceClient) SendRegistration() error {
 func (v *VoiceClient) SetChannel(channelID int64) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.channelID = uint16(channelID) //nolint:gosec // channel IDs fit in uint16
+	v.channelID = uint64(channelID) //nolint:gosec // server-issued channel IDs are positive
 }
 
 // SendVoice encrypts and sends an Opus frame over UDP.
