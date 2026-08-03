@@ -84,7 +84,7 @@ func requireClosed(t *testing.T, conn *closeTrackingConn) {
 
 func TestHandleJoinLeaveChannel(t *testing.T) {
 	srv, st, handler := newTestServer(t)
-	conn := &nopConn{}
+	conn := &bufferConn{}
 
 	ch := model.NewChannel()
 	if err := st.NonTx().CreateChannel(ch); err != nil {
@@ -94,6 +94,13 @@ func TestHandleJoinLeaveChannel(t *testing.T) {
 	session := mustCreateSession(t, srv.sessions, 1, "johndoe", model.RoleUser)
 
 	srv.handleJoinChannel(handler, session.ID, &pb.JoinChannelRequest{ChannelID: ch.ID}, st, conn)
+	response, err := protocol.ReadControlMessage(conn)
+	if err != nil {
+		t.Fatalf("ReadControlMessage: %v", err)
+	}
+	if response.ChannelJoinResponse == nil || !response.ChannelJoinResponse.Success || response.ChannelJoinResponse.ChannelID != ch.ID {
+		t.Fatalf("join response = %#v, want successful response for channel %d", response, ch.ID)
+	}
 	joinedChannel := srv.channels.ChannelOf(session.ID)
 	if joinedChannel != ch.ID {
 		t.Fatalf("JoinChannel: expected channel %d got %d", ch.ID, joinedChannel)
@@ -142,8 +149,8 @@ func TestHandleJoinChannelEnforcesSessionScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadControlMessage: %v", err)
 	}
-	if response.ErrorResponse == nil || response.ErrorResponse.Code != 12 {
-		t.Fatalf("out-of-scope join returned %#v, want error code 12", response)
+	if response.ChannelJoinResponse == nil || response.ChannelJoinResponse.Success {
+		t.Fatalf("out-of-scope join returned %#v, want rejection", response)
 	}
 	if got := srv.channels.ChannelOf(session.ID); got != 0 {
 		t.Fatalf("out-of-scope join moved session to channel %d", got)

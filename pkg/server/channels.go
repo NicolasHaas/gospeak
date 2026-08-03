@@ -44,6 +44,36 @@ func (cm *ChannelManager) Join(sessionID uint32, channelID int64) (prevChannelID
 	return prevChannelID
 }
 
+// TryJoin adds a session only when the destination has capacity. The capacity
+// check and move happen under the same lock.
+func (cm *ChannelManager) TryJoin(sessionID uint32, channelID int64, maxUsers int) (prevChannelID int64, joined bool) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	current := cm.sessionToChannel[sessionID]
+	if current == channelID {
+		return current, true
+	}
+	if maxUsers > 0 && len(cm.members[channelID]) >= maxUsers {
+		return current, false
+	}
+
+	if current != 0 {
+		if sessions := cm.members[current]; sessions != nil {
+			delete(sessions, sessionID)
+			if len(sessions) == 0 {
+				delete(cm.members, current)
+			}
+		}
+	}
+	if cm.members[channelID] == nil {
+		cm.members[channelID] = make(map[uint32]bool)
+	}
+	cm.members[channelID][sessionID] = true
+	cm.sessionToChannel[sessionID] = channelID
+	return current, true
+}
+
 // Leave removes a session from its current channel.
 func (cm *ChannelManager) Leave(sessionID uint32) (channelID int64) {
 	cm.mu.Lock()

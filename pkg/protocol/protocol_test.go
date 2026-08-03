@@ -35,3 +35,21 @@ func TestWriteControlMessageHandlesShortWrites(t *testing.T) {
 		t.Fatalf("Ping mismatch: got %#v, want timestamp %d", got.Ping, want.Ping.Timestamp)
 	}
 }
+
+func TestVoicePacketRoundTripPreservesLargeChannelID(t *testing.T) {
+	want := &VoicePacket{
+		SessionID: 1,
+		SeqNum:    2,
+		Timestamp: 3,
+		ChannelID: 1 << 32,
+		Payload:   []byte("encrypted"),
+	}
+
+	got, err := UnmarshalVoicePacket(want.Marshal())
+	if err != nil {
+		t.Fatalf("UnmarshalVoicePacket: %v", err)
+	}
+	if got.ChannelID != want.ChannelID {
+		t.Fatalf("ChannelID = %d, want %d", got.ChannelID, want.ChannelID)
+	}
+}

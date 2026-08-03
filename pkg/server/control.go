@@ -713,29 +713,42 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 }
 
 func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, req *pb.JoinChannelRequest, st datastore.DataProviderFactory, conn net.Conn) {
+	respond := func(success bool, message string) {
+		if err := writeControlMessage(conn, &pb.ControlMessage{
+			ChannelJoinResponse: &pb.ChannelJoinResponse{
+				ChannelID: req.ChannelID,
+				Success:   success,
+				Message:   message,
+			},
+		}); err != nil {
+			slog.Warn("send channel join response", "session", sessionID, "err", err)
+		}
+	}
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
-		sendError(conn, 3, "session not found")
+		respond(false, "session not found")
 		return
 	}
 	if session.ChannelScope != 0 && req.ChannelID != session.ChannelScope {
-		sendError(conn, 12, "channel is outside your invite scope")
+		respond(false, "channel is outside your invite scope")
 		return
 	}
 	// Verify channel exists
 	ch, err := st.NonTx().GetChannel(req.ChannelID)
 	if err != nil || ch == nil {
-		sendError(conn, 10, "channel not found")
+		respond(false, "channel not found")
 		return
 	}
 
-	// Check max users
-	if ch.MaxUsers > 0 && s.channels.MembersCount(ch.ID) >= ch.MaxUsers {
-		sendError(conn, 11, "channel is full")
+	prevCh, joined := s.channels.TryJoin(session.ID, ch.ID, ch.MaxUsers)
+	if !joined {
+		respond(false, "channel is full")
 		return
 	}
-
-	prevCh := s.channels.Join(session.ID, ch.ID)
+	if prevCh == ch.ID {
+		respond(true, "")
+		return
+	}
 	if prevCh > 0 {
 		if stopEvent, stopped := s.screenShare.StopBySession(session.ID); stopped && stopEvent != nil {
 			handler.broadcastToChannel(prevCh, &pb.ControlMessage{ScreenShareEvent: stopEvent}, session.ID)
@@ -743,6 +756,7 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 	}
 	s.sessions.SetChannel(session.ID, ch.ID)
 	s.screenShare.Unsubscribe(session.ID)
+	respond(true, "")
 
 	// Notify old channel
 	if prevCh > 0 {

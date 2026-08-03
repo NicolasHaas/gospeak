@@ -103,9 +103,14 @@ func (s *Server) voiceLoop() {
 
 		// Verify the sender is actually in the claimed channel (prevent channel spoofing)
 		actualChannel := s.channels.ChannelOf(pkt.SessionID)
-		if actualChannel == 0 || actualChannel != int64(pkt.ChannelID) {
+		if actualChannel <= 0 {
 			s.metrics.VoicePacketsDropped.Add(1)
-			continue // not in this channel, discard
+			continue // not in a channel, discard
+		}
+		packetChannel := uint64(actualChannel) //nolint:gosec // positivity is checked immediately above
+		if packetChannel != pkt.ChannelID {
+			s.metrics.VoicePacketsDropped.Add(1)
+			continue // claimed channel does not match membership
 		}
 
 		// Track per-session voice debug stats

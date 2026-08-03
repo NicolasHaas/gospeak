@@ -13,8 +13,8 @@ import (
 
 const (
 	// VoiceHeaderSize is the byte size of the voice packet header.
-	// [sessionID(4) | seqNum(4) | timestamp(4) | channelID(2)] = 14 bytes
-	VoiceHeaderSize = 14
+	// [sessionID(4) | seqNum(4) | timestamp(4) | channelID(8)] = 20 bytes
+	VoiceHeaderSize = 20
 
 	// MaxVoicePayload is the maximum encrypted Opus payload size.
 	MaxVoicePayload = 1400
@@ -40,17 +40,17 @@ type VoicePacket struct {
 	SessionID uint32 // 4 bytes: identifies the sender session
 	SeqNum    uint32 // 4 bytes: sequence number for ordering (prevents AES-GCM nonce reuse)
 	Timestamp uint32 // 4 bytes: RTP-style timestamp
-	ChannelID uint16 // 2 bytes: target channel
+	ChannelID uint64 // 8 bytes: target channel
 	Payload   []byte // encrypted Opus frame + GCM auth tag
 }
 
-// MarshalHeader marshals only the header portion (14 bytes).
+// MarshalHeader marshals only the header portion (20 bytes).
 func (p *VoicePacket) MarshalHeader() []byte {
 	h := make([]byte, VoiceHeaderSize)
 	binary.BigEndian.PutUint32(h[0:4], p.SessionID)
 	binary.BigEndian.PutUint32(h[4:8], p.SeqNum)
 	binary.BigEndian.PutUint32(h[8:12], p.Timestamp)
-	binary.BigEndian.PutUint16(h[12:14], p.ChannelID)
+	binary.BigEndian.PutUint64(h[12:20], p.ChannelID)
 	return h
 }
 
@@ -72,7 +72,7 @@ func UnmarshalVoicePacket(data []byte) (*VoicePacket, error) {
 		SessionID: binary.BigEndian.Uint32(data[0:4]),
 		SeqNum:    binary.BigEndian.Uint32(data[4:8]),
 		Timestamp: binary.BigEndian.Uint32(data[8:12]),
-		ChannelID: binary.BigEndian.Uint16(data[12:14]),
+		ChannelID: binary.BigEndian.Uint64(data[12:20]),
 		Payload:   make([]byte, len(data)-VoiceHeaderSize),
 	}
 	copy(pkt.Payload, data[VoiceHeaderSize:])
