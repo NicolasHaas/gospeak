@@ -118,9 +118,11 @@ sequenceDiagram
     NET->>CRY: Encrypted packet
     CRY->>CRY: Decrypt + verify authenticity
     CRY->>JIT: (SessionID, SeqNum, Opus frame)
-    JIT->>JIT: Reorder by SeqNum
+    JIT->>JIT: Buffer and reorder by SeqNum
     JIT->>JIT: Drop duplicates & late packets
-    JIT->>DEC: Ordered Opus frames
+    loop Fixed 20ms playout clock
+        JIT->>DEC: Due Opus frame or loss signal
+    end
     DEC->>SPK: PCM samples → PortAudio playback
 ```
 
@@ -155,7 +157,17 @@ Each remote speaker gets a dedicated jitter buffer that:
 1. **Reorders** packets by sequence number (handles out-of-order UDP delivery)
 2. **Drops duplicates** (same SeqNum received twice)
 3. **Drops late packets** (SeqNum too far behind the playback cursor)
-4. **Provides smooth playback** by buffering a small number of frames
+4. **Waits for a 20 ms playout window** before releasing the first frame, so
+   ordinary UDP reordering does not immediately trigger packet-loss concealment
+5. **Runs on a fixed 20 ms playout clock** and emits packet-loss concealment only
+   after the missing frame's deadline has elapsed
+6. **Stays bounded to 15 frames** and resynchronizes after larger sequence jumps
+   instead of accumulating packets or producing a long PLC burst
+
+Sequence comparisons use modular `uint32` ordering, including wrap from
+`4294967295` to `0`. Duplicate and already-played packets are discarded. When a
+speaker becomes idle, playout also becomes idle rather than generating PLC
+forever; the next talk spurt starts a fresh jitter window.
 
 ## PortAudio Initialization
 

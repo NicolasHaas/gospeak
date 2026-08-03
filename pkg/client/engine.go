@@ -684,13 +684,10 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 
 // playbackLoop receives voice packets, decodes, and plays them.
 func (e *Engine) playbackLoop(g *connectionGeneration) {
-	for {
-		select {
-		case <-g.ctx.Done():
-			return
-		default:
-		}
+	ticker := time.NewTicker(voiceFrameDuration)
+	defer ticker.Stop()
 
+	for {
 		g.mu.Lock()
 		voice := g.voice
 		resources := g.audio
@@ -708,15 +705,21 @@ func (e *Engine) playbackLoop(g *connectionGeneration) {
 			if deafened {
 				continue
 			}
-			e.processIncomingVoice(g, pkt, resources.playback)
+			e.processIncomingVoice(g, pkt)
+		case <-ticker.C:
+			if deafened {
+				continue
+			}
+			e.playJitterFrames(resources.playback)
 		case <-g.ctx.Done():
 			return
 		}
 	}
 }
 
-// processIncomingVoice decrypts and plays a received voice packet.
-func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.VoicePacket, playback audio.Player) {
+// processIncomingVoice decrypts and queues a received voice packet. Decoding
+// and playback happen independently on the fixed playout clock.
+func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.VoicePacket) {
 	g.mu.Lock()
 	cipher := g.cipher
 	g.mu.Unlock()
@@ -726,10 +729,9 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 
 	// Get or create decoder for this speaker
 	e.decoderMu.Lock()
-	dec, ok := e.decoders[pkt.SessionID]
+	_, ok := e.decoders[pkt.SessionID]
 	if !ok {
-		var err error
-		dec, err = e.decoderFactory.NewDecoder()
+		dec, err := e.decoderFactory.NewDecoder()
 		if err != nil {
 			e.decoderMu.Unlock()
 			slog.Error("create decoder failed", "err", err)
@@ -759,27 +761,43 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 
 	// Push to jitter buffer
 	jb.Push(pkt.SeqNum, opusData)
+}
 
-	// Pop and play
-	for {
-		data, _, ok := jb.Pop()
+type speakerPlayout struct {
+	decoder audio.AudioDecoder
+	buffer  *JitterBuffer
+}
+
+func (e *Engine) playJitterFrames(playback audio.Player) {
+	e.decoderMu.Lock()
+	speakers := make([]speakerPlayout, 0, len(e.jitterBufs))
+	for sessionID, jb := range e.jitterBufs {
+		if dec := e.decoders[sessionID]; dec != nil {
+			speakers = append(speakers, speakerPlayout{decoder: dec, buffer: jb})
+		}
+	}
+	e.decoderMu.Unlock()
+
+	for _, speaker := range speakers {
+		data, _, ok := speaker.buffer.Pop()
 		if !ok {
-			break
+			continue
 		}
 
-		var pcm []int16
+		var (
+			pcm []int16
+			err error
+		)
 		if data == nil {
-			// Packet lost — use PLC
-			pcm, err = dec.DecodePLC()
+			pcm, err = speaker.decoder.DecodePLC()
 		} else {
-			pcm, err = dec.Decode(data)
+			pcm, err = speaker.decoder.Decode(data)
 		}
 		if err != nil {
 			slog.Debug("decode error", "err", err)
 			continue
 		}
-
-		if err := playback.WriteFrame(pcm); err != nil {
+		if err = playback.WriteFrame(pcm); err != nil {
 			slog.Debug("playback error", "err", err)
 		}
 	}
