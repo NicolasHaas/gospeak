@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/audio"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
@@ -59,12 +60,88 @@ type lifecycleEncoder struct{}
 
 func (*lifecycleEncoder) Encode([]int16) ([]byte, error) { return nil, nil }
 
+type recordingPlayer struct {
+	frames [][]int16
+}
+
+func (*recordingPlayer) Start() error { return nil }
+func (p *recordingPlayer) WriteFrame(frame []int16) error {
+	p.frames = append(p.frames, append([]int16(nil), frame...))
+	return nil
+}
+func (*recordingPlayer) Stop() error { return nil }
+
+type fixedDecoder struct {
+	frame []int16
+}
+
+func (d *fixedDecoder) Decode([]byte) ([]int16, error) {
+	return append([]int16(nil), d.frame...), nil
+}
+func (d *fixedDecoder) DecodePLC() ([]int16, error) {
+	return append([]int16(nil), d.frame...), nil
+}
+
+var _ audio.Player = (*recordingPlayer)(nil)
+
 func setTestGeneration(e *Engine) *connectionGeneration {
 	g := newConnectionGeneration()
 	g.control = &ControlClient{}
 	e.generation = g
 	e.state = StateConnected
 	return g
+}
+
+func TestPlayoutMixesConcurrentSpeakersIntoOneFrame(t *testing.T) {
+	clock := &fakeJitterClock{now: time.Unix(0, 0)}
+	first := newTestJitterBuffer(clock)
+	second := newTestJitterBuffer(clock)
+	first.Push(1, []byte("first"))
+	second.Push(1, []byte("second"))
+	clock.Advance(defaultJitterDelay)
+
+	e := NewEngine()
+	e.now = clock.Now
+	e.decoders[1] = &fixedDecoder{frame: []int16{20000, -20000}}
+	e.decoders[2] = &fixedDecoder{frame: []int16{20000, -20000}}
+	e.jitterBufs[1] = first
+	e.jitterBufs[2] = second
+	e.speakerLastSeen[1] = clock.Now()
+	e.speakerLastSeen[2] = clock.Now()
+	player := &recordingPlayer{}
+
+	e.playJitterFrames(player)
+
+	if got := len(player.frames); got != 1 {
+		t.Fatalf("playback writes = %d, want 1 mixed frame", got)
+	}
+	if got, want := player.frames[0][0], int16(32767); got != want {
+		t.Fatalf("mixed positive sample = %d, want %d", got, want)
+	}
+	if got, want := player.frames[0][1], int16(-32768); got != want {
+		t.Fatalf("mixed negative sample = %d, want %d", got, want)
+	}
+}
+
+func TestPlayoutRemovesInactiveSpeakerState(t *testing.T) {
+	now := time.Unix(100, 0)
+	e := NewEngine()
+	e.now = func() time.Time { return now }
+	e.decoders[1] = &fixedDecoder{}
+	e.jitterBufs[1] = newTestJitterBuffer(&fakeJitterClock{now: now})
+	e.speakerLastSeen[1] = now.Add(-speakerStateTTL)
+
+	e.playJitterFrames(&recordingPlayer{})
+
+	if _, ok := e.decoders[1]; ok {
+		t.Fatal("inactive decoder was not removed")
+	}
+	if _, ok := e.jitterBufs[1]; ok {
+		t.Fatal("inactive jitter buffer was not removed")
+	}
+	if _, ok := e.speakerLastSeen[1]; ok {
+		t.Fatal("inactive last-seen timestamp was not removed")
+	}
 }
 
 func TestJoinChannelWaitsForSuccessfulResponseBeforeChangingState(t *testing.T) {
