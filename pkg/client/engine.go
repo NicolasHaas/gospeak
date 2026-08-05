@@ -31,6 +31,8 @@ const (
 	defaultScreenShareCaptureTimeout = 15 * time.Second
 	defaultScreenShareStartTimeout   = 10 * time.Second
 	keepAliveInterval                = 5 * time.Second
+	voiceFrameSamples                = 960
+	speakerStateTTL                  = 30 * time.Second
 	maxCallbackQueue                 = 256
 	maxReliableCallbackQueue         = 1024
 )
@@ -192,10 +194,12 @@ type Engine struct {
 	vad           audio.VoiceDetector
 
 	// Per-speaker decoders and jitter buffers
-	decoders       map[uint32]audio.AudioDecoder
-	jitterBufs     map[uint32]*JitterBuffer
-	decoderMu      sync.Mutex
-	decoderFactory audio.DecoderFactory
+	decoders        map[uint32]audio.AudioDecoder
+	jitterBufs      map[uint32]*JitterBuffer
+	speakerLastSeen map[uint32]time.Time
+	decoderMu       sync.Mutex
+	decoderFactory  audio.DecoderFactory
+	now             func() time.Time
 
 	channels []pb.ChannelInfo
 
@@ -255,9 +259,11 @@ func NewEngine() *Engine {
 		state:              StateDisconnected,
 		decoders:           make(map[uint32]audio.AudioDecoder),
 		jitterBufs:         make(map[uint32]*JitterBuffer),
+		speakerLastSeen:    make(map[uint32]time.Time),
 		voiceDebugSpeakers: make(map[uint32]struct{}),
 		vad:                audio.NewVAD(200, 15, 3), // threshold=200, hold=300ms, prebuf=60ms
 		decoderFactory:     &defaultDecoderFactory{},
+		now:                time.Now,
 		encodeScreenFn:     screenshare.EncodeJPEG,
 		screenCaptureWait:  defaultScreenShareCaptureTimeout,
 		screenStartWait:    defaultScreenShareStartTimeout,
@@ -741,6 +747,7 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 		e.jitterBufs[pkt.SessionID] = NewJitterBuffer()
 	}
 	jb := e.jitterBufs[pkt.SessionID]
+	e.speakerLastSeen[pkt.SessionID] = e.now()
 	e.decoderMu.Unlock()
 
 	// Decrypt the voice data
@@ -769,15 +776,23 @@ type speakerPlayout struct {
 }
 
 func (e *Engine) playJitterFrames(playback audio.Player) {
+	now := e.now()
 	e.decoderMu.Lock()
 	speakers := make([]speakerPlayout, 0, len(e.jitterBufs))
 	for sessionID, jb := range e.jitterBufs {
+		if lastSeen, ok := e.speakerLastSeen[sessionID]; ok && now.Sub(lastSeen) >= speakerStateTTL {
+			delete(e.decoders, sessionID)
+			delete(e.jitterBufs, sessionID)
+			delete(e.speakerLastSeen, sessionID)
+			continue
+		}
 		if dec := e.decoders[sessionID]; dec != nil {
 			speakers = append(speakers, speakerPlayout{decoder: dec, buffer: jb})
 		}
 	}
 	e.decoderMu.Unlock()
 
+	frames := make([][]int16, 0, len(speakers))
 	for _, speaker := range speakers {
 		data, _, ok := speaker.buffer.Pop()
 		if !ok {
@@ -797,9 +812,14 @@ func (e *Engine) playJitterFrames(playback audio.Player) {
 			slog.Debug("decode error", "err", err)
 			continue
 		}
-		if err = playback.WriteFrame(pcm); err != nil {
-			slog.Debug("playback error", "err", err)
-		}
+		frames = append(frames, pcm)
+	}
+	if len(frames) == 0 {
+		return
+	}
+
+	if err := playback.WriteFrame(audio.MixFrames(frames, voiceFrameSamples)); err != nil {
+		slog.Debug("playback error", "err", err)
 	}
 }
 
@@ -1629,6 +1649,7 @@ func (e *Engine) resetReceiveState() {
 	e.decoderMu.Lock()
 	e.decoders = make(map[uint32]audio.AudioDecoder)
 	e.jitterBufs = make(map[uint32]*JitterBuffer)
+	e.speakerLastSeen = make(map[uint32]time.Time)
 	e.decoderMu.Unlock()
 }
 

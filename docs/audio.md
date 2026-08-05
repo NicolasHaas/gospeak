@@ -206,10 +206,15 @@ graph TB
         JB3[Jitter Buffer 3] --> D3[Opus Decoder 3]
     end
 
-    D1 --> MIX[Hardware Mixer<br/>PortAudio handles<br/>concurrent writes]
+    D1 --> MIX[Saturating PCM mixer<br/>one frame per 20 ms tick]
     D2 --> MIX
     D3 --> MIX
     MIX --> SPK[Speaker]
 ```
 
-Decoder and jitter buffer instances are created lazily when the first packet from a new `SessionID` is received, and are cleaned up when the speaker disconnects.
+On every 20 ms playout tick, at most one due frame is decoded per active
+speaker. Those PCM frames are summed with `int16` saturation and sent to
+PortAudio as exactly one frame, so concurrent speakers do not multiply the
+playout duration. A speaker without a due frame contributes silence. Decoder
+and jitter-buffer state is created lazily and removed after 30 seconds without
+a packet.
