@@ -162,6 +162,7 @@ graph TB
 
 - Tokens are 256-bit random values (64 hex characters)
 - Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
+- Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). On upgrade, legacy bookmark and settings files beside the executable are migrated there and removed only after the protected replacement is written successfully. Protect the user account and its config directory accordingly.
 - Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide. Older clients remain wire-compatible but must be upgraded to select the scoped channel automatically.
 - On first server run, an admin token is automatically generated and logged
 

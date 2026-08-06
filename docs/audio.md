@@ -148,7 +148,7 @@ stateDiagram-v2
 | Hold Frames | 15 | Number of frames to keep transmitting after voice stops (15 × 20ms = 300ms) |
 | Pre-buffer | 3 | Frames buffered before voice onset for smooth start (3 × 20ms = 60ms) |
 
-The VAD threshold is user-configurable via the settings dialog and persisted in `settings.yaml`.
+The VAD threshold and selected input/output devices are user-configurable via the settings dialog. They are persisted in `settings.yaml` under the operating system's user config directory (`gospeak/`), and device changes apply on the next connection. If a selected device is no longer available, the client shows a warning and uses the system default. The 60 ms VAD pre-buffer is transmitted when speech starts so word beginnings are not clipped.
 
 ## Jitter Buffer
 

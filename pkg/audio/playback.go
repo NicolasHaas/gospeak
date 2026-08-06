@@ -44,6 +44,9 @@ func (p *PlaybackDevice) Start() error {
 	var defaultOutput *portaudio.DeviceInfo
 	if p.deviceName != "" {
 		defaultOutput = FindDevice(p.deviceName)
+		if defaultOutput == nil {
+			return fmt.Errorf("audio: configured output device %q not found", p.deviceName)
+		}
 	}
 	if defaultOutput == nil {
 		var err error
