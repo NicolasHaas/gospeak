@@ -1,8 +1,8 @@
 package client
 
 import (
+	"log/slog"
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,22 +17,25 @@ type Bookmark struct {
 	LastUsed    int64  `yaml:"last_used,omitempty"`
 }
 
-// BookmarkStore manages server bookmarks stored next to the binary.
+// BookmarkStore manages server bookmarks stored in the user config directory.
 type BookmarkStore struct {
 	path              string
+	legacyPath        string
 	Bookmarks         []Bookmark        `yaml:"bookmarks"`
 	TrustedServerPins map[string]string `yaml:"trusted_server_pins,omitempty"`
 }
 
-// NewBookmarkStore creates a bookmark store using a file next to the executable.
+// NewBookmarkStore creates a bookmark store in the user config directory.
 func NewBookmarkStore() *BookmarkStore {
-	exePath, err := os.Executable()
+	legacyPath := legacyFilePath("servers.yaml")
+	path, err := configFilePath("servers.yaml")
 	if err != nil {
-		exePath = "."
+		slog.Error("resolve bookmark path", "err", err)
+		path = legacyPath
 	}
-	dir := filepath.Dir(exePath)
 	return &BookmarkStore{
-		path: filepath.Join(dir, "servers.yaml"),
+		path:       path,
+		legacyPath: legacyPath,
 	}
 }
 
@@ -40,11 +43,31 @@ func NewBookmarkStore() *BookmarkStore {
 func (bs *BookmarkStore) Load() error {
 	data, err := os.ReadFile(bs.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			bs.Bookmarks = nil
-			return nil
+		if !os.IsNotExist(err) || bs.legacyPath == "" || bs.legacyPath == bs.path {
+			if os.IsNotExist(err) {
+				bs.Bookmarks = nil
+				return nil
+			}
+			return err
 		}
-		return err
+		data, err = os.ReadFile(bs.legacyPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				bs.Bookmarks = nil
+				return nil
+			}
+			return err
+		}
+		if err := yaml.Unmarshal(data, bs); err != nil {
+			return err
+		}
+		if err := bs.Save(); err != nil {
+			return err
+		}
+		if err := os.Remove(bs.legacyPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 	return yaml.Unmarshal(data, bs)
 }
@@ -55,10 +78,7 @@ func (bs *BookmarkStore) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(bs.path, data, 0600); err != nil {
-		return err
-	}
-	return os.Chmod(bs.path, 0600)
+	return writePrivateFile(bs.path, data)
 }
 
 // PinForAddr returns the saved TOFU identity for a control address.

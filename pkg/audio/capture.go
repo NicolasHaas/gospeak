@@ -48,6 +48,9 @@ func (c *CaptureDevice) Start() error {
 	var defaultInput *portaudio.DeviceInfo
 	if c.deviceName != "" {
 		defaultInput = FindDevice(c.deviceName)
+		if defaultInput == nil {
+			return fmt.Errorf("audio: configured input device %q not found", c.deviceName)
+		}
 	}
 	if defaultInput == nil {
 		var err error

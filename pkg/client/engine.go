@@ -63,6 +63,7 @@ type audioResources struct {
 	capture  audio.Capturer
 	playback audio.Player
 	encoder  audio.AudioEncoder
+	warnings []error
 }
 
 func (r *audioResources) close() {
@@ -218,8 +219,13 @@ type Engine struct {
 	screenCaptureWait  time.Duration
 	screenStartWait    time.Duration
 
-	// Audio initialization function (allows platform-specific audio backends)
-	initAudioFn func() (*audioResources, error)
+	// Audio initialization functions allow platform-specific audio backends.
+	initAudioFn   func() (*audioResources, error)
+	newCaptureFn  func(deviceName string) (audio.Capturer, error)
+	newPlaybackFn func(deviceName string) (audio.Player, error)
+	newEncoderFn  func() (audio.AudioEncoder, error)
+	audioInput    string
+	audioOutput   string
 
 	// Voice debug counters (reset each log interval; only used when debug is enabled)
 	voiceDebugEnabled   bool
@@ -271,6 +277,13 @@ func NewEngine() *Engine {
 	e.captureScreenFn = func(displayIndex int) (image.Image, error) {
 		return screenshare.CaptureDisplay(displayIndex)
 	}
+	e.newCaptureFn = func(deviceName string) (audio.Capturer, error) {
+		return audio.NewCaptureDevice(48000, 960, deviceName)
+	}
+	e.newPlaybackFn = func(deviceName string) (audio.Player, error) {
+		return audio.NewPlaybackDevice(48000, 960, deviceName)
+	}
+	e.newEncoderFn = func() (audio.AudioEncoder, error) { return audio.NewEncoder() }
 	e.initAudioFn = e.initAudioDefault
 	return e
 }
@@ -556,32 +569,66 @@ func (e *Engine) connectionClients() (*connectionGeneration, *ControlClient, *Vo
 
 // initAudioDefault initializes PortAudio devices and Opus codec (the default backend).
 func (e *Engine) initAudioDefault() (*audioResources, error) {
-	capture, err := audio.NewCaptureDevice(48000, 960)
-	if err != nil {
-		return nil, fmt.Errorf("capture device: %w", err)
+	e.mu.RLock()
+	inputName := e.audioInput
+	outputName := e.audioOutput
+	e.mu.RUnlock()
+
+	resources := &audioResources{}
+	capture, err := e.newCaptureFn(inputName)
+	if err == nil {
+		err = capture.Start()
 	}
-	if err := capture.Start(); err != nil {
-		_ = capture.Close()
+	if err != nil && inputName != "" {
+		if capture != nil {
+			_ = capture.Close()
+		}
+		resources.warnings = append(resources.warnings,
+			fmt.Errorf("configured audio input %q is unavailable; using the system default", inputName))
+		capture, err = e.newCaptureFn("")
+		if err == nil {
+			err = capture.Start()
+		}
+	}
+	if err != nil {
+		if capture != nil {
+			_ = capture.Close()
+		}
 		return nil, fmt.Errorf("start capture: %w", err)
 	}
+	resources.capture = capture
 
-	playback, err := audio.NewPlaybackDevice(48000, 960)
-	if err != nil {
-		_ = capture.Close()
-		return nil, fmt.Errorf("playback device: %w", err)
+	playback, err := e.newPlaybackFn(outputName)
+	if err == nil {
+		err = playback.Start()
 	}
-	if err := playback.Start(); err != nil {
-		_ = capture.Close()
+	if err != nil && outputName != "" {
+		if playback != nil {
+			_ = playback.Stop()
+		}
+		resources.warnings = append(resources.warnings,
+			fmt.Errorf("configured audio output %q is unavailable; using the system default", outputName))
+		playback, err = e.newPlaybackFn("")
+		if err == nil {
+			err = playback.Start()
+		}
+	}
+	if err != nil {
+		if playback != nil {
+			_ = playback.Stop()
+		}
+		resources.close()
 		return nil, fmt.Errorf("start playback: %w", err)
 	}
+	resources.playback = playback
 
-	encoder, err := audio.NewEncoder()
+	encoder, err := e.newEncoderFn()
 	if err != nil {
-		_ = playback.Stop()
-		_ = capture.Close()
+		resources.close()
 		return nil, fmt.Errorf("encoder: %w", err)
 	}
-	return &audioResources{capture: capture, playback: playback, encoder: encoder}, nil
+	resources.encoder = encoder
+	return resources, nil
 }
 
 func (e *Engine) startAudio(g *connectionGeneration) {
@@ -591,6 +638,12 @@ func (e *Engine) startAudio(g *connectionGeneration) {
 			slog.Error("audio init failed (continuing without audio)", "err", err)
 			resources.close()
 			return
+		}
+		for _, warning := range resources.warnings {
+			slog.Warn("audio device fallback", "err", warning)
+			if callback := e.OnError; callback != nil {
+				e.invokeGenerationCallback(g, func() { callback(warning) })
+			}
 		}
 
 		g.mu.Lock()
@@ -655,7 +708,7 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 		}
 
 		// VAD
-		active := e.vad.Process(pcm)
+		active, frames := e.captureFrames(pcm)
 		if callback := e.OnVoiceActivity; callback != nil {
 			e.invokeLatestGenerationCallback(g, callbackVoiceActivity, func() { callback(active) })
 		}
@@ -666,26 +719,46 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 			continue
 		}
 
-		opusData, err := resources.encoder.Encode(pcm)
-		if err != nil {
-			slog.Debug("encode error", "err", err)
-			timestamp += 960
-			continue
+		frameTimestamp := timestamp
+		offset := uint32((len(frames) - 1) * 960) //nolint:gosec // VAD pre-buffer size is bounded
+		if offset <= timestamp {
+			frameTimestamp -= offset
 		}
+		for _, frame := range frames {
+			opusData, err := resources.encoder.Encode(frame)
+			if err != nil {
+				slog.Debug("encode error", "err", err)
+				frameTimestamp += 960
+				continue
+			}
 
-		if err := voice.SendVoice(opusData, timestamp); err != nil {
-			slog.Debug("voice send error", "err", err)
-		} else if e.voiceDebugEnabled {
-			e.voiceDebugMu.Lock()
-			e.voiceDebugSent++
-			e.voiceDebugMu.Unlock()
+			if err := voice.SendVoice(opusData, frameTimestamp); err != nil {
+				slog.Debug("voice send error", "err", err)
+			} else if e.voiceDebugEnabled {
+				e.voiceDebugMu.Lock()
+				e.voiceDebugSent++
+				e.voiceDebugMu.Unlock()
+			}
+			e.mu.Lock()
+			e.lastSendTime = time.Now()
+			e.mu.Unlock()
+			frameTimestamp += 960
 		}
-		e.mu.Lock()
-		e.lastSendTime = time.Now()
-		e.mu.Unlock()
 
 		timestamp += 960
 	}
+}
+
+func (e *Engine) captureFrames(pcm []int16) (bool, [][]int16) {
+	wasActive := e.vad.IsActive()
+	active := e.vad.Process(pcm)
+	if !active {
+		return false, nil
+	}
+	if !wasActive {
+		return true, e.vad.PreBufferedFrames()
+	}
+	return true, [][]int16{pcm}
 }
 
 // playbackLoop receives voice packets, decodes, and plays them.
@@ -1247,6 +1320,15 @@ func (e *Engine) updateDeafenedGeneration(g *connectionGeneration, deafened bool
 // SetVADThreshold updates the VAD sensitivity.
 func (e *Engine) SetVADThreshold(threshold float64) {
 	e.vad.SetThreshold(threshold)
+}
+
+// SetAudioDevices selects the devices to open on the next connection. Empty
+// names select the operating system defaults.
+func (e *Engine) SetAudioDevices(inputName, outputName string) {
+	e.mu.Lock()
+	e.audioInput = inputName
+	e.audioOutput = outputName
+	e.mu.Unlock()
 }
 
 // CreateChannel sends a create channel request (admin only).

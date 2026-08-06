@@ -6,6 +6,8 @@ import (
 	"errors"
 	"image"
 	"net"
+	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,6 +62,23 @@ type lifecycleEncoder struct{}
 
 func (*lifecycleEncoder) Encode([]int16) ([]byte, error) { return nil, nil }
 
+type configuredCapturer struct {
+	startErr error
+}
+
+func (c *configuredCapturer) Start() error              { return c.startErr }
+func (*configuredCapturer) ReadFrame() ([]int16, error) { return nil, errors.New("stopped") }
+func (*configuredCapturer) Stop() error                 { return nil }
+func (*configuredCapturer) Close() error                { return nil }
+
+type configuredPlayer struct {
+	startErr error
+}
+
+func (p *configuredPlayer) Start() error           { return p.startErr }
+func (*configuredPlayer) WriteFrame([]int16) error { return nil }
+func (*configuredPlayer) Stop() error              { return nil }
+
 type recordingPlayer struct {
 	frames [][]int16
 }
@@ -90,6 +109,81 @@ func setTestGeneration(e *Engine) *connectionGeneration {
 	e.generation = g
 	e.state = StateConnected
 	return g
+}
+
+func TestAudioInitializationUsesConfiguredDevices(t *testing.T) {
+	e := NewEngine()
+	var captureNames, playbackNames []string
+	e.newCaptureFn = func(name string) (audio.Capturer, error) {
+		captureNames = append(captureNames, name)
+		return &configuredCapturer{}, nil
+	}
+	e.newPlaybackFn = func(name string) (audio.Player, error) {
+		playbackNames = append(playbackNames, name)
+		return &configuredPlayer{}, nil
+	}
+	e.newEncoderFn = func() (audio.AudioEncoder, error) { return &lifecycleEncoder{}, nil }
+	e.SetAudioDevices("Studio Mic", "USB Headset")
+
+	resources, err := e.initAudioDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resources.close()
+	if got, want := captureNames, []string{"Studio Mic"}; !slices.Equal(got, want) {
+		t.Fatalf("capture device names = %q, want %q", got, want)
+	}
+	if got, want := playbackNames, []string{"USB Headset"}; !slices.Equal(got, want) {
+		t.Fatalf("playback device names = %q, want %q", got, want)
+	}
+}
+
+func TestAudioInitializationWarnsAndFallsBackForUnavailableDevice(t *testing.T) {
+	e := NewEngine()
+	var captureNames []string
+	e.newCaptureFn = func(name string) (audio.Capturer, error) {
+		captureNames = append(captureNames, name)
+		if name != "" {
+			return &configuredCapturer{startErr: errors.New("device unavailable")}, nil
+		}
+		return &configuredCapturer{}, nil
+	}
+	e.newPlaybackFn = func(string) (audio.Player, error) { return &configuredPlayer{}, nil }
+	e.newEncoderFn = func() (audio.AudioEncoder, error) { return &lifecycleEncoder{}, nil }
+	e.SetAudioDevices("Missing Mic", "")
+
+	resources, err := e.initAudioDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resources.close()
+	if got, want := captureNames, []string{"Missing Mic", ""}; !slices.Equal(got, want) {
+		t.Fatalf("capture device attempts = %q, want %q", got, want)
+	}
+	if len(resources.warnings) != 1 {
+		t.Fatalf("audio warnings = %d, want 1", len(resources.warnings))
+	}
+}
+
+func TestVADPrependsBufferedFramesWhenSpeechStarts(t *testing.T) {
+	e := NewEngine()
+	quietOne := []int16{10}
+	quietTwo := []int16{20}
+	voice := []int16{400}
+
+	if active, frames := e.captureFrames(quietOne); active || len(frames) != 0 {
+		t.Fatalf("first quiet frame: active=%v frames=%v", active, frames)
+	}
+	if active, frames := e.captureFrames(quietTwo); active || len(frames) != 0 {
+		t.Fatalf("second quiet frame: active=%v frames=%v", active, frames)
+	}
+	active, frames := e.captureFrames(voice)
+	if !active {
+		t.Fatal("voice frame did not activate VAD")
+	}
+	if got, want := frames, [][]int16{quietOne, quietTwo, voice}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("frames on VAD activation = %v, want %v", got, want)
+	}
 }
 
 func TestPlayoutMixesConcurrentSpeakersIntoOneFrame(t *testing.T) {

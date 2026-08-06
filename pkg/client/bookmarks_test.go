@@ -43,3 +43,27 @@ func TestBookmarkStoreLoadsFileWithoutTrustPins(t *testing.T) {
 		t.Fatalf("PinForAddr() = %q, want empty", got)
 	}
 }
+
+func TestBookmarkStoreMigratesLegacyFileToUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "legacy", "servers.yaml")
+	configPath := filepath.Join(dir, "config", "servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("bookmarks:\n  - name: old\n    control_addr: old.test:9600\n    token: secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &BookmarkStore{path: configPath, legacyPath: legacyPath}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Bookmarks) != 1 || store.Bookmarks[0].Token != "secret" {
+		t.Fatalf("migrated bookmarks = %#v", store.Bookmarks)
+	}
+	assertPrivateFile(t, configPath)
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy bookmarks still exist: %v", err)
+	}
+}

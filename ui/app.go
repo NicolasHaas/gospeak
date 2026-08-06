@@ -95,6 +95,7 @@ func NewApp() *App {
 	}
 	a.bookmarks.Load() //nolint:errcheck,gosec // best-effort load
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
+	a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 	a.window = a.fyneApp.NewWindow("GoSpeak")
 	a.window.Resize(fyne.NewSize(800, 600))
 	a.window.SetMaster()
@@ -1200,6 +1201,8 @@ func (a *App) showSettingsDialog() {
 			if err := a.settings.Save(); err != nil {
 				slog.Error("save settings", "err", err)
 			}
+			a.engine.SetVADThreshold(a.settings.VADThreshold)
+			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 
 			// Update global hotkeys live
 			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
