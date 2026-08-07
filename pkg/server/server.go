@@ -65,7 +65,7 @@ type Server struct {
 	voiceConn     *net.UDPConn
 	screenConn    net.Listener
 	screenMu      sync.RWMutex
-	screenConns   map[uint32]net.Conn
+	screenConns   map[uint32]*screenClientConn
 	voiceKey      []byte // shared AES-128 key for all voice encryption
 	authLimiter   *authRateLimiter
 	preAuthMu     sync.Mutex
@@ -96,7 +96,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		channels:      NewChannelManager(),
 		screenShare:   NewScreenShareManager(),
 		metrics:       NewMetrics(),
-		screenConns:   make(map[uint32]net.Conn),
+		screenConns:   make(map[uint32]*screenClientConn),
 		voiceStats:    make(map[uint32]*perSessionVoiceStat),
 		store:         deps.Store,
 		authLimiter:   newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
@@ -168,45 +168,123 @@ func (s *Server) closeAcceptedConns() {
 	}
 }
 
-func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) {
-	s.screenMu.Lock()
-	old := s.screenConns[sessionID]
-	s.screenConns[sessionID] = conn
-	s.screenMu.Unlock()
-	if old != nil && old != conn {
-		_ = old.Close()
+const screenWriteTimeout = 2 * time.Second
+
+type screenClientConn struct {
+	conn      net.Conn
+	outbound  chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *screenClientConn) close() {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
+}
+
+func (c *screenClientConn) enqueue(frame []byte) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	select {
+	case c.outbound <- frame:
+		return true
+	default:
+	}
+	select {
+	case <-c.outbound:
+	default:
+	}
+	select {
+	case c.outbound <- frame:
+		return true
+	case <-c.done:
+		return false
+	default:
+		return false
 	}
 }
 
-func (s *Server) removeScreenConn(sessionID uint32, conn net.Conn) {
+func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) *screenClientConn {
+	client := &screenClientConn{
+		conn:     conn,
+		outbound: make(chan []byte, 1),
+		done:     make(chan struct{}),
+	}
+	s.screenMu.Lock()
+	old := s.screenConns[sessionID]
+	s.screenConns[sessionID] = client
+	s.screenMu.Unlock()
+	if old != nil {
+		old.close()
+	}
+	go s.writeScreenPackets(sessionID, client)
+	return client
+}
+
+func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) {
+	for {
+		select {
+		case frame := <-client.outbound:
+			if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
+				slog.Error("set screen write deadline", "session", sessionID, "err", err)
+				s.removeScreenConn(sessionID, client)
+				return
+			}
+			if err := protocol.WriteScreenPacketFrame(client.conn, frame); err != nil {
+				slog.Warn("screen write failed", "session", sessionID, "err", err)
+				s.removeScreenConn(sessionID, client)
+				return
+			}
+		case <-client.done:
+			return
+		}
+	}
+}
+
+func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
 	s.screenMu.Lock()
 	current := s.screenConns[sessionID]
-	if current == conn {
+	if current == client {
 		delete(s.screenConns, sessionID)
 	}
 	s.screenMu.Unlock()
+	client.close()
 }
 
 func (s *Server) sendScreenPacketToSession(sessionID uint32, pkt *protocol.ScreenPacket) bool {
+	frame, err := protocol.MarshalScreenPacketFrame(pkt)
+	if err != nil {
+		slog.Error("marshal screen packet", "session", sessionID, "err", err)
+		return false
+	}
+	return s.sendScreenFrameToSession(sessionID, frame)
+}
+
+func (s *Server) sendScreenFrameToSession(sessionID uint32, frame []byte) bool {
 	s.screenMu.RLock()
-	conn, ok := s.screenConns[sessionID]
+	client, ok := s.screenConns[sessionID]
 	s.screenMu.RUnlock()
 	if !ok {
 		return false
 	}
-	if err := protocol.WriteScreenPacket(conn, pkt); err != nil {
-		slog.Error("screen write failed", "session", sessionID, "err", err)
-		return false
-	}
-	return true
+	return client.enqueue(frame)
 }
 
 func (s *Server) closeScreenConns() {
 	s.screenMu.Lock()
-	defer s.screenMu.Unlock()
-	for sessionID, conn := range s.screenConns {
-		_ = conn.Close()
-		delete(s.screenConns, sessionID)
+	clients := make([]*screenClientConn, 0, len(s.screenConns))
+	for _, client := range s.screenConns {
+		clients = append(clients, client)
+	}
+	s.screenConns = make(map[uint32]*screenClientConn)
+	s.screenMu.Unlock()
+	for _, client := range clients {
+		client.close()
 	}
 }
 

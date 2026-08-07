@@ -63,21 +63,46 @@ func UnmarshalScreenPacket(data []byte) (*ScreenPacket, error) {
 }
 
 func WriteScreenPacket(w io.Writer, pkt *ScreenPacket) error {
+	frame, err := MarshalScreenPacketFrame(pkt)
+	if err != nil {
+		return err
+	}
+	return WriteScreenPacketFrame(w, frame)
+}
+
+// MarshalScreenPacketFrame returns one immutable length-prefixed wire frame.
+func MarshalScreenPacketFrame(pkt *ScreenPacket) ([]byte, error) {
+	if pkt == nil {
+		return nil, errors.New("protocol: nil screen packet")
+	}
 	data := pkt.Marshal()
 	if len(data) > MaxScreenPacket {
-		return fmt.Errorf("protocol: screen packet too large: %d bytes", len(data))
+		return nil, fmt.Errorf("protocol: screen packet too large: %d bytes", len(data))
 	}
 	n, err := checkUint32(len(data))
 	if err != nil {
-		return fmt.Errorf("protocol: write screen length: %w", err)
+		return nil, fmt.Errorf("protocol: write screen length: %w", err)
 	}
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, n)
-	if _, err := w.Write(lenBuf); err != nil {
-		return fmt.Errorf("protocol: write screen length: %w", err)
-	}
-	if _, err := w.Write(data); err != nil {
-		return fmt.Errorf("protocol: write screen payload: %w", err)
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], n)
+	copy(frame[4:], data)
+	return frame, nil
+}
+
+// WriteScreenPacketFrame writes a frame returned by MarshalScreenPacketFrame.
+func WriteScreenPacketFrame(w io.Writer, frame []byte) error {
+	for len(frame) > 0 {
+		n, err := w.Write(frame)
+		if n < 0 || n > len(frame) {
+			return fmt.Errorf("protocol: invalid screen write count: %d", n)
+		}
+		frame = frame[n:]
+		if err != nil {
+			return fmt.Errorf("protocol: write screen frame: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("protocol: write screen frame: %w", io.ErrShortWrite)
+		}
 	}
 	return nil
 }
