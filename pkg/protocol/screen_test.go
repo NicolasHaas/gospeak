@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+type shortScreenWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	writes   int
+}
+
+func (w *shortScreenWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if len(p) > w.maxWrite {
+		p = p[:w.maxWrite]
+	}
+	return w.buf.Write(p)
+}
+
 func TestScreenPacketRoundTrip(t *testing.T) {
 	original := &ScreenPacket{
 		SessionID: 42,
@@ -88,5 +102,23 @@ func TestMarshalScreenFrame_RejectsInvalidFormat(t *testing.T) {
 	_, err := MarshalScreenFrame(&ScreenFrame{Format: "", Data: []byte{1}})
 	if err == nil {
 		t.Fatalf("MarshalScreenFrame() error = nil, want non-nil")
+	}
+}
+
+func TestWriteScreenPacketHandlesShortWrites(t *testing.T) {
+	pkt := &ScreenPacket{SessionID: 42, SeqNum: 7, Payload: []byte("ciphertext")}
+	w := &shortScreenWriter{maxWrite: 3}
+	if err := WriteScreenPacket(w, pkt); err != nil {
+		t.Fatalf("WriteScreenPacket: %v", err)
+	}
+	if w.writes < 2 {
+		t.Fatalf("Write calls = %d, want multiple short writes", w.writes)
+	}
+	got, err := ReadScreenPacket(&w.buf)
+	if err != nil {
+		t.Fatalf("ReadScreenPacket: %v", err)
+	}
+	if got.SessionID != pkt.SessionID || got.SeqNum != pkt.SeqNum || !bytes.Equal(got.Payload, pkt.Payload) {
+		t.Fatalf("round trip = %#v, want %#v", got, pkt)
 	}
 }

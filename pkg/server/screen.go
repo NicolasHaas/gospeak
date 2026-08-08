@@ -80,8 +80,8 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 	}
 	s.finishPreAuth(conn)
 
-	s.setScreenConn(auth.SessionID, conn)
-	defer s.removeScreenConn(auth.SessionID, conn)
+	client := s.setScreenConn(auth.SessionID, conn)
+	defer s.removeScreenConn(auth.SessionID, client)
 
 	for {
 		pkt, err := protocol.ReadScreenPacket(conn)
@@ -112,13 +112,18 @@ func (s *Server) handleScreenPacket(sessionID uint32, pkt *protocol.ScreenPacket
 	}
 
 	pkt.SessionID = sessionID
+	frame, err := protocol.MarshalScreenPacketFrame(pkt)
+	if err != nil {
+		slog.Error("marshal screen packet", "session", sessionID, "err", err)
+		return
+	}
 	s.metrics.ScreenShareFramesIn.Add(1)
 	s.metrics.ScreenShareBytesIn.Add(int64(len(pkt.Payload)))
 
 	viewers := s.screenShare.SubscribersForSharer(sessionID)
 	forwarded := 0
 	for _, viewerSessionID := range viewers {
-		if s.sendScreenPacketToSession(viewerSessionID, pkt) {
+		if s.sendScreenFrameToSession(viewerSessionID, frame) {
 			forwarded++
 		}
 	}

@@ -116,10 +116,14 @@ func (m *ScreenShareManager) stopBySessionLocked(sessionID uint32) (*pb.ScreenSh
 	delete(m.channelBySession, sessionID)
 	delete(m.lastFrameAt, sessionID)
 	for viewer := range m.authorizedByShare[sessionID] {
-		delete(m.authorizedTarget, viewer)
+		if m.authorizedTarget[viewer] == sessionID {
+			delete(m.authorizedTarget, viewer)
+		}
 	}
 	for viewer := range m.subscribersByShare[sessionID] {
-		delete(m.viewerTarget, viewer)
+		if m.viewerTarget[viewer] == sessionID {
+			delete(m.viewerTarget, viewer)
+		}
 	}
 	delete(m.authorizedByShare, sessionID)
 	delete(m.subscribersByShare, sessionID)
@@ -185,6 +189,7 @@ func (m *ScreenShareManager) ShareWithViewers(sharerSessionID uint32, viewerSess
 		if m.authorizedTarget[viewerSessionID] == sharerSessionID {
 			continue
 		}
+		m.removeViewerLocked(viewerSessionID)
 		m.authorizedByShare[sharerSessionID][viewerSessionID] = true
 		m.authorizedTarget[viewerSessionID] = sharerSessionID
 		shared = append(shared, viewerSessionID)

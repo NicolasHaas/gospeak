@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
@@ -33,15 +34,25 @@ func NewScreenClientContext(ctx context.Context, addr string, sessionID uint32, 
 	}
 
 	dialer := &tls.Dialer{Config: tlsCfg}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	conn, err := dialer.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: connect screen: %w", err)
 	}
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopCancel()
+	if err := conn.SetWriteDeadline(time.Now().Add(connectTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("client: set screen auth deadline: %w", err)
+	}
 	if err := protocol.WriteScreenAuth(conn, &protocol.ScreenAuth{SessionID: sessionID, Token: authToken}); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: authenticate screen: %w", err)
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("client: clear screen auth deadline: %w", err)
 	}
 
 	return &ScreenClient{conn: conn, done: make(chan struct{})}, nil
