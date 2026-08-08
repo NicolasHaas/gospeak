@@ -13,6 +13,24 @@ const voiceRebindInterval = 5 * time.Second
 
 // StartVoice starts the UDP voice forwarder.
 func (s *Server) StartVoice() error {
+	if !s.beginTask() {
+		return fmt.Errorf("server: start voice: %w", s.ctx.Err())
+	}
+	defer s.endTask()
+
+	s.listenerMu.Lock()
+	if s.voiceStarting || s.voiceConn != nil {
+		s.listenerMu.Unlock()
+		return fmt.Errorf("server: voice already started")
+	}
+	s.voiceStarting = true
+	s.listenerMu.Unlock()
+	defer func() {
+		s.listenerMu.Lock()
+		s.voiceStarting = false
+		s.listenerMu.Unlock()
+	}()
+
 	addr, err := net.ResolveUDPAddr("udp", s.cfg.VoiceAddr)
 	if err != nil {
 		return fmt.Errorf("server: resolve voice addr: %w", err)
@@ -22,7 +40,9 @@ func (s *Server) StartVoice() error {
 	if err != nil {
 		return fmt.Errorf("server: listen voice: %w", err)
 	}
+	s.listenerMu.Lock()
 	s.voiceConn = conn
+	s.listenerMu.Unlock()
 
 	// Increase UDP buffer size for better performance
 	if err := conn.SetReadBuffer(1024 * 1024); err != nil {
@@ -34,13 +54,16 @@ func (s *Server) StartVoice() error {
 
 	slog.Info("voice plane listening", "addr", s.cfg.VoiceAddr)
 
-	go s.voiceLoop()
+	if !s.startWorker(func() { s.voiceLoop(conn) }) {
+		_ = conn.Close()
+		return fmt.Errorf("server: start voice worker: %w", s.ctx.Err())
+	}
 	return nil
 }
 
 // voiceLoop reads UDP voice packets and forwards them to channel members.
 // This is an SFU (Selective Forwarding Unit) - no decryption, no mixing.
-func (s *Server) voiceLoop() {
+func (s *Server) voiceLoop(conn *net.UDPConn) {
 	buf := make([]byte, protocol.VoiceHeaderSize+protocol.MaxVoicePayload)
 
 	for {
@@ -50,7 +73,7 @@ func (s *Server) voiceLoop() {
 		default:
 		}
 
-		n, remoteAddr, err := s.voiceConn.ReadFromUDP(buf)
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-s.ctx.Done():
@@ -139,7 +162,7 @@ func (s *Server) voiceLoop() {
 				continue // don't send to deafened users
 			}
 
-			_, err := s.voiceConn.WriteToUDP(rawPacket, memberSession.UDPAddr)
+			_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
 			if err != nil {
 				slog.Debug("voice forward error", "target", memberSID, "err", err)
 			} else {

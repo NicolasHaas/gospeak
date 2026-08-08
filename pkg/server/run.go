@@ -14,11 +14,14 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/model"
 )
 
+const metricsShutdownTimeout = 5 * time.Second
+
 // Run starts the server and blocks until shutdown signal.
 func (s *Server) Run() error {
 	if s.store == nil {
 		return fmt.Errorf("server: missing store dependency")
 	}
+	defer s.Shutdown()
 	st := s.store
 
 	// Generate shared voice encryption key
@@ -66,16 +69,18 @@ func (s *Server) Run() error {
 		}
 	}
 
+	if s.cfg.MetricsAddr != "" {
+		// Start Prometheus metrics HTTP endpoint
+		if err := s.startMetricsHTTP(); err != nil {
+			return err
+		}
+	}
+
 	slog.Info("GoSpeak server running",
 		"control", s.cfg.ControlAddr,
 		"voice", s.cfg.VoiceAddr,
 		"screen", s.cfg.ScreenAddr,
 	)
-
-	if s.cfg.MetricsAddr != "" {
-		// Start Prometheus metrics HTTP endpoint
-		s.StartMetricsHTTP()
-	}
 
 	// Start periodic voice debug logging (only when log level is debug)
 	if s.voiceDebugEnabled {
@@ -85,27 +90,58 @@ func (s *Server) Run() error {
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	slog.Info("shutting down...")
-	s.Shutdown()
+	defer signal.Stop(sigCh)
+	select {
+	case <-sigCh:
+		slog.Info("shutting down...")
+	case <-s.ctx.Done():
+	}
 	return nil
 }
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown() {
-	s.cancel()
-	if s.controlConn != nil {
-		_ = s.controlConn.Close()
-	}
-	if s.voiceConn != nil {
-		_ = s.voiceConn.Close()
-	}
-	if s.screenConn != nil {
-		_ = s.screenConn.Close()
-	}
-	s.closeAcceptedConns()
-	s.closeScreenConns()
+	s.shutdownOnce.Do(func() {
+		s.workerMu.Lock()
+		s.stopping = true
+		s.cancel()
+		s.workerMu.Unlock()
+
+		s.metricsMu.Lock()
+		metricsHTTP := s.metricsHTTP
+		metricsConn := s.metricsConn
+		s.metricsHTTP = nil
+		s.metricsConn = nil
+		s.metricsMu.Unlock()
+		if metricsHTTP != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+			if err := metricsHTTP.Shutdown(ctx); err != nil {
+				_ = metricsHTTP.Close()
+			}
+			cancel()
+		}
+		if metricsConn != nil {
+			_ = metricsConn.Close()
+		}
+
+		s.listenerMu.Lock()
+		screenConn := s.screenConn
+		voiceConn := s.voiceConn
+		controlConn := s.controlConn
+		s.listenerMu.Unlock()
+		if screenConn != nil {
+			_ = screenConn.Close()
+		}
+		if voiceConn != nil {
+			_ = voiceConn.Close()
+		}
+		if controlConn != nil {
+			_ = controlConn.Close()
+		}
+		s.closeAcceptedConns()
+		s.closeScreenConns()
+		s.workers.Wait()
+	})
 }
 
 // ensureAdminToken creates an admin token only on first run (no tokens exist).

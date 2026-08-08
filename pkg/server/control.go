@@ -63,14 +63,12 @@ type controlClient struct {
 }
 
 func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
-	client := &controlClient{
+	return &controlClient{
 		Conn:      conn,
 		sessionID: sessionID,
 		sendQueue: make(chan queuedControlMessage, controlSendQueueSize),
 		done:      make(chan struct{}),
 	}
-	go client.writeLoop()
-	return client
 }
 
 func (c *controlClient) send(msg *pb.ControlMessage) error {
@@ -250,6 +248,10 @@ func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHa
 // setConn registers a connection with a dedicated serialized writer.
 func (ch *ControlHandler) setConn(sessionID uint32, conn net.Conn) *controlClient {
 	client := newControlClient(sessionID, conn)
+	if !ch.server.startWorker(client.writeLoop) {
+		_ = client.Close()
+		return client
+	}
 	ch.mu.Lock()
 	previous := ch.connMap[sessionID]
 	ch.connMap[sessionID] = client
@@ -323,6 +325,24 @@ func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMes
 
 // StartControl starts the TCP/TLS control listener.
 func (s *Server) StartControl(st datastore.DataProviderFactory) error {
+	if !s.beginTask() {
+		return fmt.Errorf("server: start control: %w", s.ctx.Err())
+	}
+	defer s.endTask()
+
+	s.listenerMu.Lock()
+	if s.controlStarting || s.controlConn != nil {
+		s.listenerMu.Unlock()
+		return fmt.Errorf("server: control already started")
+	}
+	s.controlStarting = true
+	s.listenerMu.Unlock()
+	defer func() {
+		s.listenerMu.Lock()
+		s.controlStarting = false
+		s.listenerMu.Unlock()
+	}()
+
 	cert, err := loadOrGenerateTLS(s.cfg)
 	if err != nil {
 		return fmt.Errorf("server: tls: %w", err)
@@ -337,15 +357,20 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 	if err != nil {
 		return fmt.Errorf("server: listen control: %w", err)
 	}
+	s.listenerMu.Lock()
 	s.controlConn = ln
+	s.listenerMu.Unlock()
 
 	handler := newControlHandler(s, st)
 	slog.Info("control plane listening", "addr", s.cfg.ControlAddr)
 	if s.cfg.EnableScreenShare {
-		go s.runScreenShareJanitor(handler)
+		if !s.startWorker(func() { s.runScreenShareJanitor(handler) }) {
+			_ = ln.Close()
+			return fmt.Errorf("server: start screen-share janitor: %w", s.ctx.Err())
+		}
 	}
 
-	go func() {
+	if !s.startWorker(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -362,9 +387,16 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 				_ = conn.Close()
 				continue
 			}
-			go s.handleControlConn(handler, conn, st)
+			acceptedConn := conn
+			if !s.startWorker(func() { s.handleControlConn(handler, acceptedConn, st) }) {
+				s.forgetAcceptedConn(conn)
+				_ = conn.Close()
+			}
 		}
-	}()
+	}) {
+		_ = ln.Close()
+		return fmt.Errorf("server: start control worker: %w", s.ctx.Err())
+	}
 
 	return nil
 }
@@ -413,6 +445,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	rateLimitKey := authRateLimitKey(conn.RemoteAddr())
 	s.metrics.TotalConnections.Add(1)
 	s.metrics.ActiveConnections.Add(1)
+	defer s.metrics.ActiveConnections.Add(-1)
 	slog.Debug("new control connection", "remote", remoteAddr)
 
 	// Rate limit failed authentication attempts per remote IP.
@@ -574,7 +607,6 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		handler.removeConn(sessionID)
 		s.sessions.Remove(sessionID)
 		s.removeVoiceStat(sessionID)
-		s.metrics.ActiveConnections.Add(-1)
 		s.metrics.TotalDisconnects.Add(1)
 		slog.Info("client disconnected", "user", user.Username, "session", sessionID)
 
@@ -1195,8 +1227,14 @@ func (s *Server) cleanupTempChannel(channelID int64, st datastore.DataProviderFa
 		return
 	}
 
-	go func() {
-		time.Sleep(5 * time.Minute)
+	s.startWorker(func() {
+		timer := time.NewTimer(5 * time.Minute)
+		defer timer.Stop()
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+		}
 		// Re-check after grace period
 		if s.channels.MembersCount(channelID) > 0 {
 			return
@@ -1206,7 +1244,7 @@ func (s *Server) cleanupTempChannel(channelID int64, st datastore.DataProviderFa
 			return
 		}
 		slog.Debug("auto-deleted empty temp channel after 5m", "name", ch.Name, "id", channelID)
-	}()
+	})
 }
 
 func sendError(conn net.Conn, code int32, message string) {
