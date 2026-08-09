@@ -8,7 +8,7 @@
 #   podman compose --profile build-lin run --build builder-lin  — Linux only   → ./bin/
 #   podman compose --profile dev       run --build lint         — golangci-lint
 #   podman compose --profile dev       run --build test         — go test -race
-#   podman compose --profile monitor   up -d                   — Prometheus + Grafana
+#   See compose.monitoring.yaml for the opt-in Prometheus + Grafana stack.
 #
 # NOTE: always use --build on "run" to ensure the latest source is compiled.
 #
@@ -26,7 +26,7 @@ services:
       - "9600:9600"      # TCP/TLS control plane
       - "9601:9601/udp"  # UDP voice plane
       - "9603:9603"      # TCP/TLS screen-share plane (used when -screen-share is enabled)
-      - "9602:9602"      # Prometheus /metrics HTTP
+    command: ["-metrics", "${GOSPEAK_METRICS_ADDR:-}"]
     volumes:
       - ./data:/data
     restart: unless-stopped
@@ -119,39 +119,3 @@ services:
       - |
         gofmt -w . && \
         go test -v -tags nolibopusfile -race -timeout=5m ./...
-
-  # --- Monitoring stack (activate with --profile monitor) ---
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: gospeak-prometheus
-    profiles:
-      - monitor
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: gospeak-grafana
-    profiles:
-      - monitor
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: gospeak
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/gospeak.json
-    volumes:
-      - ./deploy/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
-      - ./deploy/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
-      - ./docs/grafana-dashboard.json:/var/lib/grafana/dashboards/gospeak.json:ro
-      - grafana-data:/var/lib/grafana
-    restart: unless-stopped
-
-volumes:
-  prometheus-data:
-  grafana-data:

@@ -67,7 +67,7 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(empty)* | YAML file defining channels created on startup |
-| `-metrics` | `:9602` | Prometheus /metrics bind address (empty to disable) |
+| `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` bind address; disabled by default |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
@@ -78,4 +78,4 @@ These flags map directly to `gospeak-server` and are all supported options.
 - `9600/tcp`: TLS control plane
 - `9601/udp`: encrypted voice
 - `9603/tcp`: encrypted screen-share relay (required when `-screen-share` is enabled)
-- `9602/tcp`: metrics (optional; not exposed by default)
+- `9602/tcp`: optional plaintext metrics and health HTTP. It is disabled and not published by default; if enabled, bind it to a trusted interface or protect it with a firewall or reverse proxy.

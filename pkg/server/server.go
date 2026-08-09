@@ -46,7 +46,7 @@ func DefaultConfig() Config {
 		ControlAddr:           ":9600",
 		VoiceAddr:             ":9601",
 		ScreenAddr:            ":9603",
-		MetricsAddr:           ":9602",
+		MetricsAddr:           "",
 		DBPath:                "gospeak.db",
 		DataDir:               ".",
 		PreAuthTimeout:        10 * time.Second,

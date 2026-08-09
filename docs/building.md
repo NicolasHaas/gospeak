@@ -115,7 +115,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(none)* | YAML file defining channels to create on startup |
-| `-metrics` | `:9602` | HTTP bind address for Prometheus /metrics (empty to disable) |
+| `-metrics` | *(empty)* | HTTP bind address for Prometheus `/metrics` and `/healthz`; disabled by default |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 

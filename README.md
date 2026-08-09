@@ -36,7 +36,18 @@ The server listens on:
 - **TCP :9600**: TLS control plane
 - **UDP :9601**: Encrypted voice
 - **TCP :9603**: Encrypted screen-share relay
-- **TCP :9602**: Prometheus metrics HTTP
+- **Metrics**: disabled by default; enable with `-metrics :9602` and keep the plaintext endpoint on a trusted network
+
+The bundled monitoring overlay enables metrics only on the Compose network and does not publish port 9602 on the host:
+
+```bash
+GOSPEAK_METRICS_ADDR=:9602 \
+GRAFANA_ADMIN_PASSWORD='<choose-password>' \
+docker compose -f compose.yaml -f compose.monitoring.yaml up -d
+```
+
+Grafana is then available only on `127.0.0.1:3000`. Prometheus is not published
+on the host.
 
 On first run, an **admin token** is printed to stdout — save it to create more tokens and manage the server.
 
@@ -115,7 +126,7 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | | YAML file for initial channel setup |
 | `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data` |
-| `-metrics` | `:9602` | Prometheus /metrics HTTP endpoint (empty to disable) |
+| `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` HTTP bind address; opt in with a trusted bind such as `127.0.0.1:9602` |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level |
