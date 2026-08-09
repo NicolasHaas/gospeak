@@ -630,6 +630,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	// Build channel list
 	channels, _ := st.NonTx().ListChannels()
 	channelInfos := s.buildChannelInfos(channels)
+	screenAddr := ""
+	screenAuthToken := ""
+	if s.cfg.EnableScreenShare {
+		screenAddr = s.cfg.ScreenAddr
+		screenAuthToken = session.ScreenAuthToken
+	}
 
 	// Send auth response
 	authResp := &pb.ControlMessage{
@@ -641,8 +647,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			EncryptionKey:        s.voiceKey,
 			VoiceRegistrationKey: append([]byte(nil), session.VoiceRegistrationKey...),
 			Channels:             channelInfos,
-			ScreenAddr:           s.cfg.ScreenAddr,
-			ScreenAuthToken:      session.ScreenAuthToken,
+			ScreenAddr:           screenAddr,
+			ScreenAuthToken:      screenAuthToken,
 			ScreenShareEnabled:   s.cfg.EnableScreenShare,
 			AutoToken:            autoToken,
 		},

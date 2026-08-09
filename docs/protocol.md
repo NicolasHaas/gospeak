@@ -64,13 +64,13 @@ sequenceDiagram
         S->>S: Create user + personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenAddr, screenAuthToken, channels, autoToken}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken}
         Note over C: Store personal token for reconnect
     else Existing user
         S->>S: Require personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenAddr, screenAuthToken, channels}
+        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels}
     else Invalid token / banned
         S->>C: ErrorResponse{code, message}
         S->>S: Close connection
@@ -255,8 +255,8 @@ Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 ### Connection Flow
 
 1. Client authenticates on the control plane.
-2. Server returns `screen_addr` and a session-scoped `screen_auth_token`.
-3. Client opens the screen-plane TLS connection and authenticates with that token.
+2. When screen sharing is enabled, the server sets `screen_share_enabled` and returns `screen_addr` plus a session-scoped `screen_auth_token`. These optional fields are omitted when the feature is disabled.
+3. The client opens the screen-plane TLS connection only when `screen_share_enabled` is true, then authenticates with the token.
 4. Screen-share start/stop/subscribe still happen on the control plane.
 5. Actual encrypted frame packets flow over the screen plane.
 

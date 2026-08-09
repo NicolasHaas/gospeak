@@ -125,12 +125,16 @@ sequenceDiagram
     Srv->>Store: Ensure admin token exists (first run only)
     Srv->>TLS: StartControl(:9600)
     Srv->>UDP: StartVoice(:9601)
-    Srv->>SCR: StartScreen(:9603)
+    opt screen sharing enabled
+        Srv->>SCR: StartScreen(:9603)
+    end
     Note over Srv: Server running — accepting connections
     Srv-->>Main: Block until SIGINT/SIGTERM
     Srv->>TLS: Close
     Srv->>UDP: Close
-    Srv->>SCR: Close
+    opt screen sharing enabled
+        Srv->>SCR: Close
+    end
     Srv->>Store: Close
 ```
 
@@ -149,11 +153,13 @@ sequenceDiagram
     Eng->>TLS: Dial TCP/TLS (skip verify for self-signed)
     TLS->>Srv: TLS 1.3 Handshake
     Eng->>Srv: AuthRequest{token?, username}
-    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, screenAddr, screenAuthToken, channels, autoToken?}
+    Srv->>Eng: AuthResponse{sessionID, role, encryptionKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken?}
     Note over Eng: Store autoToken for future logins
     Eng->>Eng: Create VoiceCipher from encryptionKey
     Eng->>UDP: Dial UDP to server:9601
-    Eng->>SCR: Dial TCP/TLS to server:9603
+    opt screenShareEnabled
+        Eng->>SCR: Dial TCP/TLS to screenAddr and authenticate with screenAuthToken
+    end
     Eng->>Eng: Start audio capture + playback
     Eng->>UI: OnStateChange(Connected)
     Eng->>UI: OnChannelsUpdate(channels)

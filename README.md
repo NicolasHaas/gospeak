@@ -35,7 +35,7 @@ docker compose up --build
 The server listens on:
 - **TCP :9600**: TLS control plane
 - **UDP :9601**: Encrypted voice
-- **TCP :9603**: Encrypted screen-share relay
+- **Screen sharing**: disabled by default; `-screen-share` enables the encrypted TCP relay on `:9603`
 - **Metrics**: disabled by default; enable with `-metrics :9602` and keep the plaintext endpoint on a trusted network
 
 The bundled monitoring overlay enables metrics only on the Compose network and does not publish port 9602 on the host:
