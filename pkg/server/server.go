@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -55,22 +56,33 @@ func DefaultConfig() Config {
 
 // Server is the main GoSpeak server.
 type Server struct {
-	cfg           Config
-	sessions      *SessionManager
-	channels      *ChannelManager
-	screenShare   *ScreenShareManager
-	metrics       *Metrics
-	store         datastore.DataProviderFactory
-	controlConn   net.Listener
-	voiceConn     *net.UDPConn
-	screenConn    net.Listener
-	screenMu      sync.RWMutex
-	screenConns   map[uint32]*screenClientConn
-	voiceKey      []byte // shared AES-128 key for all voice encryption
-	authLimiter   *authRateLimiter
-	preAuthMu     sync.Mutex
-	acceptedConns map[net.Conn]trackedConn
-	preAuthCount  map[preAuthPlane]int
+	cfg             Config
+	sessions        *SessionManager
+	channels        *ChannelManager
+	screenShare     *ScreenShareManager
+	metrics         *Metrics
+	store           datastore.DataProviderFactory
+	listenerMu      sync.Mutex
+	controlConn     net.Listener
+	voiceConn       *net.UDPConn
+	screenConn      net.Listener
+	controlStarting bool
+	voiceStarting   bool
+	screenStarting  bool
+	metricsMu       sync.Mutex
+	metricsHTTP     *http.Server
+	metricsConn     net.Listener
+	shutdownOnce    sync.Once
+	workerMu        sync.Mutex
+	workers         sync.WaitGroup
+	stopping        bool
+	screenMu        sync.RWMutex
+	screenConns     map[uint32]*screenClientConn
+	voiceKey        []byte // shared AES-128 key for all voice encryption
+	authLimiter     *authRateLimiter
+	preAuthMu       sync.Mutex
+	acceptedConns   map[net.Conn]trackedConn
+	preAuthCount    map[preAuthPlane]int
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -105,6 +117,45 @@ func New(cfg Config, deps Dependencies) *Server {
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+}
+
+// beginTask registers server-owned work unless shutdown has begun.
+func (s *Server) beginTask() bool {
+	s.workerMu.Lock()
+	if s.stopping {
+		s.workerMu.Unlock()
+		return false
+	}
+	s.workers.Add(1)
+	s.workerMu.Unlock()
+	return true
+}
+
+func (s *Server) endTask() {
+	s.workers.Done()
+}
+
+// startWorker starts and tracks a server-owned goroutine.
+func (s *Server) startWorker(worker func()) bool {
+	if !s.beginTask() {
+		return false
+	}
+	go func() {
+		defer s.endTask()
+		worker()
+	}()
+	return true
+}
+
+func (s *Server) trackHTTPHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.beginTask() {
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		defer s.endTask()
+		handler.ServeHTTP(w, r)
+	})
 }
 
 type preAuthPlane string
@@ -222,7 +273,9 @@ func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) *screenClientCon
 	if old != nil {
 		old.close()
 	}
-	go s.writeScreenPackets(sessionID, client)
+	if !s.startWorker(func() { s.writeScreenPackets(sessionID, client) }) {
+		s.removeScreenConn(sessionID, client)
+	}
 	return client
 }
 

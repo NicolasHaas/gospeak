@@ -3,19 +3,28 @@ package server
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
 
-// StartMetricsHTTP starts a lightweight HTTP server that exposes /metrics
-// in Prometheus text exposition format. It runs in the background and
-// shuts down when the server context is cancelled.
-//
-// Bind address is :9602 by default — configurable via Config.MetricsAddr.
+// StartMetricsHTTP starts the metrics endpoint and logs startup failures.
+// Run uses startMetricsHTTP directly so startup failures can be returned.
 func (s *Server) StartMetricsHTTP() {
+	if err := s.startMetricsHTTP(); err != nil {
+		slog.Error("start metrics HTTP", "err", err)
+	}
+}
+
+func (s *Server) startMetricsHTTP() error {
+	if !s.beginTask() {
+		return fmt.Errorf("server: start metrics: %w", s.ctx.Err())
+	}
+	defer s.endTask()
+
 	addr := s.cfg.MetricsAddr
 	if addr == "" {
-		return // metrics endpoint disabled
+		return nil // metrics endpoint disabled
 	}
 
 	mux := http.NewServeMux()
@@ -27,21 +36,44 @@ func (s *Server) StartMetricsHTTP() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           s.trackHTTPHandler(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	var listenConfig net.ListenConfig
+	ln, err := listenConfig.Listen(s.ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("server: listen metrics: %w", err)
+	}
 
-	go func() {
-		slog.Info("metrics HTTP listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	s.metricsMu.Lock()
+	if err := s.ctx.Err(); err != nil {
+		s.metricsMu.Unlock()
+		_ = ln.Close()
+		return fmt.Errorf("server: start metrics: %w", err)
+	}
+	if s.metricsHTTP != nil {
+		s.metricsMu.Unlock()
+		_ = ln.Close()
+		return fmt.Errorf("server: metrics already started")
+	}
+	s.metricsHTTP = srv
+	s.metricsConn = ln
+	s.metricsMu.Unlock()
+
+	if !s.startWorker(func() {
+		slog.Info("metrics HTTP listening", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("metrics HTTP error", "err", err)
 		}
-	}()
-
-	go func() {
-		<-s.ctx.Done()
-		_ = srv.Close()
-	}()
+	}) {
+		s.metricsMu.Lock()
+		s.metricsHTTP = nil
+		s.metricsConn = nil
+		s.metricsMu.Unlock()
+		_ = ln.Close()
+		return fmt.Errorf("server: start metrics worker: %w", s.ctx.Err())
+	}
+	return nil
 }
 
 // handleMetrics writes all metrics in Prometheus text exposition format.

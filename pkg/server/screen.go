@@ -13,6 +13,24 @@ import (
 
 // StartScreen starts the TCP/TLS screen-share relay listener.
 func (s *Server) StartScreen() error {
+	if !s.beginTask() {
+		return fmt.Errorf("server: start screen: %w", s.ctx.Err())
+	}
+	defer s.endTask()
+
+	s.listenerMu.Lock()
+	if s.screenStarting || s.screenConn != nil {
+		s.listenerMu.Unlock()
+		return fmt.Errorf("server: screen already started")
+	}
+	s.screenStarting = true
+	s.listenerMu.Unlock()
+	defer func() {
+		s.listenerMu.Lock()
+		s.screenStarting = false
+		s.listenerMu.Unlock()
+	}()
+
 	cert, err := loadOrGenerateTLS(s.cfg)
 	if err != nil {
 		return fmt.Errorf("server: screen tls: %w", err)
@@ -27,10 +45,12 @@ func (s *Server) StartScreen() error {
 	if err != nil {
 		return fmt.Errorf("server: listen screen: %w", err)
 	}
+	s.listenerMu.Lock()
 	s.screenConn = ln
+	s.listenerMu.Unlock()
 	slog.Info("screen plane listening", "addr", s.cfg.ScreenAddr)
 
-	go func() {
+	if !s.startWorker(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -47,9 +67,16 @@ func (s *Server) StartScreen() error {
 				_ = conn.Close()
 				continue
 			}
-			go s.handleScreenConn(conn)
+			acceptedConn := conn
+			if !s.startWorker(func() { s.handleScreenConn(acceptedConn) }) {
+				s.forgetAcceptedConn(conn)
+				_ = conn.Close()
+			}
 		}
-	}()
+	}) {
+		_ = ln.Close()
+		return fmt.Errorf("server: start screen worker: %w", s.ctx.Err())
+	}
 
 	return nil
 }

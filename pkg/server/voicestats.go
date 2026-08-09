@@ -122,7 +122,7 @@ func (s *Server) LogVoiceDebug() {
 // startVoiceDebugLogging runs LogVoiceDebug every interval until the
 // server context is cancelled.
 func (s *Server) startVoiceDebugLogging(interval time.Duration) {
-	go func() {
+	s.startWorker(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -133,5 +133,5 @@ func (s *Server) startVoiceDebugLogging(interval time.Duration) {
 				s.LogVoiceDebug()
 			}
 		}
-	}()
+	})
 }
