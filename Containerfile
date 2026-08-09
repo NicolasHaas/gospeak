@@ -165,7 +165,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/gospeak-server /gospeak-server
 
-EXPOSE 9600/tcp 9601/udp 9602/tcp
+EXPOSE 9600/tcp 9601/udp
 
 VOLUME ["/data"]
 

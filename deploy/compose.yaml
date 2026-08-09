@@ -12,7 +12,6 @@ services:
       - "9600:9600"       # TCP/TLS control plane
       - "9601:9601/udp"   # UDP encrypted voice
       - "9603:9603"       # TCP/TLS screen-share plane (used when -screen-share is enabled)
-      - "9602:9602"       # Prometheus /metrics (optional, remove if not needed)
     volumes:
       - gospeak-data:/data
     restart: unless-stopped

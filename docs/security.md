@@ -1,6 +1,8 @@
 # GoSpeak Security & Encryption
 
-GoSpeak is designed with security as a core principle. All communication is encrypted and the server operates as a relay for voice and screen-sharing media.
+GoSpeak encrypts the control, voice, and screen planes. The optional metrics and
+health endpoint is plaintext, unauthenticated HTTP, so it is disabled by default
+and must be restricted separately when enabled.
 
 > **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server _could_ theoretically decrypt media. This is a known trade-off for simplicity.
 

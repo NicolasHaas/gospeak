@@ -1,0 +1,35 @@
+# Opt-in monitoring stack for GoSpeak.
+#
+# Usage:
+#   GOSPEAK_METRICS_ADDR=:9602 \
+#   GRAFANA_ADMIN_PASSWORD='<choose-password>' \
+#   docker compose -f compose.yaml -f compose.monitoring.yaml up -d
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gospeak-prometheus
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gospeak-grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/gospeak.json
+    volumes:
+      - ./deploy/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./docs/grafana-dashboard.json:/var/lib/grafana/dashboards/gospeak.json:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

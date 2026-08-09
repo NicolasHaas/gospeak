@@ -25,7 +25,7 @@ func main() {
 	flag.BoolVar(&cfg.AllowNoToken, "open", false, "Allow users to join without a token (open server)")
 	flag.BoolVar(&cfg.EnableScreenShare, "screen-share", false, "Enable basic per-channel screen sharing")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
-	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for Prometheus /metrics (empty to disable)")
+	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for plaintext /metrics and /healthz (empty to disable)")
 	flag.BoolVar(&cfg.ExportUsers, "export-users", false, "Export all users as YAML and exit")
 	flag.BoolVar(&cfg.ExportChannels, "export-channels", false, "Export all channels as YAML and exit")
 
