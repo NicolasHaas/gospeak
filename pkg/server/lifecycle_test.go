@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -333,6 +337,79 @@ func TestShutdownStopsRunAndReleasesListeners(t *testing.T) {
 		t.Fatalf("Voice address remains occupied after Shutdown: %v", err)
 	}
 	_ = voiceListener.Close()
+}
+
+func TestAuthResponseGatesScreenCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled"},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st, handler := newTestServer(t)
+			srv.cfg.AllowNoToken = true
+			srv.cfg.EnableScreenShare = tc.enabled
+			srv.cfg.ScreenAddr = "screen.example:9603"
+			serverConn, clientConn := net.Pipe()
+			done := make(chan struct{})
+
+			go func() {
+				srv.handleControlConn(handler, serverConn, st)
+				close(done)
+			}()
+			if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
+				AuthRequest: &pb.AuthRequest{Username: "screen-gating-" + tc.name},
+			}); err != nil {
+				t.Fatalf("Write AuthRequest: %v", err)
+			}
+			var lengthBuf [4]byte
+			if _, err := io.ReadFull(clientConn, lengthBuf[:]); err != nil {
+				t.Fatalf("Read AuthResponse length: %v", err)
+			}
+			payload := make([]byte, binary.BigEndian.Uint32(lengthBuf[:]))
+			if _, err := io.ReadFull(clientConn, payload); err != nil {
+				t.Fatalf("Read AuthResponse payload: %v", err)
+			}
+			response := new(pb.ControlMessage)
+			if err := json.Unmarshal(payload, response); err != nil {
+				t.Fatalf("Decode AuthResponse: %v", err)
+			}
+			auth := response.AuthResponse
+			if auth == nil {
+				t.Fatal("AuthResponse is nil")
+			}
+			if tc.enabled {
+				for _, key := range [][]byte{[]byte(`"screen_share_enabled"`), []byte(`"screen_addr"`), []byte(`"screen_auth_token"`)} {
+					if !bytes.Contains(payload, key) {
+						t.Fatalf("enabled AuthResponse payload %s omits %s", payload, key)
+					}
+				}
+				if !auth.ScreenShareEnabled || auth.ScreenAddr != srv.cfg.ScreenAddr || auth.ScreenAuthToken == "" {
+					t.Fatalf("enabled screen fields = %#v, want enabled address and token", auth)
+				}
+			} else {
+				for _, key := range [][]byte{[]byte(`"screen_share_enabled"`), []byte(`"screen_addr"`), []byte(`"screen_auth_token"`)} {
+					if bytes.Contains(payload, key) {
+						t.Fatalf("disabled AuthResponse payload %s contains %s", payload, key)
+					}
+				}
+				if auth.ScreenShareEnabled || auth.ScreenAddr != "" || auth.ScreenAuthToken != "" {
+					t.Fatalf("disabled screen fields = %#v, want omitted credentials", auth)
+				}
+			}
+			if err := clientConn.Close(); err != nil {
+				t.Fatalf("Close client connection: %v", err)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("authenticated control handler did not return")
+			}
+			srv.Shutdown()
+		})
+	}
 }
 
 func TestAuthenticatedControlConnectionBalancesMetrics(t *testing.T) {

@@ -76,11 +76,7 @@ func (s *Server) Run() error {
 		}
 	}
 
-	slog.Info("GoSpeak server running",
-		"control", s.cfg.ControlAddr,
-		"voice", s.cfg.VoiceAddr,
-		"screen", s.cfg.ScreenAddr,
-	)
+	slog.Info("GoSpeak server running", s.runningLogArgs()...)
 
 	// Start periodic voice debug logging (only when log level is debug)
 	if s.voiceDebugEnabled {
@@ -97,6 +93,17 @@ func (s *Server) Run() error {
 	case <-s.ctx.Done():
 	}
 	return nil
+}
+
+func (s *Server) runningLogArgs() []any {
+	args := []any{
+		"control", s.cfg.ControlAddr,
+		"voice", s.cfg.VoiceAddr,
+	}
+	if s.cfg.EnableScreenShare {
+		args = append(args, "screen", s.cfg.ScreenAddr)
+	}
+	return args
 }
 
 // Shutdown gracefully stops the server.
