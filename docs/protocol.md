@@ -10,7 +10,7 @@ GoSpeak uses three transport layers: a **TCP/TLS 1.3 control plane** for signall
 - **Serialization**: JSON with `omitempty` — only the populated field in `ControlMessage` is serialized
 
 ### Message Envelope
-Every control message is a `ControlMessage` struct with exactly one field set:
+Every control message is a `ControlMessage` struct with exactly one field set. Writers reject empty envelopes, envelopes with multiple populated fields, and `null` message values. Readers additionally reject repeated top-level fields (including escaped equivalents), unknown top-level fields, and malformed or trailing JSON. Unknown fields are rejected deliberately: peers using a protocol version newer than the reader's must not send message types the reader does not know.
 
 - `AuthRequest`
 - `AuthResponse`
@@ -30,14 +30,20 @@ Every control message is a `ControlMessage` struct with exactly one field set:
 - `KickUserRequest`
 - `BanUserRequest`
 - `ChatMessage`
+- `ChatEvent`
 - `ScreenShareStartRequest`
 - `ScreenShareStopRequest`
 - `ScreenShareSubscribeRequest`
+- `ScreenShareShareRequest`
 - `ScreenShareUnsubscribeRequest`
 - `ScreenShareEvent`
+- `ScreenShareFrame`
 - `SetUserRoleRequest`
+- `SetUserRoleResponse`
 - `ExportDataRequest`
+- `ExportDataResponse`
 - `ImportChannelsRequest`
+- `ImportChannelsResponse`
 - `ErrorResponse`
 - `Ping` / `Pong`
 
