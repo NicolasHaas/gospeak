@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,26 @@ const (
 	// FrameSize is the number of samples per frame (SampleRate * FrameDuration / 1000).
 	FrameSize = SampleRate * FrameDuration / 1000 // 960
 )
+
+var controlMessageFields = map[string]struct{}{
+	"auth_request": {}, "auth_response": {},
+	"channel_list_request": {}, "channel_list_response": {},
+	"join_channel_request": {}, "channel_join_response": {},
+	"leave_channel_request": {}, "channel_joined_event": {}, "channel_left_event": {},
+	"user_state_update": {}, "server_state_event": {},
+	"create_channel_request": {}, "delete_channel_request": {},
+	"create_token_request": {}, "create_token_response": {},
+	"kick_user_request": {}, "ban_user_request": {},
+	"chat_message": {}, "chat_event": {},
+	"screen_share_start_request": {}, "screen_share_stop_request": {},
+	"screen_share_subscribe_request": {}, "screen_share_share_request": {},
+	"screen_share_unsubscribe_request": {}, "screen_share_event": {},
+	"screen_share_frame":    {},
+	"set_user_role_request": {}, "set_user_role_response": {},
+	"export_data_request": {}, "export_data_response": {},
+	"import_channels_request": {}, "import_channels_response": {},
+	"error_response": {}, "ping": {}, "pong": {},
+}
 
 // VoicePacket represents a voice data packet sent over UDP.
 type VoicePacket struct {
@@ -86,6 +107,9 @@ func WriteControlMessage(w io.Writer, msg *pb.ControlMessage) error {
 	if err != nil {
 		return fmt.Errorf("protocol: marshal: %w", err)
 	}
+	if err := validateControlEnvelope(data); err != nil {
+		return err
+	}
 	if len(data) > MaxControlMessage {
 		return fmt.Errorf("protocol: message too large: %d bytes", len(data))
 	}
@@ -127,10 +151,104 @@ func ReadControlMessage(r io.Reader) (*pb.ControlMessage, error) {
 	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, fmt.Errorf("protocol: read payload: %w", err)
 	}
+	if err := validateControlEnvelope(data); err != nil {
+		return nil, err
+	}
 
 	msg := &pb.ControlMessage{}
 	if err := json.Unmarshal(data, msg); err != nil {
 		return nil, fmt.Errorf("protocol: unmarshal: %w", err)
 	}
 	return msg, nil
+}
+
+func validateControlEnvelope(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+
+	token, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("protocol: invalid control envelope: %w", err)
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("protocol: invalid control envelope: expected JSON object")
+	}
+
+	fields := 0
+	seen := make(map[string]struct{})
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("protocol: invalid control envelope: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("protocol: invalid control envelope: expected string key")
+		}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("protocol: invalid control envelope: duplicate field %q", key)
+		}
+		seen[key] = struct{}{}
+		if _, ok := controlMessageFields[key]; !ok {
+			return fmt.Errorf("protocol: invalid control envelope: unknown field %q", key)
+		}
+		fields++
+		value, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("protocol: invalid control envelope: field %q: %w", key, err)
+		}
+		if value == nil {
+			return fmt.Errorf("protocol: invalid control envelope: field %q is null", key)
+		}
+		switch v := value.(type) {
+		case json.Delim:
+			if v == '{' || v == '[' {
+				for dec.More() {
+					if err := skipJSONValue(dec); err != nil {
+						return fmt.Errorf("protocol: invalid control envelope: field %q: %w", key, err)
+					}
+				}
+				if _, err := dec.Token(); err != nil {
+					return fmt.Errorf("protocol: invalid control envelope: field %q: %w", key, err)
+				}
+			}
+		}
+	}
+	if fields != 1 {
+		return fmt.Errorf("protocol: invalid control envelope: got %d fields, want exactly one", fields)
+	}
+	closing, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("protocol: invalid control envelope: %w", err)
+	}
+	if delim, ok := closing.(json.Delim); !ok || delim != '}' {
+		return fmt.Errorf("protocol: invalid control envelope: expected closing object delimiter")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return fmt.Errorf("protocol: invalid control envelope: unexpected data after object")
+	}
+	return nil
+}
+
+// skipJSONValue consumes one JSON value from the decoder, ensuring its raw
+// bytes are fully parsed and validated by the standard library.
+func skipJSONValue(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := token.(json.Delim); ok {
+		if delim == '{' || delim == '[' {
+			for dec.More() {
+				if err := skipJSONValue(dec); err != nil {
+					return err
+				}
+			}
+			if _, err := dec.Token(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
