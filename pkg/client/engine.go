@@ -60,10 +60,17 @@ const (
 )
 
 type audioResources struct {
-	capture  audio.Capturer
-	playback audio.Player
-	encoder  audio.AudioEncoder
-	warnings []error
+	capture   audio.Capturer
+	playback  audio.Player
+	encoder   audio.AudioEncoder
+	encoderMu sync.Mutex
+	warnings  []error
+}
+
+func (r *audioResources) encode(frame []int16) ([]byte, error) {
+	r.encoderMu.Lock()
+	defer r.encoderMu.Unlock()
+	return r.encoder.Encode(frame)
 }
 
 func (r *audioResources) close() {
@@ -84,16 +91,17 @@ type connectionGeneration struct {
 	wg     sync.WaitGroup
 	done   chan struct{}
 
-	disconnectOnce sync.Once
-	doneOnce       sync.Once
-	mu             sync.Mutex
-	control        *ControlClient
-	voice          *VoiceClient
-	screen         *ScreenClient
-	cipher         *gospeakCrypto.VoiceCipher
-	audio          *audioResources
-	keepaliveNow   chan struct{}
-	pendingJoins   map[int64]uint32
+	disconnectOnce  sync.Once
+	terminalErrOnce sync.Once
+	doneOnce        sync.Once
+	mu              sync.Mutex
+	control         *ControlClient
+	voice           *VoiceClient
+	screen          *ScreenClient
+	cipher          *gospeakCrypto.VoiceCipher
+	audio           *audioResources
+	keepaliveNow    chan struct{}
+	pendingJoins    map[int64]uint32
 }
 
 func newConnectionGeneration() *connectionGeneration {
@@ -725,7 +733,7 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 			frameTimestamp -= offset
 		}
 		for _, frame := range frames {
-			opusData, err := resources.encoder.Encode(frame)
+			opusData, err := resources.encode(frame)
 			if err != nil {
 				slog.Debug("encode error", "err", err)
 				frameTimestamp += 960
@@ -733,6 +741,9 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 			}
 
 			if err := voice.SendVoice(opusData, frameTimestamp); err != nil {
+				if e.handleVoiceSendError(g, err) {
+					return
+				}
 				slog.Debug("voice send error", "err", err)
 			} else if e.voiceDebugEnabled {
 				e.voiceDebugMu.Lock()
@@ -1023,13 +1034,16 @@ func (e *Engine) trySendKeepalive(g *connectionGeneration, timestamp *uint32, re
 		return
 	}
 
-	silenceData, err := resources.encoder.Encode(silenceBuf)
+	silenceData, err := resources.encode(silenceBuf)
 	if err != nil {
 		slog.Debug("keepalive encode error", "err", err)
 		return
 	}
 
 	if err := voice.SendVoice(silenceData, *timestamp); err != nil {
+		if e.handleVoiceSendError(g, err) {
+			return
+		}
 		slog.Debug("keepalive send error", "err", err)
 		return
 	}
@@ -1044,6 +1058,21 @@ func (e *Engine) trySendKeepalive(g *connectionGeneration, timestamp *uint32, re
 	e.mu.Lock()
 	e.lastSendTime = time.Now()
 	e.mu.Unlock()
+}
+
+func (e *Engine) handleVoiceSendError(g *connectionGeneration, err error) bool {
+	if !errors.Is(err, ErrVoiceSequenceExhausted) {
+		return false
+	}
+	g.terminalErrOnce.Do(func() {
+		if callback := e.OnError; callback != nil {
+			e.callbackMu.Lock()
+			e.enqueueReliableGenerationCallbackLocked(g, func() { callback(err) })
+			e.callbackMu.Unlock()
+		}
+		e.requestDisconnect(g, "voice sequence exhausted")
+	})
+	return true
 }
 
 // handleEvent dispatches incoming server events.
