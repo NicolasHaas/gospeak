@@ -65,7 +65,18 @@ func (c *ScreenClient) SetPacketHandler(handler ScreenPacketHandler) {
 func (c *ScreenClient) Send(pkt *protocol.ScreenPacket) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return protocol.WriteScreenPacket(c.conn, pkt)
+	if err := c.conn.SetWriteDeadline(time.Now().Add(connectTimeout)); err != nil {
+		return fmt.Errorf("client: set screen write deadline: %w", err)
+	}
+	writeErr := protocol.WriteScreenPacket(c.conn, pkt)
+	clearErr := c.conn.SetWriteDeadline(time.Time{})
+	if writeErr != nil {
+		return writeErr
+	}
+	if clearErr != nil {
+		return fmt.Errorf("client: clear screen write deadline: %w", clearErr)
+	}
+	return nil
 }
 
 func (c *ScreenClient) StartReceiving() {
