@@ -143,7 +143,7 @@ For each voice packet:
 - Encrypted screen packets travel on the dedicated screen TLS connection.
 - The server forwards opaque encrypted packets to subscribed viewers without decoding frame contents.
 
-Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a monotonically increasing screen packet sequence number.
+Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that increases for the lifetime of the screen-share key. Repeated announcements of the same key do not reset the sequence; a new key starts a new sequence, and sharing stops before the sequence can wrap.
 
 ## Authentication & Token System
 

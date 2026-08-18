@@ -22,6 +22,8 @@ import (
 )
 
 var (
+	ErrScreenSequenceExhausted    = errors.New("client: screen sequence exhausted; stop sharing required")
+	errScreenShareChanged         = errors.New("screen share changed while preparing frame")
 	errScreenShareCaptureTimedOut = errors.New("screen capture timed out")
 	errScreenShareStartTimedOut   = errors.New("screen share start timed out")
 	screenCaptureSlot             = make(chan struct{}, 1)
@@ -60,10 +62,17 @@ const (
 )
 
 type audioResources struct {
-	capture  audio.Capturer
-	playback audio.Player
-	encoder  audio.AudioEncoder
-	warnings []error
+	capture   audio.Capturer
+	playback  audio.Player
+	encoder   audio.AudioEncoder
+	encoderMu sync.Mutex
+	warnings  []error
+}
+
+func (r *audioResources) encode(frame []int16) ([]byte, error) {
+	r.encoderMu.Lock()
+	defer r.encoderMu.Unlock()
+	return r.encoder.Encode(frame)
 }
 
 func (r *audioResources) close() {
@@ -84,16 +93,17 @@ type connectionGeneration struct {
 	wg     sync.WaitGroup
 	done   chan struct{}
 
-	disconnectOnce sync.Once
-	doneOnce       sync.Once
-	mu             sync.Mutex
-	control        *ControlClient
-	voice          *VoiceClient
-	screen         *ScreenClient
-	cipher         *gospeakCrypto.VoiceCipher
-	audio          *audioResources
-	keepaliveNow   chan struct{}
-	pendingJoins   map[int64]uint32
+	disconnectOnce  sync.Once
+	terminalErrOnce sync.Once
+	doneOnce        sync.Once
+	mu              sync.Mutex
+	control         *ControlClient
+	voice           *VoiceClient
+	screen          *ScreenClient
+	cipher          *gospeakCrypto.VoiceCipher
+	audio           *audioResources
+	keepaliveNow    chan struct{}
+	pendingJoins    map[int64]uint32
 }
 
 func newConnectionGeneration() *connectionGeneration {
@@ -204,20 +214,26 @@ type Engine struct {
 
 	channels []pb.ChannelInfo
 
-	screenMu           sync.Mutex
-	screenSharePending bool
-	screenShareRunning bool
-	screenShareDisplay int
-	screenShareCancel  context.CancelFunc
-	screenShareAttempt uint64
-	screenCipher       *gospeakCrypto.VoiceCipher
-	screenSeqNum       uint32
-	activeScreenShare  *pb.ScreenShareEvent
-	screenShareEnabled bool
-	captureScreenFn    func(displayIndex int) (image.Image, error)
-	encodeScreenFn     func(img image.Image, maxWidth, quality int) ([]byte, int32, int32, error)
-	screenCaptureWait  time.Duration
-	screenStartWait    time.Duration
+	screenMu            sync.Mutex
+	screenSendMu        sync.Mutex
+	screenSharePending  bool
+	screenShareRunning  bool
+	screenShareDisplay  int
+	screenShareCancel   context.CancelFunc
+	screenShareLoopID   uint64
+	screenShareAttempt  uint64
+	screenCipher        *gospeakCrypto.VoiceCipher
+	screenKey           []byte
+	screenKeyID         [16]byte
+	screenKeySequences  map[[16]byte]uint32
+	screenSeqNum        uint32
+	activeScreenShare   *pb.ScreenShareEvent
+	screenShareEnabled  bool
+	captureScreenFn     func(displayIndex int) (image.Image, error)
+	encodeScreenFn      func(img image.Image, maxWidth, quality int) ([]byte, int32, int32, error)
+	beforeScreenPublish func()
+	screenCaptureWait   time.Duration
+	screenStartWait     time.Duration
 
 	// Audio initialization functions allow platform-specific audio backends.
 	initAudioFn   func() (*audioResources, error)
@@ -725,7 +741,7 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 			frameTimestamp -= offset
 		}
 		for _, frame := range frames {
-			opusData, err := resources.encoder.Encode(frame)
+			opusData, err := resources.encode(frame)
 			if err != nil {
 				slog.Debug("encode error", "err", err)
 				frameTimestamp += 960
@@ -733,6 +749,9 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 			}
 
 			if err := voice.SendVoice(opusData, frameTimestamp); err != nil {
+				if e.handleVoiceSendError(g, err) {
+					return
+				}
 				slog.Debug("voice send error", "err", err)
 			} else if e.voiceDebugEnabled {
 				e.voiceDebugMu.Lock()
@@ -1023,13 +1042,16 @@ func (e *Engine) trySendKeepalive(g *connectionGeneration, timestamp *uint32, re
 		return
 	}
 
-	silenceData, err := resources.encoder.Encode(silenceBuf)
+	silenceData, err := resources.encode(silenceBuf)
 	if err != nil {
 		slog.Debug("keepalive encode error", "err", err)
 		return
 	}
 
 	if err := voice.SendVoice(silenceData, *timestamp); err != nil {
+		if e.handleVoiceSendError(g, err) {
+			return
+		}
 		slog.Debug("keepalive send error", "err", err)
 		return
 	}
@@ -1044,6 +1066,21 @@ func (e *Engine) trySendKeepalive(g *connectionGeneration, timestamp *uint32, re
 	e.mu.Lock()
 	e.lastSendTime = time.Now()
 	e.mu.Unlock()
+}
+
+func (e *Engine) handleVoiceSendError(g *connectionGeneration, err error) bool {
+	if !errors.Is(err, ErrVoiceSequenceExhausted) {
+		return false
+	}
+	g.terminalErrOnce.Do(func() {
+		if callback := e.OnError; callback != nil {
+			e.callbackMu.Lock()
+			e.enqueueReliableGenerationCallbackLocked(g, func() { callback(err) })
+			e.callbackMu.Unlock()
+		}
+		e.requestDisconnect(g, "voice sequence exhausted")
+	})
+	return true
 }
 
 // handleEvent dispatches incoming server events.
@@ -1777,11 +1814,16 @@ func (e *Engine) handleDisconnectGeneration(g *connectionGeneration, reason stri
 	e.callbackMu.Unlock()
 
 	e.stopScreenShareLoop()
+	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	e.activeScreenShare = nil
 	e.screenCipher = nil
+	e.screenKey = nil
+	e.screenKeyID = [16]byte{}
+	e.screenKeySequences = nil
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
+	e.screenSendMu.Unlock()
 
 	g.closeResources()
 	g.wg.Wait()
@@ -1830,32 +1872,45 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 		}
 	}
 
+	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	previous := e.activeScreenShare
 	if !event.Active {
 		if previous == nil || previous.SessionID == event.SessionID {
 			e.activeScreenShare = nil
 			e.screenCipher = nil
+			e.screenKey = nil
+			e.screenKeyID = [16]byte{}
 			e.screenSeqNum = 0
 		}
 	} else if len(event.EncryptionKey) > 0 {
-		cipher, err := gospeakCrypto.NewVoiceCipher(event.EncryptionKey)
-		if err != nil {
-			e.screenMu.Unlock()
-			slog.Error("screen cipher init failed", "err", err)
-			return
+		sameKey := previous != nil && previous.SessionID == event.SessionID && bytes.Equal(e.screenKey, event.EncryptionKey)
+		if !sameKey {
+			cipher, err := gospeakCrypto.NewVoiceCipher(event.EncryptionKey)
+			if err != nil {
+				e.screenMu.Unlock()
+				e.screenSendMu.Unlock()
+				slog.Error("screen cipher init failed", "err", err)
+				return
+			}
+			e.screenCipher = cipher
+			e.screenKey = append(e.screenKey[:0], event.EncryptionKey...)
+			e.screenKeyID = [16]byte{}
+			copy(e.screenKeyID[:], event.EncryptionKey)
+			e.screenSeqNum = e.screenKeySequences[e.screenKeyID]
 		}
 		e.activeScreenShare = event
-		e.screenCipher = cipher
-		e.screenSeqNum = 0
 	} else {
 		e.activeScreenShare = event
 		if previous == nil || previous.SessionID != event.SessionID {
 			e.screenCipher = nil
+			e.screenKey = nil
+			e.screenKeyID = [16]byte{}
 			e.screenSeqNum = 0
 		}
 	}
 	e.screenMu.Unlock()
+	e.screenSendMu.Unlock()
 
 	if callback := e.OnScreenFrame; !event.Active && callback != nil {
 		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
@@ -1882,11 +1937,15 @@ func (e *Engine) clearScreenShareStateGeneration(g *connectionGeneration) {
 
 func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) {
 	e.stopScreenShareLoop()
+	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	e.activeScreenShare = nil
 	e.screenCipher = nil
+	e.screenKey = nil
+	e.screenKeyID = [16]byte{}
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
+	e.screenSendMu.Unlock()
 	if callback := e.OnScreenFrame; callback != nil {
 		e.enqueueOptionalGenerationCallbackLocked(g, func() { callback(nil) })
 	}
@@ -1943,19 +2002,21 @@ func (e *Engine) startScreenShareLoop(g *connectionGeneration) {
 	}
 	displayIndex := e.screenShareDisplay
 	ctx, cancel := context.WithCancel(g.ctx)
+	e.screenShareLoopID++
+	loopID := e.screenShareLoopID
 	e.screenShareCancel = cancel
 	e.screenShareRunning = true
 	e.screenSharePending = false
 	e.screenMu.Unlock()
 
-	g.run(func(context.Context) {
+	started := g.run(func(context.Context) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-		defer e.stopScreenShareLoop()
+		defer e.finishScreenShareLoop(loopID)
 
 		for {
-			if err := e.sendScreenShareFrame(g, displayIndex); err != nil {
-				if errors.Is(err, errScreenShareCaptureTimedOut) {
+			if err := e.sendScreenShareFrame(ctx, g, displayIndex); err != nil {
+				if errors.Is(err, errScreenShareCaptureTimedOut) || errors.Is(err, ErrScreenSequenceExhausted) {
 					e.requestScreenShareStop(g)
 					if callback := e.OnError; callback != nil {
 						e.invokeGenerationCallback(g, func() { callback(fmt.Errorf("screen share stopped: %w", err)) })
@@ -1972,11 +2033,17 @@ func (e *Engine) startScreenShareLoop(g *connectionGeneration) {
 			}
 		}
 	})
+	if !started {
+		cancel()
+		e.finishScreenShareLoop(loopID)
+	}
 }
 
 func (e *Engine) stopScreenShareLoop() {
+	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	cancel := e.screenShareCancel
+	e.screenShareLoopID++
 	e.screenShareCancel = nil
 	e.screenShareRunning = false
 	e.screenSharePending = false
@@ -1984,6 +2051,17 @@ func (e *Engine) stopScreenShareLoop() {
 	if cancel != nil {
 		cancel()
 	}
+	e.screenSendMu.Unlock()
+}
+
+func (e *Engine) finishScreenShareLoop(loopID uint64) {
+	e.screenMu.Lock()
+	if e.screenShareLoopID == loopID {
+		e.screenShareCancel = nil
+		e.screenShareRunning = false
+		e.screenSharePending = false
+	}
+	e.screenMu.Unlock()
 }
 
 func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
@@ -2008,11 +2086,15 @@ func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
 	_ = screen.Close()
 
 	e.stopScreenShareLoop()
+	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	e.activeScreenShare = nil
 	e.screenCipher = nil
+	e.screenKey = nil
+	e.screenKeyID = [16]byte{}
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
+	e.screenSendMu.Unlock()
 
 	if callback := e.OnScreenFrame; callback != nil {
 		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
@@ -2029,7 +2111,7 @@ func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
 	}
 }
 
-func (e *Engine) sendScreenShareFrame(g *connectionGeneration, displayIndex int) error {
+func (e *Engine) sendScreenShareFrame(ctx context.Context, g *connectionGeneration, displayIndex int) error {
 	g.mu.Lock()
 	screen := g.screen
 	g.mu.Unlock()
@@ -2040,7 +2122,25 @@ func (e *Engine) sendScreenShareFrame(g *connectionGeneration, displayIndex int)
 	if screen == nil {
 		return fmt.Errorf("not connected")
 	}
-	data, width, height, err := e.prepareScreenShareFrame(g.ctx, displayIndex)
+	e.screenMu.Lock()
+	cipher := e.screenCipher
+	if cipher == nil {
+		e.screenMu.Unlock()
+		return fmt.Errorf("screen share encryption is not ready")
+	}
+	if e.screenSeqNum == math.MaxUint32 {
+		e.screenMu.Unlock()
+		return ErrScreenSequenceExhausted
+	}
+	e.screenSeqNum++
+	seqNum := e.screenSeqNum
+	if e.screenKeySequences == nil {
+		e.screenKeySequences = make(map[[16]byte]uint32)
+	}
+	e.screenKeySequences[e.screenKeyID] = seqNum
+	e.screenMu.Unlock()
+
+	data, width, height, err := e.prepareScreenShareFrame(ctx, displayIndex)
 	if err != nil {
 		return err
 	}
@@ -2054,18 +2154,22 @@ func (e *Engine) sendScreenShareFrame(g *connectionGeneration, displayIndex int)
 	if err != nil {
 		return err
 	}
-	e.screenMu.Lock()
-	cipher := e.screenCipher
-	if cipher == nil {
-		e.screenMu.Unlock()
-		return fmt.Errorf("screen share encryption is not ready")
+	if e.beforeScreenPublish != nil {
+		e.beforeScreenPublish()
 	}
-	e.screenSeqNum++
-	seqNum := e.screenSeqNum
+	e.screenSendMu.Lock()
+	e.screenMu.Lock()
+	currentCipher := ctx.Err() == nil && e.screenCipher == cipher
 	e.screenMu.Unlock()
+	if !currentCipher {
+		e.screenSendMu.Unlock()
+		return errScreenShareChanged
+	}
 	pkt := &protocol.ScreenPacket{SessionID: sessionID, SeqNum: seqNum}
 	pkt.Payload = cipher.Encrypt(sessionID, seqNum, pkt.MarshalHeader(), frameData)
-	return screen.Send(pkt)
+	err = screen.Send(pkt)
+	e.screenSendMu.Unlock()
+	return err
 }
 
 type screenSharePrepareResult struct {
@@ -2090,7 +2194,7 @@ func (e *Engine) prepareScreenShareFrame(ctx context.Context, displayIndex int) 
 	case <-timer.C:
 		return nil, 0, 0, errScreenShareCaptureTimedOut
 	case <-ctx.Done():
-		return nil, 0, 0, fmt.Errorf("not connected")
+		return nil, 0, 0, fmt.Errorf("screen capture canceled: %w", ctx.Err())
 	}
 
 	resultCh := make(chan screenSharePrepareResult, 1)
@@ -2111,7 +2215,7 @@ func (e *Engine) prepareScreenShareFrame(ctx context.Context, displayIndex int) 
 	case <-timer.C:
 		return nil, 0, 0, errScreenShareCaptureTimedOut
 	case <-ctx.Done():
-		return nil, 0, 0, fmt.Errorf("not connected")
+		return nil, 0, 0, fmt.Errorf("screen capture canceled: %w", ctx.Err())
 	}
 }
 
