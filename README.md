@@ -142,10 +142,12 @@ channels:
   - name: Gaming
     description: Gaming channels
     allow_sub_channels: true
-    children:
+    channels:
       - name: FPS
       - name: MMO
 ```
+
+The parser requires a `channels` sequence in one YAML document of at most 512 KiB and rejects unknown fields, aliases and merges, duplicate sibling names, and configurations above 8 levels or 256 channels. Imports create missing channels; channels that already exist under the same parent keep their current settings. Older examples used `children:`; that field was ignored instead of creating subchannels, so replace it with `channels:` before upgrading.
 
 ## Tech Stack
 

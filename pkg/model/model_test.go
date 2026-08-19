@@ -61,12 +61,42 @@ func TestChannel_Validate(t *testing.T) {
 			ErrChannelNameTooLong,
 		},
 		{
+			"name with invalid UTF-8",
+			&Channel{Name: string([]byte{'s', 'a', 'f', 'e', 0xff})},
+			ErrChannelNameInvalidUTF8,
+		},
+		{
+			"name with control character",
+			&Channel{Name: "General\x1b"},
+			ErrChannelNameControl,
+		},
+		{
+			"name with Unicode format character",
+			&Channel{Name: "safe\u202eevil"},
+			ErrChannelNameControl,
+		},
+		{
 			"description too long",
 			&Channel{
 				Name:        "Valid",
 				Description: strings.Repeat("x", MaxChannelDescLength+1),
 			},
 			ErrChannelDescTooLong,
+		},
+		{
+			"description with invalid UTF-8",
+			&Channel{Name: "Valid", Description: string([]byte{'b', 'a', 'd', 0xff})},
+			ErrChannelDescInvalidUTF8,
+		},
+		{
+			"description with control character",
+			&Channel{Name: "Valid", Description: "first line\nsecond line"},
+			ErrChannelDescControl,
+		},
+		{
+			"description with Unicode format character",
+			&Channel{Name: "Valid", Description: "zero\u200bwidth"},
+			ErrChannelDescControl,
 		},
 		{
 			"max users negative",
