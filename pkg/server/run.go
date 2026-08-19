@@ -35,20 +35,21 @@ func (s *Server) Run() error {
 	// stable value (avoids a data race with the assignment below).
 	s.voiceDebugEnabled = slog.Default().Enabled(context.Background(), slog.LevelDebug)
 
-	// Ensure default "Lobby" channel exists
-	channels, _ := st.NonTx().ListChannels()
-	if len(channels) == 0 {
-		if err := st.NonTx().CreateChannel(model.NewChannel()); err != nil {
-			return fmt.Errorf("server: create lobby: %w", err)
+	var channelConfig *ChannelsConfig
+	if s.cfg.ChannelsFile != "" {
+		data, err := readChannelsYAML(s.cfg.ChannelsFile)
+		if err != nil {
+			return fmt.Errorf("server: load channels config: %w", err)
 		}
-		slog.Info("created default Lobby channel")
+		cfg, err := parseChannelsYAML(data)
+		if err != nil {
+			return fmt.Errorf("server: load channels config: %w", err)
+		}
+		channelConfig = &cfg
 	}
 
-	// Load channels from YAML config if provided
-	if s.cfg.ChannelsFile != "" {
-		if err := LoadChannelsFromYAML(s.cfg.ChannelsFile, st); err != nil {
-			slog.Error("failed to load channels config", "err", err)
-		}
+	if err := initializeChannels(channelConfig, st); err != nil {
+		return fmt.Errorf("server: initialize channels: %w", err)
 	}
 
 	// Ensure at least one admin token exists

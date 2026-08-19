@@ -2,10 +2,12 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
@@ -18,6 +20,8 @@ const (
 	maxChannelImportCount = 256
 	maxChannelImportBytes = protocol.MaxControlMessage
 )
+
+var channelImportMu sync.Mutex
 
 // ChannelYAML represents a channel in YAML config.
 type ChannelYAML struct {
@@ -158,12 +162,66 @@ func hasYAMLAliasOrMerge(root *yaml.Node) bool {
 }
 
 func applyChannelsConfig(cfg ChannelsConfig, st datastore.DataProviderFactory) error {
+	channelImportMu.Lock()
+	defer channelImportMu.Unlock()
+
+	tx, err := st.Tx(context.Background())
+	if err != nil {
+		return fmt.Errorf("begin channel import: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := applyMissingChannels(tx, cfg); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel import: %w", err)
+	}
+
+	slog.Info("imported channels from YAML", "count", countChannels(cfg.Channels))
+	return nil
+}
+
+func initializeChannels(cfg *ChannelsConfig, st datastore.DataProviderFactory) error {
+	tx, err := st.Tx(context.Background())
+	if err != nil {
+		return fmt.Errorf("begin channel initialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	channels, err := tx.ListChannels()
+	if err != nil {
+		return fmt.Errorf("list channels: %w", err)
+	}
+	createdLobby := false
+	if len(channels) == 0 {
+		if err := tx.CreateChannel(model.NewChannel()); err != nil {
+			return fmt.Errorf("create lobby: %w", err)
+		}
+		createdLobby = true
+	}
+	if cfg != nil {
+		if err := applyMissingChannels(tx, *cfg); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel initialization: %w", err)
+	}
+	if createdLobby {
+		slog.Info("created default Lobby channel")
+	}
+	if cfg != nil {
+		slog.Info("imported channels from YAML", "count", countChannels(cfg.Channels))
+	}
+	return nil
+}
+
+func applyMissingChannels(st datastore.DataStore, cfg ChannelsConfig) error {
 	for _, ch := range cfg.Channels {
 		if err := ensureChannel(st, ch, 0); err != nil {
 			return fmt.Errorf("apply channel import: %w", err)
 		}
 	}
-	slog.Info("imported channels from YAML", "count", countChannels(cfg.Channels))
 	return nil
 }
 
@@ -204,9 +262,9 @@ func validateChannelImport(channels []ChannelYAML) error {
 	return validate(channels, 1)
 }
 
-func ensureChannel(st datastore.DataProviderFactory, ch ChannelYAML, parentID int64) error {
+func ensureChannel(st datastore.DataStore, ch ChannelYAML, parentID int64) error {
 	// Check if channel already exists under this parent
-	existing, err := st.NonTx().GetChannelByNameAndParent(ch.Name, parentID)
+	existing, err := st.GetChannelByNameAndParent(ch.Name, parentID)
 	if err != nil {
 		return err
 	}
@@ -223,7 +281,7 @@ func ensureChannel(st datastore.DataProviderFactory, ch ChannelYAML, parentID in
 			IsTemp:           false,
 			AllowSubChannels: ch.AllowSubChannels,
 		}
-		if err := st.NonTx().CreateChannel(channel); err != nil {
+		if err := st.CreateChannel(channel); err != nil {
 			return err
 		}
 		channelID = channel.ID

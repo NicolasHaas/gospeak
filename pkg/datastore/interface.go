@@ -46,6 +46,7 @@ type DataStore interface {
 // ErrUsernameTaken is returned when a CreateUser call fails due to a
 // duplicate username constraint.
 var ErrUsernameTaken = errors.New("datastore: username already taken")
+var ErrChannelNameTaken = errors.New("datastore: channel name already exists under parent")
 
 var _ DataProviderFactory = (*ProviderFactory)(nil)
 

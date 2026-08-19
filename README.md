@@ -147,7 +147,9 @@ channels:
       - name: MMO
 ```
 
-The parser requires a `channels` sequence in one YAML document of at most 512 KiB and rejects unknown fields, aliases and merges, duplicate sibling names, and configurations above 8 levels or 256 channels. Imports create missing channels; channels that already exist under the same parent keep their current settings. Older examples used `children:`; that field was ignored instead of creating subchannels, so replace it with `channels:` before upgrading.
+The parser requires a `channels` sequence in one YAML document of at most 512 KiB and rejects unknown fields, aliases and merges, duplicate sibling names, and configurations above 8 levels or 256 channels. Imports create missing channels atomically; channels that already exist under the same parent keep their current settings. Older examples used `children:`; that field was ignored instead of creating subchannels, so replace it with `channels:` before upgrading.
+
+Upgrades also reject an existing database that already contains channels with the same name under one parent. GoSpeak does not guess which channel to keep because the rows may have different settings or references. Back up the database, inspect the conflicting `(parent_id, name)` rows, and resolve them before restarting the upgraded server.
 
 ## Tech Stack
 

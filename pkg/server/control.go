@@ -1334,10 +1334,11 @@ func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRe
 	}
 
 	if err := ImportChannelsFromYAML([]byte(req.YAML), st); err != nil {
+		slog.Warn("channel import failed", "by", session.Username, "err", err)
 		_ = writeControlMessage(conn, &pb.ControlMessage{
 			ImportChannelsResp: &pb.ImportChannelsResponse{
 				Success: false,
-				Message: "import failed: " + err.Error(),
+				Message: "channel import failed",
 			},
 		})
 		return
