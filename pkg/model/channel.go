@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -21,8 +22,12 @@ const (
 )
 
 var ErrChannelNameEmpty = errors.New("channel name must not be empty")
+var ErrChannelNameInvalidUTF8 = errors.New("channel name is not valid UTF-8")
 var ErrChannelNameTooLong = errors.New("channel name too long")
+var ErrChannelNameControl = errors.New("channel name contains control or format characters")
 var ErrChannelDescTooLong = errors.New("channel description too long")
+var ErrChannelDescInvalidUTF8 = errors.New("channel description is not valid UTF-8")
+var ErrChannelDescControl = errors.New("channel description contains control or format characters")
 var ErrChannelMaxUsers = errors.New("channel max users out of range")
 var ErrChannelParentID = errors.New("channel parent id out of range")
 
@@ -57,13 +62,21 @@ func (ch *Channel) Validate() error {
 	// Name
 	if strings.TrimSpace(ch.Name) == "" {
 		return ErrChannelNameEmpty
+	} else if !utf8.ValidString(ch.Name) {
+		return ErrChannelNameInvalidUTF8
 	} else if utf8.RuneCountInString(ch.Name) > MaxChannelNameLength {
 		return ErrChannelNameTooLong
+	} else if containsControlCharacter(ch.Name) {
+		return ErrChannelNameControl
 	}
 
 	// Description
-	if utf8.RuneCountInString(ch.Description) > MaxChannelDescLength {
+	if !utf8.ValidString(ch.Description) {
+		return ErrChannelDescInvalidUTF8
+	} else if utf8.RuneCountInString(ch.Description) > MaxChannelDescLength {
 		return ErrChannelDescTooLong
+	} else if containsControlCharacter(ch.Description) {
+		return ErrChannelDescControl
 	}
 
 	// MaxUsers
@@ -77,4 +90,10 @@ func (ch *Channel) Validate() error {
 	}
 
 	return nil
+}
+
+func containsControlCharacter(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
+	}) >= 0
 }

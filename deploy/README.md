@@ -73,6 +73,8 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `-log-format` | `text` | Log format: `text` or `json` |
 
+Channel files use a single `channels:` YAML document; nested channels use the same `channels:` key. The parser rejects the older `children:` example, unknown fields, aliases, merges, oversized files, and duplicate sibling names. An upgrade also stops if the existing database already has two channels with the same name under one parent; back up the database and resolve those conflicts rather than deleting an arbitrary row.
+
 ## Ports
 
 - `9600/tcp`: TLS control plane

@@ -212,6 +212,12 @@ func (s *ProviderFactory) migrate() error {
 				"ALTER TABLE users ADD COLUMN channel_scope INTEGER NOT NULL DEFAULT 0",
 			},
 		},
+		{
+			version: 6,
+			statements: []string{
+				"CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_parent_name ON channels(parent_id, name)",
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -496,6 +502,9 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 		allowSubInt,
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: channels.parent_id, channels.name") {
+			return fmt.Errorf("datastore: create channel: %w", ErrChannelNameTaken)
+		}
 		return fmt.Errorf("datastore: create channel: %w", err)
 	}
 	channel.ID, err = res.LastInsertId()

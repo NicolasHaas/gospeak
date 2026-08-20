@@ -1,14 +1,27 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	"gopkg.in/yaml.v3"
 )
+
+const (
+	maxChannelImportDepth = 8
+	maxChannelImportCount = 256
+	maxChannelImportBytes = protocol.MaxControlMessage
+)
+
+var channelImportMu sync.Mutex
 
 // ChannelYAML represents a channel in YAML config.
 type ChannelYAML struct {
@@ -37,35 +50,221 @@ type UsersExport struct {
 	Users []UserYAML `yaml:"users"`
 }
 
-// LoadChannelsFromYAML reads a channels YAML file and creates/updates channels in the datastore.
+// LoadChannelsFromYAML reads a channels YAML file and creates missing channels.
 func LoadChannelsFromYAML(path string, st datastore.DataProviderFactory) error {
-	data, err := os.ReadFile(path) //nolint:gosec // path from user-provided CLI config
+	data, err := readChannelsYAML(path)
 	if err != nil {
-		return fmt.Errorf("read channels config: %w", err)
+		return err
 	}
 	return ImportChannelsFromYAML(data, st)
 }
 
-// ImportChannelsFromYAML parses YAML data and creates/updates channels in the datastore.
+// ValidateChannelsFile checks a channel configuration without changing the datastore.
+func ValidateChannelsFile(path string) error {
+	data, err := readChannelsYAML(path)
+	if err != nil {
+		return err
+	}
+	_, err = parseChannelsYAML(data)
+	return err
+}
+
+// ImportChannelsFromYAML parses YAML data and creates missing channels atomically.
 func ImportChannelsFromYAML(data []byte, st datastore.DataProviderFactory) error {
-	var cfg ChannelsConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse channels config: %w", err)
+	cfg, err := parseChannelsYAML(data)
+	if err != nil {
+		return err
+	}
+	return applyChannelsConfig(cfg, st)
+}
+
+func readChannelsYAML(path string) ([]byte, error) {
+	file, err := os.Open(path) //nolint:gosec // path from user-provided CLI config
+	if err != nil {
+		return nil, fmt.Errorf("read channels config: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxChannelImportBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read channels config: %w", err)
+	}
+	if len(data) > maxChannelImportBytes {
+		return nil, fmt.Errorf("read channels config: maximum size %d bytes exceeded", maxChannelImportBytes)
+	}
+	return data, nil
+}
+
+func parseChannelsYAML(data []byte) (ChannelsConfig, error) {
+	if len(data) > maxChannelImportBytes {
+		return ChannelsConfig{}, fmt.Errorf("parse channels config: maximum size %d bytes exceeded", maxChannelImportBytes)
+	}
+	var document yaml.Node
+	nodeDecoder := yaml.NewDecoder(bytes.NewReader(data))
+	if err := nodeDecoder.Decode(&document); err != nil {
+		return ChannelsConfig{}, fmt.Errorf("parse channels config: %w", err)
+	}
+	if err := validateChannelsDocument(&document); err != nil {
+		return ChannelsConfig{}, err
+	}
+	if hasYAMLAliasOrMerge(&document) {
+		return ChannelsConfig{}, fmt.Errorf("parse channels config: YAML aliases and merges are not allowed")
+	}
+	var extra yaml.Node
+	if err := nodeDecoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return ChannelsConfig{}, fmt.Errorf("parse channels config: %w", err)
+		}
+		return ChannelsConfig{}, fmt.Errorf("parse channels config: multiple YAML documents are not allowed")
 	}
 
-	for _, ch := range cfg.Channels {
-		if err := ensureChannel(st, ch, 0); err != nil {
-			slog.Error("failed to create channel from config", "name", ch.Name, "err", err)
+	var cfg ChannelsConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		return ChannelsConfig{}, fmt.Errorf("parse channels config: %w", err)
+	}
+	if err := validateChannelImport(cfg.Channels); err != nil {
+		return ChannelsConfig{}, err
+	}
+	return cfg, nil
+}
+
+func validateChannelsDocument(document *yaml.Node) error {
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return fmt.Errorf("parse channels config: expected one document")
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return fmt.Errorf("parse channels config: root must be a mapping")
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "channels" {
+			if root.Content[i+1].Kind != yaml.SequenceNode {
+				return fmt.Errorf("parse channels config: channels must be a sequence")
+			}
+			return nil
 		}
+	}
+	return fmt.Errorf("parse channels config: channels field is required")
+}
+
+func hasYAMLAliasOrMerge(root *yaml.Node) bool {
+	stack := []*yaml.Node{root}
+	for len(stack) > 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if node.Kind == yaml.AliasNode || node.Tag == "!!merge" {
+			return true
+		}
+		stack = append(stack, node.Content...)
+	}
+	return false
+}
+
+func applyChannelsConfig(cfg ChannelsConfig, st datastore.DataProviderFactory) error {
+	channelImportMu.Lock()
+	defer channelImportMu.Unlock()
+
+	tx, err := st.Tx(context.Background())
+	if err != nil {
+		return fmt.Errorf("begin channel import: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := applyMissingChannels(tx, cfg); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel import: %w", err)
 	}
 
 	slog.Info("imported channels from YAML", "count", countChannels(cfg.Channels))
 	return nil
 }
 
-func ensureChannel(st datastore.DataProviderFactory, ch ChannelYAML, parentID int64) error {
+func initializeChannels(cfg *ChannelsConfig, st datastore.DataProviderFactory) error {
+	tx, err := st.Tx(context.Background())
+	if err != nil {
+		return fmt.Errorf("begin channel initialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	channels, err := tx.ListChannels()
+	if err != nil {
+		return fmt.Errorf("list channels: %w", err)
+	}
+	createdLobby := false
+	if len(channels) == 0 {
+		if err := tx.CreateChannel(model.NewChannel()); err != nil {
+			return fmt.Errorf("create lobby: %w", err)
+		}
+		createdLobby = true
+	}
+	if cfg != nil {
+		if err := applyMissingChannels(tx, *cfg); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel initialization: %w", err)
+	}
+	if createdLobby {
+		slog.Info("created default Lobby channel")
+	}
+	if cfg != nil {
+		slog.Info("imported channels from YAML", "count", countChannels(cfg.Channels))
+	}
+	return nil
+}
+
+func applyMissingChannels(st datastore.DataStore, cfg ChannelsConfig) error {
+	for _, ch := range cfg.Channels {
+		if err := ensureChannel(st, ch, 0); err != nil {
+			return fmt.Errorf("apply channel import: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateChannelImport(channels []ChannelYAML) error {
+	count := 0
+	var validate func([]ChannelYAML, int) error
+	validate = func(entries []ChannelYAML, depth int) error {
+		if depth > maxChannelImportDepth {
+			return fmt.Errorf("validate channels config: maximum depth %d exceeded", maxChannelImportDepth)
+		}
+		siblings := make(map[string]struct{}, len(entries))
+		for _, ch := range entries {
+			if _, exists := siblings[ch.Name]; exists {
+				return fmt.Errorf("validate channels config: duplicate channel %q under the same parent", ch.Name)
+			}
+			siblings[ch.Name] = struct{}{}
+			count++
+			if count > maxChannelImportCount {
+				return fmt.Errorf("validate channels config: maximum channel count %d exceeded", maxChannelImportCount)
+			}
+			candidate := &model.Channel{
+				Name:             ch.Name,
+				Description:      ch.Description,
+				MaxUsers:         ch.MaxUsers,
+				AllowSubChannels: ch.AllowSubChannels,
+			}
+			if err := candidate.Validate(); err != nil {
+				return fmt.Errorf("validate channel %q: %w", ch.Name, err)
+			}
+			if len(ch.Channels) > 0 {
+				if err := validate(ch.Channels, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return validate(channels, 1)
+}
+
+func ensureChannel(st datastore.DataStore, ch ChannelYAML, parentID int64) error {
 	// Check if channel already exists under this parent
-	existing, err := st.NonTx().GetChannelByNameAndParent(ch.Name, parentID)
+	existing, err := st.GetChannelByNameAndParent(ch.Name, parentID)
 	if err != nil {
 		return err
 	}
@@ -82,11 +281,10 @@ func ensureChannel(st datastore.DataProviderFactory, ch ChannelYAML, parentID in
 			IsTemp:           false,
 			AllowSubChannels: ch.AllowSubChannels,
 		}
-		if err := st.NonTx().CreateChannel(channel); err != nil {
+		if err := st.CreateChannel(channel); err != nil {
 			return err
 		}
 		channelID = channel.ID
-		slog.Debug("created channel from config", "name", ch.Name, "parent", parentID)
 	}
 
 	// Recurse into sub-channels
