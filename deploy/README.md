@@ -30,8 +30,21 @@ This configuration is designed to be hands-off after first boot while staying se
 ## Open server mode
 
 The provided cloud-init starts GoSpeak with `-open` and `-screen-share`, which allows anyone to join without a token and enables per-channel screen sharing.
-To require tokens, remove `-open` from `deploy/cloud-init.yaml` and then use the admin token
-printed on first start to generate user tokens.
+To require tokens, remove `-open` from `deploy/cloud-init.yaml`. On first start,
+GoSpeak writes an admin bootstrap credential to
+`/var/lib/gospeak/bootstrap-admin.token`; read it over SSH with:
+
+```bash
+sudo cat /var/lib/gospeak/bootstrap-admin.token
+```
+
+Use that credential for the first admin login and save the personal token
+returned by the server. Interrupted first logins can be retried for the same
+administrator. GoSpeak removes the bootstrap file after the personal token is
+used and logs only the file path, never the credential itself.
+
+With `deploy/compose.yaml`, the same file is in the named data volume. Read it
+with `docker compose exec gospeak cat /data/bootstrap-admin.token`.
 
 ## Bandwidth example (budget VPS)
 

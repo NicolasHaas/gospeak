@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
-	"github.com/NicolasHaas/gospeak/pkg/datastore"
-	"github.com/NicolasHaas/gospeak/pkg/model"
 )
 
 const metricsShutdownTimeout = 5 * time.Second
@@ -150,30 +148,4 @@ func (s *Server) Shutdown() {
 		s.closeScreenConns()
 		s.workers.Wait()
 	})
-}
-
-// ensureAdminToken creates an admin token only on first run (no tokens exist).
-func (s *Server) ensureAdminToken(st datastore.DataProviderFactory) error {
-	hasTokens, err := st.NonTx().HasTokens()
-	if err != nil {
-		return fmt.Errorf("server: check tokens: %w", err)
-	}
-	if hasTokens {
-		return nil // tokens already exist, don't generate more
-	}
-
-	rawToken, err := crypto.GenerateToken()
-	if err != nil {
-		return fmt.Errorf("server: generate admin token: %w", err)
-	}
-
-	hash := crypto.HashToken(rawToken)
-	if err := st.NonTx().CreateToken(hash, model.RoleAdmin, 0, 0, 0 /* unlimited uses, no expiry */, st.NonTx().ZeroTime()); err != nil {
-		return fmt.Errorf("server: store admin token: %w", err)
-	}
-
-	slog.Info("========================================")
-	slog.Info("ADMIN TOKEN (save this!):", "token", rawToken)
-	slog.Info("========================================")
-	return nil
 }

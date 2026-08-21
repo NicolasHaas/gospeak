@@ -864,6 +864,71 @@ func TestCreateToken(t *testing.T) {
 	}
 }
 
+func TestCreateTokenRejectsNegativeMaxUses(t *testing.T) {
+	t.Parallel()
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+	if err := store.NonTx().CreateToken("negative-invite", model.RoleAdmin, 0, 1, -1, time.Time{}); err == nil {
+		t.Fatal("CreateToken() accepted negative max uses")
+	}
+}
+
+func TestLegacyNegativeInviteCannotFinalizeBootstrap(t *testing.T) {
+	t.Parallel()
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+	user, err := store.NonTx().CreateUser("legacy-owner", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	if _, err := store.DB.Exec(
+		"INSERT INTO tokens (hash, role, channel_scope, created_by, max_uses, use_count) VALUES (?, ?, 0, ?, -1, 1)",
+		"legacy-negative", int(model.RoleAdmin), user.ID,
+	); err != nil {
+		t.Fatalf("insert legacy negative invite: %v", err)
+	}
+	finalized, err := store.NonTx().FinalizeBootstrapToken(user.ID)
+	if err != nil {
+		t.Fatalf("FinalizeBootstrapToken() error = %v", err)
+	}
+	if finalized {
+		t.Fatal("legacy negative invite was mistaken for a bootstrap credential")
+	}
+}
+
+func TestBootstrapFinalizationIsRetryable(t *testing.T) {
+	t.Parallel()
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+	user, err := store.NonTx().CreateUser("bootstrap-owner", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	if err := store.NonTx().CreateBootstrapToken("bootstrap-hash"); err != nil {
+		t.Fatalf("CreateBootstrapToken() error = %v", err)
+	}
+	if _, err := store.DB.Exec(
+		"UPDATE tokens SET created_by = ?, use_count = 1 WHERE hash = ?", user.ID, "bootstrap-hash",
+	); err != nil {
+		t.Fatalf("bind bootstrap token: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		finalized, err := store.NonTx().FinalizeBootstrapToken(user.ID)
+		if err != nil {
+			t.Fatalf("FinalizeBootstrapToken() attempt %d error = %v", attempt, err)
+		}
+		if !finalized {
+			t.Fatalf("FinalizeBootstrapToken() attempt %d did not recognize the binding", attempt)
+		}
+	}
+}
+
 func TestValidateToken(t *testing.T) {
 	t.Parallel()
 

@@ -12,7 +12,11 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/model"
 )
 
-const dbTimeLayout = "2006-01-02 15:04:05"
+const (
+	dbTimeLayout       = "2006-01-02 15:04:05"
+	tokenKindInvite    = 0
+	tokenKindBootstrap = 1
+)
 
 type DB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -177,6 +181,7 @@ func (s *ProviderFactory) migrate() error {
 		version      int
 		statements   []string
 		ignoreErrors bool
+		column       string
 	}{
 		{
 			version:    1,
@@ -218,11 +223,30 @@ func (s *ProviderFactory) migrate() error {
 				"CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_parent_name ON channels(parent_id, name)",
 			},
 		},
+		{
+			version: 7,
+			statements: []string{
+				"ALTER TABLE tokens ADD COLUMN kind INTEGER NOT NULL DEFAULT 0 CHECK(kind IN (0, 1))",
+			},
+			column: "kind",
+		},
 	}
 
 	for _, m := range migrations {
 		if m.version <= currentVersion {
 			continue
+		}
+		if m.column != "" {
+			exists, err := s.tokenColumnExists(ctx, m.column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				if err := s.setSchemaVersion(ctx, m.version); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		for _, stmt := range m.statements {
 			if err := s.execMigration(ctx, stmt, m.ignoreErrors); err != nil {
@@ -234,6 +258,16 @@ func (s *ProviderFactory) migrate() error {
 		}
 	}
 	return nil
+}
+
+func (s *ProviderFactory) tokenColumnExists(ctx context.Context, column string) (bool, error) {
+	var exists int
+	if err := s.DB.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pragma_table_info('tokens') WHERE name = ?)", column,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("datastore: inspect schema column: %w", err)
+	}
+	return exists != 0, nil
 }
 
 func (s *ProviderFactory) ensureSchemaMigrations(ctx context.Context) error {
@@ -611,20 +645,91 @@ func (s *baseProvider) HasTokens() (bool, error) {
 	return count > 0, nil
 }
 
+func (s *baseProvider) BootstrapTokenState() (BootstrapTokenState, error) {
+	rows, err := s.QueryContext(context.Background(),
+		"SELECT max_uses, use_count, created_by FROM tokens WHERE kind = ?", tokenKindBootstrap,
+	)
+	if err != nil {
+		return BootstrapTokenAbsent, fmt.Errorf("datastore: read bootstrap token state: %w", err)
+	}
+	defer rows.Close()
+	state := BootstrapTokenAbsent
+	for rows.Next() {
+		if state != BootstrapTokenAbsent {
+			return BootstrapTokenAbsent, fmt.Errorf("datastore: multiple bootstrap token records")
+		}
+		var maxUses, useCount int
+		var createdBy int64
+		if err := rows.Scan(&maxUses, &useCount, &createdBy); err != nil {
+			return BootstrapTokenAbsent, fmt.Errorf("datastore: scan bootstrap token state: %w", err)
+		}
+		switch {
+		case maxUses == -1 && useCount == 0 && createdBy == 0:
+			state = BootstrapTokenPending
+		case maxUses == -1 && useCount == 1 && createdBy > 0:
+			state = BootstrapTokenPending
+		case maxUses == 1 && useCount == 1 && createdBy > 0:
+			state = BootstrapTokenFinalized
+		default:
+			return BootstrapTokenAbsent, fmt.Errorf("datastore: invalid bootstrap token state")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return BootstrapTokenAbsent, fmt.Errorf("datastore: iterate bootstrap token state: %w", err)
+	}
+	return state, nil
+}
+
 // CreateToken stores a new token (hash only).
 func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error {
+	if maxUses < 0 {
+		return fmt.Errorf("datastore: create token: max uses must not be negative")
+	}
 	var expStr *string
 	if !expiresAt.IsZero() {
-		s := formatDBTime(expiresAt)
-		expStr = &s
+		value := formatDBTime(expiresAt)
+		expStr = &value
 	}
 	_, err := s.ExecContext(context.Background(),
-		"INSERT INTO tokens (hash, role, channel_scope, created_by, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-		hash, int(role), channelScope, createdBy, maxUses, expStr)
+		"INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr)
 	if err != nil {
 		return fmt.Errorf("datastore: create token: %w", err)
 	}
 	return nil
+}
+
+func (s *baseProvider) CreateBootstrapToken(hash string) error {
+	_, err := s.ExecContext(context.Background(),
+		"INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses) VALUES (?, ?, 0, 0, ?, -1)",
+		hash, int(model.RoleAdmin), tokenKindBootstrap)
+	if err != nil {
+		return fmt.Errorf("datastore: create bootstrap token: %w", err)
+	}
+	return nil
+}
+
+// FinalizeBootstrapToken makes a provisioned bootstrap credential permanently
+// exhausted after the client proves possession of its personal token.
+func (s *baseProvider) FinalizeBootstrapToken(userID int64) (bool, error) {
+	ctx := context.Background()
+	var belongs int
+	if err := s.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM tokens WHERE created_by = ? AND kind = ? AND max_uses IN (-1, 1) AND use_count = 1)",
+		userID, tokenKindBootstrap,
+	).Scan(&belongs); err != nil {
+		return false, fmt.Errorf("datastore: inspect bootstrap finalization: %w", err)
+	}
+	if belongs == 0 {
+		return false, nil
+	}
+	if _, err := s.ExecContext(ctx,
+		"UPDATE tokens SET max_uses = 1 WHERE created_by = ? AND kind = ? AND max_uses = -1 AND use_count = 1",
+		userID, tokenKindBootstrap,
+	); err != nil {
+		return false, fmt.Errorf("datastore: finalize bootstrap token: %w", err)
+	}
+	return true, nil
 }
 
 // ValidateToken checks if a token hash is valid and returns its authorization data.
@@ -634,16 +739,19 @@ func (s *txProvider) ValidateToken(hash string) (*model.Token, error) {
 
 	var roleInt int
 	var channelScope int64
-	var maxUses, useCount int
+	var kind, maxUses, useCount int
 	var expiresAt *string
 	err := s.QueryRowContext(ctx,
-		"SELECT role, channel_scope, max_uses, use_count, expires_at FROM tokens WHERE hash = ?", hash).
-		Scan(&roleInt, &channelScope, &maxUses, &useCount, &expiresAt)
+		"SELECT role, channel_scope, kind, max_uses, use_count, expires_at FROM tokens WHERE hash = ?", hash).
+		Scan(&roleInt, &channelScope, &kind, &maxUses, &useCount, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("datastore: invalid token")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("datastore: validate token: %w", err)
+	}
+	if kind != tokenKindInvite || maxUses < 0 {
+		return nil, fmt.Errorf("datastore: invalid token")
 	}
 
 	if expiresAt != nil {
@@ -675,6 +783,82 @@ func (s *txProvider) ValidateToken(hash string) (*model.Token, error) {
 	}
 
 	return &model.Token{Role: model.Role(roleInt), ChannelScope: channelScope}, nil
+}
+
+// ProvisionBootstrapUser atomically binds the internal bootstrap credential to
+// one administrator and a deterministic personal token. Repeating the same
+// provisioning request returns the existing user; a different username is
+// rejected.
+func (s *txProvider) ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error) {
+	ctx := context.Background()
+	var roleInt, kind, maxUses, useCount int
+	var channelScope, createdBy int64
+	if err := s.QueryRowContext(ctx,
+		"SELECT role, channel_scope, created_by, kind, max_uses, use_count FROM tokens WHERE hash = ?", hash,
+	).Scan(&roleInt, &channelScope, &createdBy, &kind, &maxUses, &useCount); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("datastore: invalid bootstrap credential")
+		}
+		return nil, fmt.Errorf("datastore: read bootstrap credential: %w", err)
+	}
+	if model.Role(roleInt) != model.RoleAdmin || channelScope != 0 || kind != tokenKindBootstrap || maxUses != -1 {
+		return nil, fmt.Errorf("datastore: invalid bootstrap credential")
+	}
+	if useCount == 0 && createdBy != 0 {
+		return nil, fmt.Errorf("datastore: invalid bootstrap credential state")
+	}
+	if useCount != 0 {
+		if useCount != 1 || createdBy <= 0 {
+			return nil, fmt.Errorf("datastore: invalid bootstrap credential state")
+		}
+		user, err := s.GetUserByID(createdBy)
+		if err != nil {
+			return nil, err
+		}
+		if user == nil || user.Username != username || user.PersonalTokenHash != personalTokenHash {
+			return nil, ErrBootstrapAlreadyProvisioned
+		}
+		return user, nil
+	}
+
+	result, err := s.ExecContext(ctx,
+		"UPDATE tokens SET use_count = 1 WHERE hash = ? AND kind = ? AND max_uses = -1 AND use_count = 0",
+		hash, tokenKindBootstrap,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: claim bootstrap credential: %w", err)
+	}
+	claimed, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("datastore: inspect bootstrap claim: %w", err)
+	}
+	if claimed != 1 {
+		return nil, fmt.Errorf("datastore: bootstrap credential changed concurrently")
+	}
+	user, err := s.CreateUserWithChannelScope(username, model.RoleAdmin, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.UpdateUserPersonalToken(user.ID, personalTokenHash, createdAt); err != nil {
+		return nil, err
+	}
+	result, err = s.ExecContext(ctx,
+		"UPDATE tokens SET created_by = ? WHERE hash = ? AND kind = ? AND max_uses = -1 AND use_count = 1 AND created_by = 0",
+		user.ID, hash, tokenKindBootstrap,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: bind bootstrap credential: %w", err)
+	}
+	bound, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("datastore: inspect bootstrap binding: %w", err)
+	}
+	if bound != 1 {
+		return nil, fmt.Errorf("datastore: bootstrap credential changed concurrently")
+	}
+	user.PersonalTokenHash = personalTokenHash
+	user.PersonalTokenCreatedAt = createdAt
+	return user, nil
 }
 
 // ---- Bans ----

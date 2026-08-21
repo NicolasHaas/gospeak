@@ -80,6 +80,7 @@ type Server struct {
 	screenConns     map[uint32]*screenClientConn
 	voiceKey        []byte // shared AES-128 key for all voice encryption
 	authLimiter     *authRateLimiter
+	bootstrapMu     sync.Mutex
 	preAuthMu       sync.Mutex
 	acceptedConns   map[net.Conn]trackedConn
 	preAuthCount    map[preAuthPlane]int

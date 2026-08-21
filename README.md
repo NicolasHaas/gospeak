@@ -49,7 +49,12 @@ docker compose -f compose.yaml -f compose.monitoring.yaml up -d
 Grafana is then available only on `127.0.0.1:3000`. Prometheus is not published
 on the host.
 
-On first run, an **admin token** is printed to stdout — save it to create more tokens and manage the server.
+On first run, GoSpeak writes an admin bootstrap credential to
+`bootstrap-admin.token` in the data directory. For this Compose setup, read it
+with `cat ./data/bootstrap-admin.token`. Use it for the first admin login and
+save the personal token returned by the server. Interrupted first logins can be
+retried for the same administrator. The server removes the bootstrap file once
+that personal token is used; the credential is never written to normal logs.
 
 ### Run the Server (Binary)
 
@@ -121,7 +126,7 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 | `-voice` | `:9601` | UDP voice bind address |
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
 | `-db` | `gospeak.db` | SQLite database path |
-| `-data` | `.` | Data directory (TLS certs, etc.) |
+| `-data` | `.` | Data directory for generated TLS files and the first-run `bootstrap-admin.token` |
 | `-open` | `false` | Allow connections without a token |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | | YAML file for initial channel setup |
