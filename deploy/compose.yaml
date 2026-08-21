@@ -1,8 +1,8 @@
 # GoSpeak Server example Docker Compose
 # Usage: docker compose up -d
 #
-# On first run, check logs for your admin token:
-#   docker compose logs gospeak
+# On first run, read the admin bootstrap credential from the data volume:
+#   docker compose exec gospeak cat /data/bootstrap-admin.token
 
 services:
   gospeak:

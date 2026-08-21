@@ -122,7 +122,8 @@ sequenceDiagram
     Srv->>Srv: GenerateKey() → shared AES-128 voice key
     Srv->>Store: Ensure "Lobby" channel exists
     Srv->>Store: Load channels from YAML (if configured)
-    Srv->>Store: Ensure admin token exists (first run only)
+    Srv->>Srv: Securely publish bootstrap-admin.token (first run only)
+    Srv->>Store: Install its retryable, single-admin credential; log path only
     Srv->>TLS: StartControl(:9600)
     Srv->>UDP: StartVoice(:9601)
     opt screen sharing enabled

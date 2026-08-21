@@ -47,6 +47,15 @@ type DataStore interface {
 // duplicate username constraint.
 var ErrUsernameTaken = errors.New("datastore: username already taken")
 var ErrChannelNameTaken = errors.New("datastore: channel name already exists under parent")
+var ErrBootstrapAlreadyProvisioned = errors.New("datastore: bootstrap credential already provisioned another user")
+
+type BootstrapTokenState uint8
+
+const (
+	BootstrapTokenAbsent BootstrapTokenState = iota
+	BootstrapTokenPending
+	BootstrapTokenFinalized
+)
 
 var _ DataProviderFactory = (*ProviderFactory)(nil)
 
@@ -81,14 +90,18 @@ type ChannelWriteProvider interface {
 
 type TokenReadProvider interface {
 	HasTokens() (bool, error)
+	BootstrapTokenState() (BootstrapTokenState, error)
 }
 
 type TokenWriteProvider interface {
 	CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error
+	CreateBootstrapToken(hash string) error
+	FinalizeBootstrapToken(userID int64) (bool, error)
 }
 
 type TokenTransactionProvider interface {
 	ValidateToken(hash string) (*model.Token, error)
+	ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error)
 }
 
 type BanReadProvider interface {

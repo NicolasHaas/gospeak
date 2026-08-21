@@ -166,7 +166,14 @@ graph TB
 - Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
 - Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). On upgrade, legacy bookmark and settings files beside the executable are migrated there and removed only after the protected replacement is written successfully. Protect the user account and its config directory accordingly.
 - Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide. Older clients remain wire-compatible but must be upgraded to select the scoped channel automatically.
-- On first server run, an admin token is automatically generated and logged
+- On first server run, an admin bootstrap credential is written atomically to
+  `bootstrap-admin.token` in the configured data directory. It is protected by
+  mode `0600` and owner checks on POSIX, or a protected owner-only ACL on
+  Windows, and is read without following the final symlink/reparse component.
+  Provisioning is transactional and retryable for one administrator, including
+  after response-delivery failures. The server invalidates the credential and
+  removes its file after that administrator proves possession of the returned
+  personal token. Normal logs contain only the credential path.
 
 ### Open Server Mode
 
@@ -218,4 +225,4 @@ Used internally for potential future password-based auth:
 2. **Restart the server** periodically to generate fresh voice encryption keys (a new key is generated on every startup)
 3. **Use strong tokens** (the default 256-bit random is good)
 4. **Restrict network access** — only expose ports 9600/tcp, 9601/udp, and 9603/tcp when screen sharing is enabled
-5. **Monitor admin token usage** — the auto-generated admin token is logged at startup
+5. **Protect bootstrap credentials** — read `bootstrap-admin.token` only through the server administrator account and retain the returned personal token

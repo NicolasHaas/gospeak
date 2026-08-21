@@ -491,9 +491,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 	}
+	if user != nil {
+		if err := s.finalizeBootstrapCredential(st, user.ID); err != nil {
+			slog.Error("finalize bootstrap credential", "err", err)
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
 
 	var tokenRole model.Role
 	var channelScope int64
+	bootstrapProvisioned := false
 	if user != nil {
 		sessionRole = user.Role
 		channelScope = user.ChannelScope
@@ -503,7 +511,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 
-		// New user: role comes from the token
+		// New user: role comes from the token.
 		if authReq.Token == "" {
 			if !s.cfg.AllowNoToken {
 				s.metrics.FailedAuths.Add(1)
@@ -512,64 +520,83 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			}
 			tokenRole = model.RoleUser
 		} else {
-			ctx := context.Background()
-			tx, err := st.Tx(ctx)
-			if err != nil {
-				slog.Error("transaction error", "err", err)
-				sendError(conn, 3, "could not establish transaction")
-				return
-			}
-
-			committed := false
-			defer func() {
-				if !committed {
-					if err := tx.Rollback(); err != nil {
-						slog.Warn("tx rollback failed", "err", err)
-					}
-				}
-			}()
-
-			tokenAuth, validateErr := tx.ValidateToken(tokenHash)
-			err = validateErr
-			if err != nil {
+			bootstrapUser, bootstrapToken, isBootstrap, bootstrapErr := s.tryProvisionBootstrapUser(st, tokenHash, authReq.Token, authReq.Username)
+			if bootstrapErr != nil {
 				s.metrics.FailedAuths.Add(1)
-				slog.Warn("auth failed", "err", err)
+				slog.Warn("bootstrap provisioning failed", "err", bootstrapErr)
 				sendError(conn, 2, "authentication failed")
 				return
 			}
-			tokenRole = tokenAuth.Role
-			channelScope = tokenAuth.ChannelScope
-			if err := tx.Commit(); err != nil {
-				slog.Error("commit transaction", "err", err)
-				sendError(conn, 3, "database error")
-				return
+			if isBootstrap {
+				user = bootstrapUser
+				autoToken = bootstrapToken
+				tokenRole = user.Role
+				channelScope = user.ChannelScope
+				bootstrapProvisioned = true
+			} else {
+				ctx := context.Background()
+				tx, err := st.Tx(ctx)
+				if err != nil {
+					slog.Error("transaction error", "err", err)
+					sendError(conn, 3, "could not establish transaction")
+					return
+				}
+
+				committed := false
+				defer func() {
+					if !committed {
+						if err := tx.Rollback(); err != nil {
+							slog.Warn("tx rollback failed", "err", err)
+						}
+					}
+				}()
+
+				tokenAuth, validateErr := tx.ValidateToken(tokenHash)
+				err = validateErr
+				if err != nil {
+					s.metrics.FailedAuths.Add(1)
+					slog.Warn("auth failed", "err", err)
+					sendError(conn, 2, "authentication failed")
+					return
+				}
+				tokenRole = tokenAuth.Role
+				channelScope = tokenAuth.ChannelScope
+				if err := tx.Commit(); err != nil {
+					slog.Error("commit transaction", "err", err)
+					sendError(conn, 3, "database error")
+					return
+				}
+				committed = true
 			}
-			committed = true
 		}
 
-		user, err = st.NonTx().CreateUserWithChannelScope(authReq.Username, tokenRole, channelScope)
-		if err != nil {
-			if errors.Is(err, datastore.ErrUsernameTaken) {
-				s.metrics.FailedAuths.Add(1)
-				sendError(conn, 2, "authentication failed: personal token required")
+		if !bootstrapProvisioned {
+			user, err = st.NonTx().CreateUserWithChannelScope(authReq.Username, tokenRole, channelScope)
+			if err != nil {
+				if errors.Is(err, datastore.ErrUsernameTaken) {
+					s.metrics.FailedAuths.Add(1)
+					sendError(conn, 2, "authentication failed: personal token required")
+					return
+				}
+				slog.Error("create user", "err", err)
+				sendError(conn, 3, "could not create user")
 				return
 			}
-			slog.Error("create user", "err", err)
-			sendError(conn, 3, "could not create user")
-			return
-		}
-		sessionRole = tokenRole
+			sessionRole = tokenRole
 
-		rawToken, err := crypto.GenerateToken()
-		if err != nil {
-			sendError(conn, 3, "failed to generate personal token")
-			return
+			rawToken, err := crypto.GenerateToken()
+			if err != nil {
+				sendError(conn, 3, "failed to generate personal token")
+				return
+			}
+			if err := st.NonTx().UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
+				sendError(conn, 3, "failed to store personal token")
+				return
+			}
+			autoToken = rawToken
+		} else {
+			sessionRole = user.Role
 		}
-		if err := st.NonTx().UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
-			sendError(conn, 3, "failed to store personal token")
-			return
-		}
-		autoToken = rawToken
 	}
 
 	// Check ban
@@ -987,6 +1014,10 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	}
 	if errMsg := rbac.RequirePermission(session.Role, rbac.PermManageTokens); errMsg != "" {
 		sendError(conn, 30, errMsg)
+		return
+	}
+	if req.MaxUses < 0 {
+		sendError(conn, 31, "max uses must not be negative")
 		return
 	}
 
