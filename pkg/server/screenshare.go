@@ -7,18 +7,22 @@ import (
 	"time"
 
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
 type ScreenShareManager struct {
-	mu                 sync.RWMutex
-	activeByChannel    map[int64]*pb.ScreenShareEvent
-	channelBySession   map[uint32]int64
-	authorizedByShare  map[uint32]map[uint32]bool
-	subscribersByShare map[uint32]map[uint32]bool
-	authorizedTarget   map[uint32]uint32
-	viewerTarget       map[uint32]uint32
-	lastFrameAt        map[uint32]time.Time
+	mu                      sync.RWMutex
+	activeByChannel         map[int64]*pb.ScreenShareEvent
+	channelBySession        map[uint32]int64
+	authorizedByShare       map[uint32]map[uint32]bool
+	subscribersByShare      map[uint32]map[uint32]bool
+	authorizedTarget        map[uint32]uint32
+	viewerTarget            map[uint32]uint32
+	lastFrameAt             map[uint32]time.Time
+	cipherByShare           map[uint32]*gospeakCrypto.VoiceCipher
+	lastFrameSequence       map[uint32]uint32
+	beforeFrameReplayCommit func()
 }
 
 func NewScreenShareManager() *ScreenShareManager {
@@ -30,6 +34,8 @@ func NewScreenShareManager() *ScreenShareManager {
 		authorizedTarget:   make(map[uint32]uint32),
 		viewerTarget:       make(map[uint32]uint32),
 		lastFrameAt:        make(map[uint32]time.Time),
+		cipherByShare:      make(map[uint32]*gospeakCrypto.VoiceCipher),
+		lastFrameSequence:  make(map[uint32]uint32),
 	}
 }
 
@@ -44,6 +50,13 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	if err != nil {
 		return nil, fmt.Errorf("generate screen share key: %w", err)
 	}
+	cipher, err := gospeakCrypto.NewVoiceCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("initialize screen share cipher: %w", err)
+	}
+	if active, ok := m.activeByChannel[channelID]; ok && active.SessionID == sessionID {
+		m.stopBySessionLocked(sessionID)
+	}
 
 	event := &pb.ScreenShareEvent{
 		ChannelID:     channelID,
@@ -57,6 +70,8 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	}
 	m.activeByChannel[channelID] = event
 	m.channelBySession[sessionID] = channelID
+	m.cipherByShare[sessionID] = cipher
+	delete(m.lastFrameSequence, sessionID)
 	if _, ok := m.authorizedByShare[sessionID]; !ok {
 		m.authorizedByShare[sessionID] = make(map[uint32]bool)
 	}
@@ -98,6 +113,8 @@ func (m *ScreenShareManager) ExpireInactive(idleTimeout time.Duration) []*pb.Scr
 }
 
 func (m *ScreenShareManager) stopBySessionLocked(sessionID uint32) (*pb.ScreenShareEvent, bool) {
+	delete(m.cipherByShare, sessionID)
+	delete(m.lastFrameSequence, sessionID)
 
 	channelID, ok := m.channelBySession[sessionID]
 	if !ok {
@@ -233,13 +250,44 @@ func (m *ScreenShareManager) SubscribersForSharer(sessionID uint32) []uint32 {
 	return result
 }
 
-func (m *ScreenShareManager) AllowFrame(sessionID uint32, minInterval time.Duration) bool {
+// AcceptFrame authenticates a frame before applying its strict monotonic
+// sequence check and rate gate. A rate-limited sequence remains consumed. The
+// cipher identity binds the result to the same active share across the
+// decrypt/unlock boundary.
+func (m *ScreenShareManager) AcceptFrame(sessionID uint32, pkt *protocol.ScreenPacket, minInterval time.Duration) bool {
+	if pkt == nil || pkt.SessionID != sessionID || pkt.SeqNum == 0 {
+		return false
+	}
+
+	m.mu.RLock()
+	channelID, ok := m.channelBySession[sessionID]
+	active := m.activeByChannel[channelID]
+	cipher := m.cipherByShare[sessionID]
+	validShare := ok && active != nil && active.Active && active.SessionID == sessionID && cipher != nil
+	m.mu.RUnlock()
+	if !validShare {
+		return false
+	}
+	if _, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), pkt.Payload); err != nil {
+		return false
+	}
+	if hook := m.beforeFrameReplayCommit; hook != nil {
+		hook()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
+	current := m.activeByChannel[channelID]
+	if current == nil || !current.Active || current.SessionID != sessionID || m.cipherByShare[sessionID] != cipher {
+		return false
+	}
+	if pkt.SeqNum <= m.lastFrameSequence[sessionID] {
+		return false
+	}
+	m.lastFrameSequence[sessionID] = pkt.SeqNum
 	now := time.Now()
 	last := m.lastFrameAt[sessionID]
-	if !last.IsZero() && now.Sub(last) < minInterval {
+	if minInterval > 0 && !last.IsZero() && now.Sub(last) < minInterval {
 		return false
 	}
 	m.lastFrameAt[sessionID] = now

@@ -19,6 +19,7 @@ import (
 type SessionManager struct {
 	mu               sync.RWMutex
 	sessions         map[uint32]*model.Session // sessionID -> session
+	voiceReplay      map[uint32]*protocol.ReplayWindow
 	nextSessionID    uint32
 	issuedSessionIDs uint64
 	sessionIDSeeded  bool
@@ -45,7 +46,8 @@ type SessionSnapshot struct {
 // NewSessionManager creates a new session manager.
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		sessions: make(map[uint32]*model.Session),
+		sessions:    make(map[uint32]*model.Session),
+		voiceReplay: make(map[uint32]*protocol.ReplayWindow),
 	}
 }
 
@@ -165,11 +167,44 @@ func (sm *SessionManager) ValidateScreenAuth(sessionID uint32, token string) boo
 	return ok && s.ScreenAuthToken == token
 }
 
-// Remove removes a session.
+// Remove removes a session and its replay state.
 func (sm *SessionManager) Remove(id uint32) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	delete(sm.sessions, id)
+	delete(sm.voiceReplay, id)
+}
+
+// AcceptVoiceSequence atomically rechecks an authenticated packet's endpoint
+// and records its sequence for an active, unmuted session. Authentication must
+// happen before this call so forged high sequences cannot advance the window.
+func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAddr, sequence uint32) (SessionSnapshot, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.sessions[id]
+	if !ok || s.Muted || !udpAddrEqual(s.UDPAddr, expectedAddr) {
+		return SessionSnapshot{}, false
+	}
+	window := sm.voiceReplay[id]
+	if window == nil {
+		window = &protocol.ReplayWindow{}
+		sm.voiceReplay[id] = window
+	}
+	if !window.Accept(sequence) {
+		return SessionSnapshot{}, false
+	}
+	return SessionSnapshot{
+		ID:              s.ID,
+		UserID:          s.UserID,
+		Username:        s.Username,
+		Role:            s.Role,
+		ChannelScope:    s.ChannelScope,
+		ChannelID:       s.ChannelID,
+		ScreenAuthToken: s.ScreenAuthToken,
+		UDPAddr:         cloneUDPAddr(s.UDPAddr),
+		Muted:           s.Muted,
+		Deafened:        s.Deafened,
+	}, true
 }
 
 // RegisterUDPAddr authenticates and atomically updates a session's UDP endpoint.

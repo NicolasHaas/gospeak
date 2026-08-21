@@ -27,7 +27,12 @@ func (s *Server) Run() error {
 	if err != nil {
 		return fmt.Errorf("server: generate voice key: %w", err)
 	}
+	voiceCipher, err := crypto.NewVoiceCipher(voiceKey)
+	if err != nil {
+		return fmt.Errorf("server: initialize voice cipher: %w", err)
+	}
 	s.voiceKey = voiceKey
+	s.voiceCipher = voiceCipher
 
 	// Enable voice debug counters before listeners start so voiceLoop reads a
 	// stable value (avoids a data race with the assignment below).

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
@@ -79,6 +80,8 @@ type Server struct {
 	screenMu        sync.RWMutex
 	screenConns     map[uint32]*screenClientConn
 	voiceKey        []byte // shared AES-128 key for all voice encryption
+	voiceCipher     *gospeakCrypto.VoiceCipher
+	voiceReplayHook func()
 	authLimiter     *authRateLimiter
 	bootstrapMu     sync.Mutex
 	preAuthMu       sync.Mutex

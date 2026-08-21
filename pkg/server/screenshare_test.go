@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
@@ -122,6 +125,49 @@ func TestScreenShareManager_StopClearsSubscribers(t *testing.T) {
 	}
 }
 
+func TestScreenShareManager_RestartBySameSessionClearsViewerState(t *testing.T) {
+	mgr := NewScreenShareManager()
+
+	first, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+	if _, viewers, err := mgr.ShareWithViewers(10, []uint32{30}); err != nil || len(viewers) != 1 {
+		t.Fatalf("ShareWithViewers(first) = (%v, %v), want one viewer and nil error", viewers, err)
+	}
+	if _, err := mgr.Subscribe(1, 30); err != nil {
+		t.Fatalf("Subscribe(first): %v", err)
+	}
+
+	replacement, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start(replacement): %v", err)
+	}
+	if bytes.Equal(first.EncryptionKey, replacement.EncryptionKey) {
+		t.Fatal("replacement share reused encryption key")
+	}
+	if got := mgr.SubscribersForSharer(10); len(got) != 0 {
+		t.Fatalf("replacement subscribers = %v, want none", got)
+	}
+	if got := mgr.SubscriberCount(); got != 0 {
+		t.Fatalf("replacement subscriber count = %d, want 0", got)
+	}
+	if _, err := mgr.Subscribe(1, 30); err == nil {
+		t.Fatal("viewer remained authorized across replacement share")
+	}
+
+	shared, viewers, err := mgr.ShareWithViewers(10, []uint32{30})
+	if err != nil {
+		t.Fatalf("ShareWithViewers(replacement): %v", err)
+	}
+	if len(viewers) != 1 || viewers[0] != 30 {
+		t.Fatalf("replacement shared viewers = %v, want [30]", viewers)
+	}
+	if !bytes.Equal(shared.EncryptionKey, replacement.EncryptionKey) {
+		t.Fatal("replacement viewer received the wrong encryption key")
+	}
+}
+
 func TestScreenShareManager_ShareWithViewersRequiresActiveShare(t *testing.T) {
 	mgr := NewScreenShareManager()
 
@@ -147,6 +193,161 @@ func TestScreenShareManager_ExpireInactiveStopsShare(t *testing.T) {
 	}
 	if _, ok := mgr.ActiveForChannel(1); ok {
 		t.Fatalf("ActiveForChannel(1) = ok true, want false")
+	}
+}
+
+func TestScreenShareManagerAcceptFrameAuthenticatesBeforeMonotonicSequence(t *testing.T) {
+	mgr := NewScreenShareManager()
+	started, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cipher, err := gospeakCrypto.NewVoiceCipher(started.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher: %v", err)
+	}
+	packet := func(sequence uint32, activeCipher *gospeakCrypto.VoiceCipher) *protocol.ScreenPacket {
+		pkt := &protocol.ScreenPacket{SessionID: 10, SeqNum: sequence}
+		pkt.Payload = activeCipher.Encrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), []byte("frame"))
+		return pkt
+	}
+
+	if !mgr.AcceptFrame(10, packet(1, cipher), 0) {
+		t.Fatal("first authenticated frame was rejected")
+	}
+	if mgr.AcceptFrame(10, packet(1, cipher), 0) {
+		t.Fatal("duplicate frame was accepted")
+	}
+
+	forged := packet(1000, cipher)
+	forged.Payload[0] ^= 0xff
+	if mgr.AcceptFrame(10, forged, 0) {
+		t.Fatal("forged frame was accepted")
+	}
+	if !mgr.AcceptFrame(10, packet(2, cipher), 0) {
+		t.Fatal("forged high sequence poisoned screen replay state")
+	}
+	if mgr.AcceptFrame(10, packet(1, cipher), 0) {
+		t.Fatal("out-of-order screen frame was accepted on ordered transport")
+	}
+
+	if _, ok := mgr.StopBySession(10); !ok {
+		t.Fatal("StopBySession failed")
+	}
+	restarted, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("restart share: %v", err)
+	}
+	if bytes.Equal(started.EncryptionKey, restarted.EncryptionKey) {
+		t.Fatal("restart reused screen encryption key")
+	}
+	newCipher, err := gospeakCrypto.NewVoiceCipher(restarted.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher(restarted): %v", err)
+	}
+	if mgr.AcceptFrame(10, packet(3, cipher), 0) {
+		t.Fatal("frame from previous share key was accepted")
+	}
+	if !mgr.AcceptFrame(10, packet(1, newCipher), 0) {
+		t.Fatal("new share did not reset monotonic sequence state")
+	}
+}
+
+func TestScreenShareManagerRateLimitedFrameStillConsumesSequence(t *testing.T) {
+	mgr := NewScreenShareManager()
+	started, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cipher, err := gospeakCrypto.NewVoiceCipher(started.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher: %v", err)
+	}
+	pkt := &protocol.ScreenPacket{SessionID: 10, SeqNum: 1}
+	pkt.Payload = cipher.Encrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), []byte("frame"))
+
+	if mgr.AcceptFrame(10, pkt, time.Hour) {
+		t.Fatal("frame inside rate-limit interval was allowed")
+	}
+	if mgr.AcceptFrame(10, pkt, 0) {
+		t.Fatal("rate-limited frame sequence was reusable")
+	}
+}
+
+func TestScreenShareManagerStaleAuthenticationCannotAdvanceReplacementShare(t *testing.T) {
+	mgr := NewScreenShareManager()
+	started, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	oldCipher, err := gospeakCrypto.NewVoiceCipher(started.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher: %v", err)
+	}
+	oldPacket := &protocol.ScreenPacket{SessionID: 10, SeqNum: 1}
+	oldPacket.Payload = oldCipher.Encrypt(oldPacket.SessionID, oldPacket.SeqNum, oldPacket.MarshalHeader(), []byte("old"))
+
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	mgr.beforeFrameReplayCommit = func() {
+		close(reached)
+		<-release
+	}
+	result := make(chan bool, 1)
+	go func() { result <- mgr.AcceptFrame(10, oldPacket, 0) }()
+	<-reached
+
+	if _, ok := mgr.StopBySession(10); !ok {
+		t.Fatal("StopBySession failed")
+	}
+	restarted, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	close(release)
+	if <-result {
+		t.Fatal("stale authentication advanced replacement share")
+	}
+	mgr.beforeFrameReplayCommit = nil
+
+	newCipher, err := gospeakCrypto.NewVoiceCipher(restarted.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher(restarted): %v", err)
+	}
+	newPacket := &protocol.ScreenPacket{SessionID: 10, SeqNum: 1}
+	newPacket.Payload = newCipher.Encrypt(newPacket.SessionID, newPacket.SeqNum, newPacket.MarshalHeader(), []byte("new"))
+	if !mgr.AcceptFrame(10, newPacket, 0) {
+		t.Fatal("replacement share sequence was poisoned")
+	}
+}
+
+func TestScreenShareManagerAcceptFrameConcurrentDuplicateOnce(t *testing.T) {
+	mgr := NewScreenShareManager()
+	started, err := mgr.Start(1, 10, 20, "alice", 800, 600)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cipher, err := gospeakCrypto.NewVoiceCipher(started.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher: %v", err)
+	}
+	pkt := &protocol.ScreenPacket{SessionID: 10, SeqNum: 1}
+	pkt.Payload = cipher.Encrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), []byte("frame"))
+
+	var accepted atomic.Int32
+	var workers sync.WaitGroup
+	for range 64 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if mgr.AcceptFrame(10, pkt, 0) {
+				accepted.Add(1)
+			}
+		}()
+	}
+	workers.Wait()
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("concurrent frame accepts = %d, want exactly 1", got)
 	}
 }
 
