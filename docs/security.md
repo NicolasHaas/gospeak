@@ -52,10 +52,12 @@ graph TB
 
 - The control plane uses **TLS 1.3** (the latest version) for all TCP connections
 - On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
-- Certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
+- The automatic certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
+- The first new TLS connection within 30 days of expiry renews it, even if the server has stayed up continuously. Renewal keeps the existing private key, so saved TOFU fingerprints remain valid. If renewal fails while the cached certificate is still valid, GoSpeak serves that certificate and retries on a later connection; it fails closed after expiry
+- Files at the automatic paths must contain GoSpeak's self-signed ECDSA P-256 material. Configure CA-issued, RSA, or otherwise operator-managed pairs explicitly with `-cert` and `-key`
 - Custom matching certificate/key pairs, including self-signed pairs, can be provided via `-cert` and `-key`
-- Certificate handling fails closed: partial configuration, missing files, malformed PEM, mismatched keys, or damaged automatic files stop startup without overwriting existing material
-- Automatically generated files are published without replacing existing paths; the private key is created with mode `0600`
+- Certificate handling fails closed: partial configuration, missing files, malformed PEM, mismatched keys, expired or not-yet-valid custom certificates, and damaged or foreign automatic files stop startup without overwriting existing material
+- Initial automatic files are published without replacing existing paths; the private key is created with mode `0600`. Renewal syncs a same-directory temporary certificate before replacing only `server.crt` and leaves `server.key` unchanged. Unix uses an atomic rename plus directory sync; Windows uses `MoveFileEx` with replace-existing and write-through flags
 - Clients first try normal system-PKI and hostname verification. A certificate that is not publicly trusted is rejected until the user verifies and explicitly accepts its SHA-256 SubjectPublicKeyInfo fingerprint
 - Accepted TOFU pins are stored by normalized control address in the bookmark file. Subsequent control connections require the same public key; screen connections require the exact identity established by the control connection
 - A changed TOFU pin is treated as a possible MITM and blocks the connection. Replacing it requires an explicit re-trust confirmation that displays both fingerprints

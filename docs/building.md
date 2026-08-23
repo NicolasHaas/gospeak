@@ -110,7 +110,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-db` | `gospeak.db` | SQLite database path |
 | `-data` | `.` | Directory for auto-generated TLS certs |
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; requires `-key` |
-| `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data` |
+| `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
 | `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
