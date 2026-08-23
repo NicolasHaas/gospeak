@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/audio"
+	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
@@ -99,6 +101,15 @@ func (d *fixedDecoder) Decode([]byte) ([]int16, error) {
 }
 func (d *fixedDecoder) DecodePLC() ([]int16, error) {
 	return append([]int16(nil), d.frame...), nil
+}
+
+type countingDecoderFactory struct {
+	created int
+}
+
+func (f *countingDecoderFactory) NewDecoder() (audio.AudioDecoder, error) {
+	f.created++
+	return &fixedDecoder{}, nil
 }
 
 var _ audio.Player = (*recordingPlayer)(nil)
@@ -214,6 +225,40 @@ func TestPlayoutMixesConcurrentSpeakersIntoOneFrame(t *testing.T) {
 	}
 	if got, want := player.frames[0][1], int16(-32768); got != want {
 		t.Fatalf("mixed negative sample = %d, want %d", got, want)
+	}
+}
+
+func TestIncomingVoiceAuthenticatesBeforeAllocatingSpeakerState(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	key := bytes.Repeat([]byte{0x42}, 16)
+	cipher, err := gospeakCrypto.NewVoiceCipher(key)
+	if err != nil {
+		t.Fatalf("NewVoiceCipher: %v", err)
+	}
+	g.cipher = cipher
+	factory := &countingDecoderFactory{}
+	e.decoderFactory = factory
+
+	for sessionID := uint32(1); sessionID <= 64; sessionID++ {
+		e.processIncomingVoice(g, &protocol.VoicePacket{
+			SessionID: sessionID,
+			SeqNum:    1,
+			ChannelID: 1,
+			Payload:   bytes.Repeat([]byte{0xff}, 16),
+		})
+	}
+	if factory.created != 0 || len(e.decoders) != 0 || len(e.jitterBufs) != 0 || len(e.speakerLastSeen) != 0 {
+		t.Fatalf("invalid packets allocated state: decoders=%d jitter=%d last_seen=%d factory=%d",
+			len(e.decoders), len(e.jitterBufs), len(e.speakerLastSeen), factory.created)
+	}
+
+	valid := &protocol.VoicePacket{SessionID: 7, SeqNum: 2, ChannelID: 1}
+	valid.Payload = cipher.Encrypt(valid.SessionID, valid.SeqNum, valid.MarshalHeader(), []byte("opus"))
+	e.processIncomingVoice(g, valid)
+	if factory.created != 1 || e.decoders[7] == nil || e.jitterBufs[7] == nil || e.speakerLastSeen[7].IsZero() {
+		t.Fatalf("authenticated packet did not allocate expected state: decoders=%d jitter=%d last_seen=%d factory=%d",
+			len(e.decoders), len(e.jitterBufs), len(e.speakerLastSeen), factory.created)
 	}
 }
 

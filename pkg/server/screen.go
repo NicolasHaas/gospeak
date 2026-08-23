@@ -134,11 +134,10 @@ func (s *Server) handleScreenPacket(sessionID uint32, pkt *protocol.ScreenPacket
 	if !s.screenShare.IsSharer(sessionID, session.ChannelID) {
 		return
 	}
-	if !s.screenShare.AllowFrame(sessionID, minScreenShareFrameInterval) {
+	if !s.screenShare.AcceptFrame(sessionID, pkt, minScreenShareFrameInterval) {
 		return
 	}
 
-	pkt.SessionID = sessionID
 	frame, err := protocol.MarshalScreenPacketFrame(pkt)
 	if err != nil {
 		slog.Error("marshal screen packet", "session", sessionID, "err", err)

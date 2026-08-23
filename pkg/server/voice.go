@@ -61,8 +61,8 @@ func (s *Server) StartVoice() error {
 	return nil
 }
 
-// voiceLoop reads UDP voice packets and forwards them to channel members.
-// This is an SFU (Selective Forwarding Unit) - no decryption, no mixing.
+// voiceLoop authenticates UDP voice packets and forwards their original
+// ciphertext to channel members. It never decodes or mixes media plaintext.
 func (s *Server) voiceLoop(conn *net.UDPConn) {
 	buf := make([]byte, protocol.VoiceHeaderSize+protocol.MaxVoicePayload)
 
@@ -105,35 +105,10 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			continue
 		}
 
-		// Look up sender session
-		session, ok := s.sessions.GetSnapshot(pkt.SessionID)
+		actualChannel, ok := s.acceptVoicePacket(pkt, remoteAddr)
 		if !ok {
 			s.metrics.VoicePacketsDropped.Add(1)
-			continue // unknown session, discard
-		}
-
-		// Voice is accepted only after a control-authenticated registration proof.
-		if !udpAddrEqual(session.UDPAddr, remoteAddr) {
-			s.metrics.VoicePacketsDropped.Add(1)
-			continue // unregistered or mismatched source
-		}
-
-		// Don't forward if muted
-		if session.Muted {
-			s.metrics.VoicePacketsDropped.Add(1)
 			continue
-		}
-
-		// Verify the sender is actually in the claimed channel (prevent channel spoofing)
-		actualChannel := s.channels.ChannelOf(pkt.SessionID)
-		if actualChannel <= 0 {
-			s.metrics.VoicePacketsDropped.Add(1)
-			continue // not in a channel, discard
-		}
-		packetChannel := uint64(actualChannel) //nolint:gosec // positivity is checked immediately above
-		if packetChannel != pkt.ChannelID {
-			s.metrics.VoicePacketsDropped.Add(1)
-			continue // claimed channel does not match membership
 		}
 
 		// Track per-session voice debug stats
@@ -147,7 +122,7 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 		channelID := actualChannel
 		members := s.channels.Members(channelID)
 
-		rawPacket := buf[:n] // forward raw bytes, no decryption
+		rawPacket := buf[:n] // forward the original authenticated ciphertext unchanged
 
 		for _, memberSID := range members {
 			if memberSID == pkt.SessionID {
@@ -174,6 +149,43 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			}
 		}
 	}
+}
+
+// acceptVoicePacket verifies endpoint ownership and packet authenticity before
+// recording its sequence. It returns the sender's current channel when the
+// packet is safe to relay.
+func (s *Server) acceptVoicePacket(pkt *protocol.VoicePacket, remoteAddr *net.UDPAddr) (int64, bool) {
+	if pkt == nil || s.voiceCipher == nil {
+		return 0, false
+	}
+	session, ok := s.sessions.GetSnapshot(pkt.SessionID)
+	if !ok || session.Muted || session.ChannelID <= 0 || !udpAddrEqual(session.UDPAddr, remoteAddr) {
+		return 0, false
+	}
+	packetChannel := uint64(session.ChannelID) //nolint:gosec // positivity is checked immediately above
+	if packetChannel != pkt.ChannelID {
+		return 0, false
+	}
+	if _, err := s.voiceCipher.Decrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), pkt.Payload); err != nil {
+		return 0, false
+	}
+	if hook := s.voiceReplayHook; hook != nil {
+		hook()
+	}
+	acceptedSession, ok := s.sessions.AcceptVoiceSequence(pkt.SessionID, remoteAddr, pkt.SeqNum)
+	if !ok {
+		return 0, false
+	}
+
+	actualChannel := s.channels.ChannelOf(pkt.SessionID)
+	if actualChannel <= 0 || actualChannel != acceptedSession.ChannelID {
+		return 0, false
+	}
+	packetChannel = uint64(actualChannel) //nolint:gosec // positivity is checked immediately above
+	if packetChannel != pkt.ChannelID {
+		return 0, false
+	}
+	return actualChannel, true
 }
 
 func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) bool {

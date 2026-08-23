@@ -224,8 +224,7 @@ type Engine struct {
 	screenShareAttempt  uint64
 	screenCipher        *gospeakCrypto.VoiceCipher
 	screenKey           []byte
-	screenKeyID         [16]byte
-	screenKeySequences  map[[16]byte]uint32
+	screenReceiveSeq    uint32
 	screenSeqNum        uint32
 	activeScreenShare   *pb.ScreenShareEvent
 	screenShareEnabled  bool
@@ -818,6 +817,9 @@ func (e *Engine) playbackLoop(g *connectionGeneration) {
 // processIncomingVoice decrypts and queues a received voice packet. Decoding
 // and playback happen independently on the fixed playout clock.
 func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.VoicePacket) {
+	if pkt == nil {
+		return
+	}
 	g.mu.Lock()
 	cipher := g.cipher
 	g.mu.Unlock()
@@ -825,7 +827,16 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 		return
 	}
 
-	// Get or create decoder for this speaker
+	// Authenticate before allocating per-speaker state so forged session IDs
+	// cannot create decoders or keep them alive.
+	header := pkt.MarshalHeader()
+	opusData, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, header, pkt.Payload)
+	if err != nil {
+		slog.Debug("voice decrypt failed", "session", pkt.SessionID, "err", err)
+		return
+	}
+
+	// Get or create decoder for this authenticated speaker.
 	e.decoderMu.Lock()
 	_, ok := e.decoders[pkt.SessionID]
 	if !ok {
@@ -841,14 +852,6 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 	jb := e.jitterBufs[pkt.SessionID]
 	e.speakerLastSeen[pkt.SessionID] = e.now()
 	e.decoderMu.Unlock()
-
-	// Decrypt the voice data
-	header := pkt.MarshalHeader()
-	opusData, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, header, pkt.Payload)
-	if err != nil {
-		slog.Debug("voice decrypt failed", "session", pkt.SessionID, "err", err)
-		return
-	}
 
 	// Track received packet for debug logging
 	if e.voiceDebugEnabled {
@@ -1819,8 +1822,7 @@ func (e *Engine) handleDisconnectGeneration(g *connectionGeneration, reason stri
 	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenKey = nil
-	e.screenKeyID = [16]byte{}
-	e.screenKeySequences = nil
+	e.screenReceiveSeq = 0
 	e.screenSeqNum = 0
 	e.screenMu.Unlock()
 	e.screenSendMu.Unlock()
@@ -1880,8 +1882,7 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 			e.activeScreenShare = nil
 			e.screenCipher = nil
 			e.screenKey = nil
-			e.screenKeyID = [16]byte{}
-			e.screenSeqNum = 0
+			e.screenReceiveSeq = 0
 		}
 	} else if len(event.EncryptionKey) > 0 {
 		sameKey := previous != nil && previous.SessionID == event.SessionID && bytes.Equal(e.screenKey, event.EncryptionKey)
@@ -1895,9 +1896,7 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 			}
 			e.screenCipher = cipher
 			e.screenKey = append(e.screenKey[:0], event.EncryptionKey...)
-			e.screenKeyID = [16]byte{}
-			copy(e.screenKeyID[:], event.EncryptionKey)
-			e.screenSeqNum = e.screenKeySequences[e.screenKeyID]
+			e.screenReceiveSeq = 0
 		}
 		e.activeScreenShare = event
 	} else {
@@ -1905,8 +1904,7 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 		if previous == nil || previous.SessionID != event.SessionID {
 			e.screenCipher = nil
 			e.screenKey = nil
-			e.screenKeyID = [16]byte{}
-			e.screenSeqNum = 0
+			e.screenReceiveSeq = 0
 		}
 	}
 	e.screenMu.Unlock()
@@ -1942,8 +1940,7 @@ func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) 
 	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenKey = nil
-	e.screenKeyID = [16]byte{}
-	e.screenSeqNum = 0
+	e.screenReceiveSeq = 0
 	e.screenMu.Unlock()
 	e.screenSendMu.Unlock()
 	if callback := e.OnScreenFrame; callback != nil {
@@ -1965,17 +1962,28 @@ func (e *Engine) handleScreenPacketGeneration(g *connectionGeneration, pkt *prot
 	}
 }
 
-func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.ScreenPacket) {
+func (e *Engine) decryptScreenPacket(pkt *protocol.ScreenPacket) ([]byte, bool) {
 	e.screenMu.Lock()
-	cipher := e.screenCipher
+	defer e.screenMu.Unlock()
 	event := e.activeScreenShare
-	e.screenMu.Unlock()
-	if cipher == nil || event == nil || !event.Active || pkt == nil || pkt.SessionID != event.SessionID {
-		return
+	if e.screenCipher == nil || event == nil || !event.Active || pkt == nil || pkt.SeqNum == 0 || pkt.SessionID != event.SessionID {
+		return nil, false
 	}
-	frameData, err := cipher.Decrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), pkt.Payload)
+	if pkt.SeqNum <= e.screenReceiveSeq {
+		return nil, false
+	}
+	frameData, err := e.screenCipher.Decrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), pkt.Payload)
 	if err != nil {
 		slog.Debug("screen frame decrypt error", "err", err)
+		return nil, false
+	}
+	e.screenReceiveSeq = pkt.SeqNum
+	return frameData, true
+}
+
+func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.ScreenPacket) {
+	frameData, ok := e.decryptScreenPacket(pkt)
+	if !ok {
 		return
 	}
 	frame, err := protocol.UnmarshalScreenFrame(frameData)
@@ -2091,8 +2099,7 @@ func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
 	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenKey = nil
-	e.screenKeyID = [16]byte{}
-	e.screenSeqNum = 0
+	e.screenReceiveSeq = 0
 	e.screenMu.Unlock()
 	e.screenSendMu.Unlock()
 
@@ -2134,10 +2141,6 @@ func (e *Engine) sendScreenShareFrame(ctx context.Context, g *connectionGenerati
 	}
 	e.screenSeqNum++
 	seqNum := e.screenSeqNum
-	if e.screenKeySequences == nil {
-		e.screenKeySequences = make(map[[16]byte]uint32)
-	}
-	e.screenKeySequences[e.screenKeyID] = seqNum
 	e.screenMu.Unlock()
 
 	data, width, height, err := e.prepareScreenShareFrame(ctx, displayIndex)

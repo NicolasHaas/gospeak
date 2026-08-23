@@ -196,6 +196,32 @@ func TestRetiredScreenLoopCannotCancelReplacement(t *testing.T) {
 	}
 }
 
+func TestScreenSequenceResetsOnlyAtConnectionGenerationBoundary(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	g.screen = &ScreenClient{conn: &recordingConn{}}
+	e.generation = g
+	e.state = StateConnected
+	e.screenShareEnabled = true
+	e.screenSeqNum = 42
+
+	e.handleScreenDisconnectGeneration(g)
+	if e.screenSeqNum != 42 {
+		t.Fatalf("screen socket disconnect reset sequence to %d, want 42", e.screenSeqNum)
+	}
+	if e.generation != g {
+		t.Fatal("screen socket disconnect replaced the control generation")
+	}
+
+	e.handleDisconnectGeneration(g, "test generation teardown")
+	if e.screenSeqNum != 0 {
+		t.Fatalf("full generation teardown preserved sequence %d, want 0", e.screenSeqNum)
+	}
+	if e.generation != nil || e.state != StateDisconnected {
+		t.Fatalf("full generation teardown left generation=%p state=%v", e.generation, e.state)
+	}
+}
+
 func TestRetiredScreenKeyResumesSequenceAfterRotation(t *testing.T) {
 	e := NewEngine()
 	g := newConnectionGeneration()
@@ -285,8 +311,61 @@ func TestRepeatedScreenShareKeyDoesNotResetSequence(t *testing.T) {
 	rotated := *event
 	rotated.EncryptionKey = bytes.Repeat([]byte{2}, 16)
 	e.handleScreenShareEvent(g, &rotated)
-	if e.screenSeqNum != 0 {
-		t.Fatalf("screen sequence after key rotation = %d, want 0", e.screenSeqNum)
+	if e.screenSeqNum != 5 {
+		t.Fatalf("screen sequence after key rotation = %d, want 5", e.screenSeqNum)
+	}
+}
+
+func TestDecryptScreenPacketRejectsReplayAndPreservesSameKeyState(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	e.generation = g
+	e.state = StateConnected
+	e.sessionID = 20
+	e.channelID = 1
+	key1 := bytes.Repeat([]byte{1}, 16)
+	key2 := bytes.Repeat([]byte{2}, 16)
+	event := func(key []byte) *pb.ScreenShareEvent {
+		return &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key}
+	}
+	packet := func(key []byte, sequence uint32) *protocol.ScreenPacket {
+		cipher, err := gospeakCrypto.NewVoiceCipher(key)
+		if err != nil {
+			t.Fatalf("NewVoiceCipher: %v", err)
+		}
+		pkt := &protocol.ScreenPacket{SessionID: 10, SeqNum: sequence}
+		pkt.Payload = cipher.Encrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), []byte("frame"))
+		return pkt
+	}
+
+	e.handleScreenShareEvent(g, event(key1))
+	if _, ok := e.decryptScreenPacket(packet(key1, 1)); !ok {
+		t.Fatal("first screen packet was rejected")
+	}
+	if _, ok := e.decryptScreenPacket(packet(key1, 1)); ok {
+		t.Fatal("duplicate screen packet was accepted")
+	}
+
+	forged := packet(key1, 1000)
+	forged.Payload[0] ^= 0xff
+	if _, ok := e.decryptScreenPacket(forged); ok {
+		t.Fatal("forged screen packet was accepted")
+	}
+	if _, ok := e.decryptScreenPacket(packet(key1, 2)); !ok {
+		t.Fatal("forged high sequence poisoned receive state")
+	}
+
+	e.handleScreenShareEvent(g, event(key1))
+	if _, ok := e.decryptScreenPacket(packet(key1, 2)); ok {
+		t.Fatal("same-key reannouncement reset receive sequence")
+	}
+	if _, ok := e.decryptScreenPacket(packet(key1, 3)); !ok {
+		t.Fatal("fresh packet after same-key reannouncement was rejected")
+	}
+
+	e.handleScreenShareEvent(g, event(key2))
+	if _, ok := e.decryptScreenPacket(packet(key2, 1)); !ok {
+		t.Fatal("new key did not start a fresh receive sequence")
 	}
 }
 
