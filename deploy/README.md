@@ -74,7 +74,7 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-voice` | `:9601` | UDP voice plane bind address |
 | `-db` | `gospeak.db` | SQLite database file path |
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; must be used with `-key` |
-| `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, a self-signed pair is loaded or generated in `-data` |
+| `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, a self-signed pair is loaded or generated in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
 | `-data` | `.` | Data directory for generated files (certs, DB, etc.) |
 | `-open` | `false` | Allow users to join without a token |
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |

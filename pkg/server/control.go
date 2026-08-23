@@ -343,14 +343,9 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 		s.listenerMu.Unlock()
 	}()
 
-	cert, err := loadOrGenerateTLS(s.cfg)
+	tlsCfg, err := newServerTLSConfig(s.cfg)
 	if err != nil {
 		return fmt.Errorf("server: tls: %w", err)
-	}
-
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
 	}
 
 	ln, err := tls.Listen("tcp", s.cfg.ControlAddr, tlsCfg)

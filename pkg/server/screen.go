@@ -31,14 +31,9 @@ func (s *Server) StartScreen() error {
 		s.listenerMu.Unlock()
 	}()
 
-	cert, err := loadOrGenerateTLS(s.cfg)
+	tlsCfg, err := newServerTLSConfig(s.cfg)
 	if err != nil {
 		return fmt.Errorf("server: screen tls: %w", err)
-	}
-
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
 	}
 
 	ln, err := tls.Listen("tcp", s.cfg.ScreenAddr, tlsCfg)

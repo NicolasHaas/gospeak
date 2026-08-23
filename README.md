@@ -130,7 +130,7 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 | `-open` | `false` | Allow connections without a token |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | | YAML file for initial channel setup |
-| `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data` |
+| `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data`. On the first new TLS connection within 30 days of expiry, it renews the automatic certificate without changing the private key or TOFU identity |
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` HTTP bind address; opt in with a trusted bind such as `127.0.0.1:9602` |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
