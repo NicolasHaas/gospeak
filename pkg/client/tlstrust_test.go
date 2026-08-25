@@ -85,6 +85,48 @@ func TestTLSConfigRejectsExpiredPinnedCertificate(t *testing.T) {
 	}
 }
 
+func TestCrossPlaneTLSSystemPKIUsesScreenHostnameVerification(t *testing.T) {
+	root, rootKey := newTestCertificate(t, nil, nil, true, "root", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	controlLeaf, _ := newTestCertificate(t, root, rootKey, false, "server.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	screenLeaf, _ := newTestCertificate(t, root, rootKey, false, "server.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+
+	trust := tlsTrustPolicyForConnection("", controlLeaf)
+	cfg, err := newTLSConfigWithTrust("server.test:9603", trust, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.VerifyConnection(connectionState(screenLeaf, root)); err != nil {
+		t.Fatalf("screen VerifyConnection() = %v, want system-PKI certificate accepted", err)
+	}
+
+	wrongHostLeaf, _ := newTestCertificate(t, root, rootKey, false, "other.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err := cfg.VerifyConnection(connectionState(wrongHostLeaf, root)); err == nil {
+		t.Fatal("screen VerifyConnection() = nil, want hostname mismatch rejected")
+	}
+}
+
+func TestCrossPlaneTLSTOFUPreservesConfirmedPin(t *testing.T) {
+	controlLeaf, _ := newTestCertificate(t, nil, nil, true, "private.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	changedLeaf, _ := newTestCertificate(t, nil, nil, true, "private.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+
+	trust := tlsTrustPolicyForConnection(SPKIFingerprint(controlLeaf), controlLeaf)
+	cfg, err := newTLSConfigWithTrust("private.test:9603", trust, x509.NewCertPool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.VerifyConnection(connectionState(controlLeaf)); err != nil {
+		t.Fatalf("screen VerifyConnection() = %v, want confirmed TOFU pin accepted", err)
+	}
+
+	err = cfg.VerifyConnection(connectionState(changedLeaf))
+	var changed *ServerIdentityChangedError
+	if !errors.As(err, &changed) {
+		t.Fatalf("screen VerifyConnection() error = %v, want ServerIdentityChangedError", err)
+	}
+}
+
 func connectionState(certs ...*x509.Certificate) tls.ConnectionState {
 	return tls.ConnectionState{PeerCertificates: certs}
 }

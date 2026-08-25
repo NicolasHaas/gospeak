@@ -33,6 +33,32 @@ func (e *ServerIdentityChangedError) Error() string {
 	return fmt.Sprintf("server identity changed for %s (expected %s, received %s)", e.Addr, e.Expected, e.Received)
 }
 
+type tlsTrustMode uint8
+
+const (
+	tlsTrustSystemPKI tlsTrustMode = iota
+	tlsTrustTOFU
+)
+
+type tlsTrustPolicy struct {
+	mode tlsTrustMode
+	pin  string
+}
+
+func tlsTrustPolicyForPin(expectedPin string) tlsTrustPolicy {
+	if expectedPin == "" {
+		return tlsTrustPolicy{mode: tlsTrustSystemPKI}
+	}
+	return tlsTrustPolicy{mode: tlsTrustTOFU, pin: expectedPin}
+}
+
+func tlsTrustPolicyForConnection(expectedPin string, peer *x509.Certificate) tlsTrustPolicy {
+	if expectedPin == "" {
+		return tlsTrustPolicy{mode: tlsTrustSystemPKI}
+	}
+	return tlsTrustPolicy{mode: tlsTrustTOFU, pin: SPKIFingerprint(peer)}
+}
+
 // SPKIFingerprint returns a stable SHA-256 fingerprint of a certificate's
 // SubjectPublicKeyInfo. Pinning the public key tolerates certificate renewal
 // with the same key while detecting an unexpected server identity.
@@ -42,6 +68,10 @@ func SPKIFingerprint(cert *x509.Certificate) string {
 }
 
 func newTLSConfig(addr, expectedPin string, roots *x509.CertPool) (*tls.Config, error) {
+	return newTLSConfigWithTrust(addr, tlsTrustPolicyForPin(expectedPin), roots)
+}
+
+func newTLSConfigWithTrust(addr string, trust tlsTrustPolicy, roots *x509.CertPool) (*tls.Config, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: invalid TLS address %q: %w", addr, err)
@@ -61,9 +91,9 @@ func newTLSConfig(addr, expectedPin string, roots *x509.CertPool) (*tls.Config, 
 		leaf := state.PeerCertificates[0]
 		fingerprint := SPKIFingerprint(leaf)
 
-		if expectedPin != "" {
-			if fingerprint != expectedPin {
-				return &ServerIdentityChangedError{Addr: addr, Expected: expectedPin, Received: fingerprint}
+		if trust.mode == tlsTrustTOFU {
+			if fingerprint != trust.pin {
+				return &ServerIdentityChangedError{Addr: addr, Expected: trust.pin, Received: fingerprint}
 			}
 			pinnedRoots := x509.NewCertPool()
 			pinnedRoots.AddCert(leaf)

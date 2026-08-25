@@ -410,7 +410,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 		if resolveErr != nil {
 			return fail(fmt.Errorf("resolve screen address: %w", resolveErr))
 		}
-		screen, screenErr := NewScreenClientContext(g.ctx, screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverIdentity)
+		screen, screenErr := newScreenClientContextWithTrust(g.ctx, screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverTrust)
 		if screenErr != nil {
 			return fail(fmt.Errorf("connect screen plane: %w", screenErr))
 		}
