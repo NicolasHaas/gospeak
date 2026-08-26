@@ -28,7 +28,11 @@ func NewScreenClient(addr string, sessionID uint32, authToken, serverIdentity st
 }
 
 func NewScreenClientContext(ctx context.Context, addr string, sessionID uint32, authToken, serverIdentity string) (*ScreenClient, error) {
-	tlsCfg, err := tlsConfig(addr, serverIdentity)
+	return newScreenClientContextWithTrust(ctx, addr, sessionID, authToken, tlsTrustPolicyForPin(serverIdentity))
+}
+
+func newScreenClientContextWithTrust(ctx context.Context, addr string, sessionID uint32, authToken string, trust tlsTrustPolicy) (*ScreenClient, error) {
+	tlsCfg, err := newTLSConfigWithTrust(addr, trust, nil)
 	if err != nil {
 		return nil, err
 	}

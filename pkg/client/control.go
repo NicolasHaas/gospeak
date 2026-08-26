@@ -23,11 +23,11 @@ type EventHandler func(msg *pb.ControlMessage)
 
 // ControlClient manages the TCP/TLS control plane connection.
 type ControlClient struct {
-	conn           net.Conn
-	serverIdentity string
-	mu             sync.Mutex
-	handler        EventHandler
-	done           chan struct{}
+	conn        net.Conn
+	serverTrust tlsTrustPolicy
+	mu          sync.Mutex
+	handler     EventHandler
+	done        chan struct{}
 }
 
 // NewControlClient connects to the server's control plane via TLS.
@@ -55,9 +55,9 @@ func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*Co
 	}
 
 	return &ControlClient{
-		conn:           conn,
-		serverIdentity: SPKIFingerprint(tlsConn.ConnectionState().PeerCertificates[0]),
-		done:           make(chan struct{}),
+		conn:        conn,
+		serverTrust: tlsTrustPolicyForConnection(expectedPin, tlsConn.ConnectionState().PeerCertificates[0]),
+		done:        make(chan struct{}),
 	}, nil
 }
 
