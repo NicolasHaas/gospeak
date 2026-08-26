@@ -87,6 +87,7 @@ type Server struct {
 	preAuthMu       sync.Mutex
 	acceptedConns   map[net.Conn]trackedConn
 	preAuthCount    map[preAuthPlane]int
+	preAuthByIP     map[preAuthPlane]map[string]int
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -118,6 +119,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		authLimiter:   newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
 		acceptedConns: make(map[net.Conn]trackedConn),
 		preAuthCount:  make(map[preAuthPlane]int),
+		preAuthByIP:   make(map[preAuthPlane]map[string]int),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -165,13 +167,18 @@ func (s *Server) trackHTTPHandler(handler http.Handler) http.Handler {
 type preAuthPlane string
 
 type trackedConn struct {
-	plane   preAuthPlane
-	preAuth bool
+	plane        preAuthPlane
+	preAuth      bool
+	admissionKey string
 }
 
 const (
 	preAuthControl preAuthPlane = "control"
 	preAuthScreen  preAuthPlane = "screen"
+
+	// Leave most of the default global capacity available to other source IPs
+	// while allowing several concurrent users behind one NAT.
+	maxPreAuthConnectionsPerIP = 8
 )
 
 func (s *Server) beginPreAuth(conn net.Conn, plane preAuthPlane) bool {
@@ -180,12 +187,27 @@ func (s *Server) beginPreAuth(conn net.Conn, plane preAuthPlane) bool {
 	if _, ok := s.acceptedConns[conn]; ok {
 		return true
 	}
-	if s.ctx.Err() != nil || s.preAuthCount[plane] >= s.cfg.MaxPreAuthConnections {
+	admissionKey := authRateLimitKey(conn.RemoteAddr())
+	if s.ctx.Err() != nil ||
+		s.preAuthCount[plane] >= s.cfg.MaxPreAuthConnections ||
+		s.preAuthByIP[plane][admissionKey] >= maxPreAuthConnectionsPerIP {
 		return false
 	}
-	s.acceptedConns[conn] = trackedConn{plane: plane, preAuth: true}
+	if s.preAuthByIP[plane] == nil {
+		s.preAuthByIP[plane] = make(map[string]int)
+	}
+	s.acceptedConns[conn] = trackedConn{plane: plane, preAuth: true, admissionKey: admissionKey}
 	s.preAuthCount[plane]++
+	s.preAuthByIP[plane][admissionKey]++
 	return true
+}
+
+func (s *Server) releasePreAuth(tracked trackedConn) {
+	s.preAuthCount[tracked.plane]--
+	s.preAuthByIP[tracked.plane][tracked.admissionKey]--
+	if s.preAuthByIP[tracked.plane][tracked.admissionKey] == 0 {
+		delete(s.preAuthByIP[tracked.plane], tracked.admissionKey)
+	}
 }
 
 func (s *Server) finishPreAuth(conn net.Conn) {
@@ -193,7 +215,7 @@ func (s *Server) finishPreAuth(conn net.Conn) {
 	if tracked, ok := s.acceptedConns[conn]; ok && tracked.preAuth {
 		tracked.preAuth = false
 		s.acceptedConns[conn] = tracked
-		s.preAuthCount[tracked.plane]--
+		s.releasePreAuth(tracked)
 	}
 	s.preAuthMu.Unlock()
 }
@@ -203,7 +225,7 @@ func (s *Server) forgetAcceptedConn(conn net.Conn) {
 	if tracked, ok := s.acceptedConns[conn]; ok {
 		delete(s.acceptedConns, conn)
 		if tracked.preAuth {
-			s.preAuthCount[tracked.plane]--
+			s.releasePreAuth(tracked)
 		}
 	}
 	s.preAuthMu.Unlock()
@@ -217,6 +239,7 @@ func (s *Server) closeAcceptedConns() {
 	}
 	s.acceptedConns = make(map[net.Conn]trackedConn)
 	s.preAuthCount = make(map[preAuthPlane]int)
+	s.preAuthByIP = make(map[preAuthPlane]map[string]int)
 	s.preAuthMu.Unlock()
 	for _, conn := range conns {
 		_ = conn.Close()
