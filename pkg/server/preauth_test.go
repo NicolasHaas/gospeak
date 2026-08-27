@@ -11,6 +11,13 @@ type testAddr string
 func (a testAddr) Network() string { return "tcp" }
 func (a testAddr) String() string  { return string(a) }
 
+type remoteAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c remoteAddrConn) RemoteAddr() net.Addr { return c.remote }
+
 func TestAuthRateLimiterNormalizesSourcePorts(t *testing.T) {
 	limiter := newAuthRateLimiter(2, time.Minute)
 	first := authRateLimitKey(testAddr("192.0.2.10:41000"))
@@ -124,6 +131,94 @@ func TestPreAuthConnectionsAreBoundedAndClosedOnShutdown(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPreAuthAdmissionPreservesCapacityAcrossClientIPs(t *testing.T) {
+	for _, plane := range []preAuthPlane{preAuthControl, preAuthScreen} {
+		t.Run(string(plane), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MaxPreAuthConnections = 10
+			srv := New(cfg, Dependencies{})
+			t.Cleanup(srv.Shutdown)
+
+			connections := make([]net.Conn, 0, cfg.MaxPreAuthConnections*2)
+			admit := func(ip string) bool {
+				serverConn, clientConn := net.Pipe()
+				connections = append(connections, clientConn)
+				conn := remoteAddrConn{Conn: serverConn, remote: testAddr(net.JoinHostPort(ip, "41000"))}
+				if !srv.beginPreAuth(conn, plane) {
+					_ = serverConn.Close()
+					return false
+				}
+				connections = append(connections, conn)
+				return true
+			}
+			t.Cleanup(func() {
+				for _, conn := range connections {
+					_ = conn.Close()
+				}
+			})
+
+			attackerAccepted := 0
+			for range 9 {
+				if admit("192.0.2.10") {
+					attackerAccepted++
+				}
+			}
+			if attackerAccepted != 8 {
+				t.Errorf("connections admitted for one IP = %d, want 8", attackerAccepted)
+			}
+			if !admit("198.51.100.20") {
+				t.Error("connection from a second IP rejected despite reserved global capacity")
+			}
+			if !admit("203.0.113.30") {
+				t.Error("connection up to the global capacity rejected")
+			}
+			if admit("203.0.113.31") {
+				t.Error("connection above the global capacity accepted")
+			}
+		})
+	}
+}
+
+func TestPreAuthPerIPCapacityIsReleased(t *testing.T) {
+	cfg := DefaultConfig()
+	srv := New(cfg, Dependencies{})
+	t.Cleanup(srv.Shutdown)
+
+	connections := make([]net.Conn, 0, maxPreAuthConnectionsPerIP*2+2)
+	newConn := func() remoteAddrConn {
+		serverConn, clientConn := net.Pipe()
+		connections = append(connections, clientConn)
+		return remoteAddrConn{Conn: serverConn, remote: testAddr("192.0.2.10:41000")}
+	}
+	t.Cleanup(func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	})
+
+	admitted := make([]remoteAddrConn, 0, maxPreAuthConnectionsPerIP)
+	for range maxPreAuthConnectionsPerIP {
+		conn := newConn()
+		if !srv.beginPreAuth(conn, preAuthControl) {
+			t.Fatal("connection below the per-IP capacity rejected")
+		}
+		connections = append(connections, conn)
+		admitted = append(admitted, conn)
+	}
+	rejected := newConn()
+	if srv.beginPreAuth(rejected, preAuthControl) {
+		t.Fatal("connection above the per-IP capacity accepted")
+	}
+	_ = rejected.Close()
+
+	srv.finishPreAuth(admitted[0])
+	replacement := newConn()
+	if !srv.beginPreAuth(replacement, preAuthControl) {
+		t.Fatal("authentication did not release per-IP pre-auth capacity")
+	}
+	connections = append(connections, replacement)
 }
 
 func TestAuthenticatedConnectionReleasesPreAuthSlotAndClosesOnShutdown(t *testing.T) {
