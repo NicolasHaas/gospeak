@@ -57,37 +57,38 @@ func DefaultConfig() Config {
 
 // Server is the main GoSpeak server.
 type Server struct {
-	cfg             Config
-	sessions        *SessionManager
-	channels        *ChannelManager
-	screenShare     *ScreenShareManager
-	metrics         *Metrics
-	store           datastore.DataProviderFactory
-	listenerMu      sync.Mutex
-	controlConn     net.Listener
-	voiceConn       *net.UDPConn
-	screenConn      net.Listener
-	controlStarting bool
-	voiceStarting   bool
-	screenStarting  bool
-	metricsMu       sync.Mutex
-	metricsHTTP     *http.Server
-	metricsConn     net.Listener
-	shutdownOnce    sync.Once
-	workerMu        sync.Mutex
-	workers         sync.WaitGroup
-	stopping        bool
-	screenMu        sync.RWMutex
-	screenConns     map[uint32]*screenClientConn
-	voiceKey        []byte // shared AES-128 key for all voice encryption
-	voiceCipher     *gospeakCrypto.VoiceCipher
-	voiceReplayHook func()
-	authLimiter     *authRateLimiter
-	bootstrapMu     sync.Mutex
-	preAuthMu       sync.Mutex
-	acceptedConns   map[net.Conn]trackedConn
-	preAuthCount    map[preAuthPlane]int
-	preAuthByIP     map[preAuthPlane]map[string]int
+	cfg                     Config
+	sessions                *SessionManager
+	channels                *ChannelManager
+	screenShare             *ScreenShareManager
+	metrics                 *Metrics
+	store                   datastore.DataProviderFactory
+	listenerMu              sync.Mutex
+	controlConn             net.Listener
+	voiceConn               *net.UDPConn
+	screenConn              net.Listener
+	controlStarting         bool
+	voiceStarting           bool
+	screenStarting          bool
+	metricsMu               sync.Mutex
+	metricsHTTP             *http.Server
+	metricsConn             net.Listener
+	shutdownOnce            sync.Once
+	workerMu                sync.Mutex
+	workers                 sync.WaitGroup
+	stopping                bool
+	screenMu                sync.RWMutex
+	screenConns             map[uint32]*screenClientConn
+	voiceKey                []byte // shared AES-128 key for all voice encryption
+	voiceCipher             *gospeakCrypto.VoiceCipher
+	voiceReplayHook         func()
+	authLimiter             *authRateLimiter
+	accountProvisionLimiter *accountProvisionLimiter
+	bootstrapMu             sync.Mutex
+	preAuthMu               sync.Mutex
+	acceptedConns           map[net.Conn]trackedConn
+	preAuthCount            map[preAuthPlane]int
+	preAuthByIP             map[preAuthPlane]map[string]int
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -108,20 +109,21 @@ func New(cfg Config, deps Dependencies) *Server {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		cfg:           cfg,
-		sessions:      NewSessionManager(),
-		channels:      NewChannelManager(),
-		screenShare:   NewScreenShareManager(),
-		metrics:       NewMetrics(),
-		screenConns:   make(map[uint32]*screenClientConn),
-		voiceStats:    make(map[uint32]*perSessionVoiceStat),
-		store:         deps.Store,
-		authLimiter:   newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
-		acceptedConns: make(map[net.Conn]trackedConn),
-		preAuthCount:  make(map[preAuthPlane]int),
-		preAuthByIP:   make(map[preAuthPlane]map[string]int),
-		ctx:           ctx,
-		cancel:        cancel,
+		cfg:                     cfg,
+		sessions:                NewSessionManager(),
+		channels:                NewChannelManager(),
+		screenShare:             NewScreenShareManager(),
+		metrics:                 NewMetrics(),
+		screenConns:             make(map[uint32]*screenClientConn),
+		voiceStats:              make(map[uint32]*perSessionVoiceStat),
+		store:                   deps.Store,
+		authLimiter:             newAuthRateLimiter(authRateLimitAttempts, authRateLimitWindow),
+		accountProvisionLimiter: newAccountProvisionLimiter(accountProvisionLimit, accountProvisionWindow),
+		acceptedConns:           make(map[net.Conn]trackedConn),
+		preAuthCount:            make(map[preAuthPlane]int),
+		preAuthByIP:             make(map[preAuthPlane]map[string]int),
+		ctx:                     ctx,
+		cancel:                  cancel,
 	}
 }
 

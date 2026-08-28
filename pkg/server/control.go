@@ -39,6 +39,8 @@ const (
 	authRateLimitAttempts   = 30
 	authRateLimitWindow     = 1 * time.Minute
 	authRateLimitMaxEntries = 4096
+	accountProvisionLimit   = 120
+	accountProvisionWindow  = 1 * time.Hour
 	controlWriteTimeout     = 5 * time.Second
 	controlSendQueueSize    = 64
 )
@@ -182,6 +184,9 @@ func (rl *authRateLimiter) Allow(key string) bool {
 	now := rl.now()
 	entry, ok := rl.entries[key]
 	if ok && !now.Before(entry.resetAt) {
+		if entry.inFlight > 0 {
+			return false
+		}
 		delete(rl.entries, key)
 		entry = nil
 		ok = false
@@ -189,7 +194,7 @@ func (rl *authRateLimiter) Allow(key string) bool {
 	if !ok {
 		if len(rl.entries) >= rl.maxEntries {
 			for entryKey, candidate := range rl.entries {
-				if !now.Before(candidate.resetAt) {
+				if !now.Before(candidate.resetAt) && candidate.inFlight == 0 {
 					delete(rl.entries, entryKey)
 				}
 			}
@@ -218,10 +223,102 @@ func (rl *authRateLimiter) RecordFailure(key string) {
 	}
 }
 
-func (rl *authRateLimiter) Reset(key string) {
+func (rl *authRateLimiter) RecordSuccess(key string) {
 	rl.mu.Lock()
-	delete(rl.entries, key)
+	if entry, ok := rl.entries[key]; ok {
+		if entry.inFlight > 0 {
+			entry.inFlight--
+		}
+		if entry.count == 0 && entry.inFlight == 0 {
+			delete(rl.entries, key)
+		}
+	}
 	rl.mu.Unlock()
+}
+
+type accountProvisionLimiter struct {
+	mu         sync.Mutex
+	entries    map[string]*accountProvisionEntry
+	maxSuccess int
+	window     time.Duration
+	maxEntries int
+	now        func() time.Time
+}
+
+type accountProvisionEntry struct {
+	successes int
+	inFlight  int
+	resetAt   time.Time
+}
+
+func newAccountProvisionLimiter(maxSuccess int, window time.Duration) *accountProvisionLimiter {
+	return &accountProvisionLimiter{
+		entries:    make(map[string]*accountProvisionEntry),
+		maxSuccess: maxSuccess,
+		window:     window,
+		maxEntries: authRateLimitMaxEntries,
+		now:        time.Now,
+	}
+}
+
+func (rl *accountProvisionLimiter) Reserve(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := rl.now()
+	entry, ok := rl.entries[key]
+	if ok && !now.Before(entry.resetAt) {
+		if entry.inFlight > 0 {
+			return false
+		}
+		delete(rl.entries, key)
+		entry = nil
+		ok = false
+	}
+	if !ok {
+		if len(rl.entries) >= rl.maxEntries {
+			for entryKey, candidate := range rl.entries {
+				if !now.Before(candidate.resetAt) && candidate.inFlight == 0 {
+					delete(rl.entries, entryKey)
+				}
+			}
+			if len(rl.entries) >= rl.maxEntries {
+				return false
+			}
+		}
+		entry = &accountProvisionEntry{resetAt: now.Add(rl.window)}
+		rl.entries[key] = entry
+	}
+	if entry.successes+entry.inFlight >= rl.maxSuccess {
+		return false
+	}
+	entry.inFlight++
+	return true
+}
+
+func (rl *accountProvisionLimiter) Release(key string) {
+	rl.finish(key, false)
+}
+
+func (rl *accountProvisionLimiter) Commit(key string) {
+	rl.finish(key, true)
+}
+
+func (rl *accountProvisionLimiter) finish(key string, success bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, ok := rl.entries[key]
+	if !ok {
+		return
+	}
+	if entry.inFlight > 0 {
+		entry.inFlight--
+	}
+	if success {
+		entry.successes++
+	}
+	if entry.successes == 0 && entry.inFlight == 0 {
+		delete(rl.entries, key)
+	}
 }
 
 func authRateLimitKey(addr net.Addr) string {
@@ -494,7 +591,6 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}
 
-	var tokenRole model.Role
 	var channelScope int64
 	bootstrapProvisioned := false
 	if user != nil {
@@ -502,18 +598,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		channelScope = user.ChannelScope
 	} else {
 		if !isValidUsername(authReq.Username) {
-			sendError(conn, 2, "invalid username: must be 1-32 letters, digits, underscores, or hyphens")
+			s.metrics.FailedAuths.Add(1)
+			sendError(conn, 2, "authentication failed")
 			return
 		}
 
-		// New user: role comes from the token.
 		if authReq.Token == "" {
 			if !s.cfg.AllowNoToken {
 				s.metrics.FailedAuths.Add(1)
-				sendError(conn, 2, "authentication failed: token required")
+				sendError(conn, 2, "authentication failed")
 				return
 			}
-			tokenRole = model.RoleUser
 		} else {
 			bootstrapUser, bootstrapToken, isBootstrap, bootstrapErr := s.tryProvisionBootstrapUser(st, tokenHash, authReq.Token, authReq.Username)
 			if bootstrapErr != nil {
@@ -525,69 +620,62 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			if isBootstrap {
 				user = bootstrapUser
 				autoToken = bootstrapToken
-				tokenRole = user.Role
 				channelScope = user.ChannelScope
 				bootstrapProvisioned = true
-			} else {
-				ctx := context.Background()
-				tx, err := st.Tx(ctx)
-				if err != nil {
-					slog.Error("transaction error", "err", err)
-					sendError(conn, 3, "could not establish transaction")
-					return
-				}
-
-				committed := false
-				defer func() {
-					if !committed {
-						if err := tx.Rollback(); err != nil {
-							slog.Warn("tx rollback failed", "err", err)
-						}
-					}
-				}()
-
-				tokenAuth, validateErr := tx.ValidateToken(tokenHash)
-				err = validateErr
-				if err != nil {
-					s.metrics.FailedAuths.Add(1)
-					slog.Warn("auth failed", "err", err)
-					sendError(conn, 2, "authentication failed")
-					return
-				}
-				tokenRole = tokenAuth.Role
-				channelScope = tokenAuth.ChannelScope
-				if err := tx.Commit(); err != nil {
-					slog.Error("commit transaction", "err", err)
-					sendError(conn, 3, "database error")
-					return
-				}
-				committed = true
 			}
 		}
 
 		if !bootstrapProvisioned {
-			user, err = st.NonTx().CreateUserWithChannelScope(authReq.Username, tokenRole, channelScope)
-			if err != nil {
-				if errors.Is(err, datastore.ErrUsernameTaken) {
-					s.metrics.FailedAuths.Add(1)
-					sendError(conn, 2, "authentication failed: personal token required")
-					return
+			if !s.accountProvisionLimiter.Reserve(rateLimitKey) {
+				s.metrics.FailedAuths.Add(1)
+				slog.Warn("account provisioning rate limited", "remote", remoteAddr)
+				sendError(conn, 2, "authentication failed")
+				return
+			}
+			accountProvisioned := false
+			defer func() {
+				if !accountProvisioned {
+					s.accountProvisionLimiter.Release(rateLimitKey)
 				}
-				slog.Error("create user", "err", err)
-				sendError(conn, 3, "could not create user")
+			}()
+			rawToken, generateErr := crypto.GenerateToken()
+			if generateErr != nil {
+				slog.Error("generate personal token", "err", generateErr)
+				sendError(conn, 3, "internal error")
 				return
 			}
-			sessionRole = tokenRole
+			tx, txErr := st.Tx(context.Background())
+			if txErr != nil {
+				slog.Error("begin account provisioning", "err", txErr)
+				sendError(conn, 3, "internal error")
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					if rollbackErr := tx.Rollback(); rollbackErr != nil {
+						slog.Warn("account provisioning rollback failed", "err", rollbackErr)
+					}
+				}
+			}()
 
-			rawToken, err := crypto.GenerateToken()
+			user, err = tx.ProvisionUser(tokenHash, authReq.Username, crypto.HashToken(rawToken), time.Now().UTC(), s.cfg.AllowNoToken)
 			if err != nil {
-				sendError(conn, 3, "failed to generate personal token")
+				s.metrics.FailedAuths.Add(1)
+				slog.Warn("account provisioning failed", "err", err)
+				sendError(conn, 2, "authentication failed")
 				return
 			}
-			if err := st.NonTx().UpdateUserPersonalToken(user.ID, crypto.HashToken(rawToken), time.Now().UTC()); err != nil {
-				sendError(conn, 3, "failed to store personal token")
+			if err := tx.Commit(); err != nil {
+				slog.Error("commit account provisioning", "err", err)
+				sendError(conn, 3, "internal error")
 				return
 			}
+			committed = true
+			s.accountProvisionLimiter.Commit(rateLimitKey)
+			accountProvisioned = true
+			sessionRole = user.Role
+			channelScope = user.ChannelScope
 			autoToken = rawToken
 		} else {
 			sessionRole = user.Role
@@ -680,7 +768,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	authenticated = true
-	s.authLimiter.Reset(rateLimitKey)
+	s.authLimiter.RecordSuccess(rateLimitKey)
 	s.finishPreAuth(conn)
 	conn = handler.setConn(sessionID, conn)
 

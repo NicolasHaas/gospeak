@@ -65,21 +65,129 @@ func TestAuthRateLimiterPrunesExpiredEntriesAndStaysBounded(t *testing.T) {
 	}
 }
 
-func TestAuthRateLimiterClearsSuccessfulAuthentication(t *testing.T) {
-	limiter := newAuthRateLimiter(1, time.Minute)
+func TestAuthRateLimiterPreservesFailuresAfterSuccessfulAuthentication(t *testing.T) {
+	limiter := newAuthRateLimiter(2, time.Minute)
 	const key = "192.0.2.10"
 
 	if !limiter.Allow(key) {
 		t.Fatal("initial Allow = false, want true")
 	}
+	if !limiter.Allow(key) {
+		t.Fatal("concurrent Allow = false, want true")
+	}
+	limiter.RecordFailure(key)
+	limiter.RecordSuccess(key)
+	if !limiter.Allow(key) {
+		t.Fatal("remaining authentication attempt was not available")
+	}
 	limiter.RecordFailure(key)
 	if limiter.Allow(key) {
-		t.Fatal("Allow after failure = true, want false")
+		t.Fatal("successful authentication erased the preceding failure budget")
+	}
+}
+
+func TestAuthRateLimiterDoesNotMixExpiredInFlightWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newAuthRateLimiter(2, time.Minute)
+	limiter.now = func() time.Time { return now }
+	const key = "192.0.2.10"
+
+	if !limiter.Allow(key) {
+		t.Fatal("initial reservation rejected")
+	}
+	now = now.Add(time.Minute + time.Nanosecond)
+	if limiter.Allow(key) {
+		t.Fatal("new window replaced an expired entry with an in-flight reservation")
+	}
+	limiter.RecordSuccess(key)
+	if !limiter.Allow(key) {
+		t.Fatal("new window remained blocked after the stale reservation finished")
+	}
+}
+
+func TestAuthRateLimiterDoesNotPruneExpiredInFlightEntryAtCapacity(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newAuthRateLimiter(2, time.Minute)
+	limiter.maxEntries = 1
+	limiter.now = func() time.Time { return now }
+
+	if !limiter.Allow("old") {
+		t.Fatal("initial reservation rejected")
+	}
+	now = now.Add(time.Minute + time.Nanosecond)
+	if limiter.Allow("new") {
+		t.Fatal("capacity pruning removed an expired in-flight entry")
+	}
+	limiter.RecordSuccess("old")
+	if !limiter.Allow("new") {
+		t.Fatal("capacity remained blocked after the old reservation finished")
+	}
+}
+
+func TestAccountProvisionLimiterBoundsSuccessesAndReleasesFailures(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newAccountProvisionLimiter(2, time.Hour)
+	limiter.now = func() time.Time { return now }
+	const key = "192.0.2.10"
+
+	if !limiter.Reserve(key) {
+		t.Fatal("first reservation rejected")
+	}
+	limiter.Release(key)
+	for i := 0; i < 2; i++ {
+		if !limiter.Reserve(key) {
+			t.Fatalf("successful reservation %d rejected", i+1)
+		}
+		limiter.Commit(key)
+	}
+	if limiter.Reserve(key) {
+		t.Fatal("reservation above successful provisioning budget accepted")
+	}
+	if !limiter.Reserve("198.51.100.20") {
+		t.Fatal("one IP exhausted another IP's provisioning budget")
 	}
 
-	limiter.Reset(key)
-	if !limiter.Allow(key) {
-		t.Fatal("Allow after Reset = false, want true")
+	now = now.Add(time.Hour + time.Nanosecond)
+	if !limiter.Reserve(key) {
+		t.Fatal("expired provisioning budget was not reset")
+	}
+}
+
+func TestAccountProvisionLimiterDoesNotMixExpiredInFlightWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newAccountProvisionLimiter(2, time.Hour)
+	limiter.now = func() time.Time { return now }
+	const key = "192.0.2.10"
+
+	if !limiter.Reserve(key) {
+		t.Fatal("initial reservation rejected")
+	}
+	now = now.Add(time.Hour + time.Nanosecond)
+	if limiter.Reserve(key) {
+		t.Fatal("new window replaced an expired entry with an in-flight reservation")
+	}
+	limiter.Release(key)
+	if !limiter.Reserve(key) {
+		t.Fatal("new window remained blocked after the stale reservation finished")
+	}
+}
+
+func TestAccountProvisionLimiterDoesNotPruneExpiredInFlightEntryAtCapacity(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newAccountProvisionLimiter(2, time.Hour)
+	limiter.maxEntries = 1
+	limiter.now = func() time.Time { return now }
+
+	if !limiter.Reserve("old") {
+		t.Fatal("initial reservation rejected")
+	}
+	now = now.Add(time.Hour + time.Nanosecond)
+	if limiter.Reserve("new") {
+		t.Fatal("capacity pruning removed an expired in-flight entry")
+	}
+	limiter.Release("old")
+	if !limiter.Reserve("new") {
+		t.Fatal("capacity remained blocked after the old reservation finished")
 	}
 }
 

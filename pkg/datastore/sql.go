@@ -785,6 +785,37 @@ func (s *txProvider) ValidateToken(hash string) (*model.Token, error) {
 	return &model.Token{Role: model.Role(roleInt), ChannelScope: channelScope}, nil
 }
 
+// ProvisionUser atomically redeems an invite, creates its user, and installs
+// the personal credential. Tokenless provisioning is allowed only when the
+// caller explicitly enables the server's open mode.
+func (s *txProvider) ProvisionUser(hash, username, personalTokenHash string, createdAt time.Time, allowTokenless bool) (*model.User, error) {
+	role := model.RoleUser
+	var channelScope int64
+	if hash == "" {
+		if !allowTokenless {
+			return nil, fmt.Errorf("datastore: token required")
+		}
+	} else {
+		token, err := s.ValidateToken(hash)
+		if err != nil {
+			return nil, err
+		}
+		role = token.Role
+		channelScope = token.ChannelScope
+	}
+
+	user, err := s.CreateUserWithChannelScope(username, role, channelScope)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.UpdateUserPersonalToken(user.ID, personalTokenHash, createdAt); err != nil {
+		return nil, err
+	}
+	user.PersonalTokenHash = personalTokenHash
+	user.PersonalTokenCreatedAt = createdAt
+	return user, nil
+}
+
 // ProvisionBootstrapUser atomically binds the internal bootstrap credential to
 // one administrator and a deterministic personal token. Repeating the same
 // provisioning request returns the existing user; a different username is
