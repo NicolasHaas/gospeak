@@ -101,6 +101,7 @@ type TokenWriteProvider interface {
 
 type TokenTransactionProvider interface {
 	ValidateToken(hash string) (*model.Token, error)
+	ProvisionUser(hash, username, personalTokenHash string, createdAt time.Time, allowTokenless bool) (*model.User, error)
 	ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error)
 }
 
