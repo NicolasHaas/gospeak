@@ -57,9 +57,7 @@ func (s *Server) StartScreen() error {
 					continue
 				}
 			}
-			if !s.beginPreAuth(conn, preAuthScreen) {
-				slog.Warn("screen pre-auth connection limit reached", "remote", conn.RemoteAddr())
-				_ = conn.Close()
+			if !s.admitPreAuthConn(conn, preAuthScreen) {
 				continue
 			}
 			acceptedConn := conn

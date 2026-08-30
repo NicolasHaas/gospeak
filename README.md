@@ -47,7 +47,15 @@ docker compose -f compose.yaml -f compose.monitoring.yaml up -d
 ```
 
 Grafana is then available only on `127.0.0.1:3000`. Prometheus is not published
-on the host.
+on the host. The bundled dashboard shows current and startup-lifetime high-water
+utilization for pre-auth admission, authentication, and account provisioning.
+Authentication usage is failed attempts plus in-flight checks against the
+30-attempt, one-minute source window; provisioning usage is successful creations
+plus in-flight reservations against the 120-account, one-hour source window.
+The rejection chart distinguishes source exhaustion, tracker capacity, and
+in-flight window transitions without exposing source identities as labels. The
+75% yellow and 90% red thresholds are dashboard guidance, not configured alerts;
+high-water values reset when the server restarts.
 
 On first run, GoSpeak writes an admin bootstrap credential to
 `bootstrap-admin.token` in the data directory. For this Compose setup, read it

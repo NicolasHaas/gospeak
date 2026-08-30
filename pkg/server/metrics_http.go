@@ -80,6 +80,11 @@ func (s *Server) startMetricsHTTP() error {
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	m := s.metrics
 	uptime := time.Since(m.startTime).Seconds()
+	preAuth := s.preAuthCapacitySnapshot()
+	authUsage := s.authLimiter.usageSnapshot()
+	provisionUsage := s.accountProvisionLimiter.usageSnapshot()
+	authHighWater := max(m.AuthRateLimitSourceHighWater.Load(), int64(authUsage.maxUsage))
+	provisionHighWater := max(m.AccountProvisionSourceHighWater.Load(), int64(provisionUsage.maxUsage))
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
@@ -95,6 +100,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "# TYPE %s %s\n", name, mtype)
 		_, _ = fmt.Fprintf(w, "%s %f\n", name, value)
 	}
+	writeLabeled := func(name, labels string, value int64) {
+		_, _ = fmt.Fprintf(w, "%s{%s} %d\n", name, labels, value)
+	}
+	writeHeader := func(name, help, mtype string) {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+		_, _ = fmt.Fprintf(w, "# TYPE %s %s\n", name, mtype)
+	}
 
 	writeFloat("gospeak_uptime_seconds", "Server uptime in seconds.", "gauge", uptime)
 
@@ -109,6 +121,60 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		m.SuccessfulAuths.Load())
 	write("gospeak_auth_failed_total", "Failed authentication attempts.", "counter",
 		m.FailedAuths.Load())
+
+	writeHeader("gospeak_preauth_connections", "Current unauthenticated TCP connections by plane.", "gauge")
+	writeHeader("gospeak_preauth_connections_high_water", "Highest unauthenticated connection occupancy since server start by plane.", "gauge")
+	writeHeader("gospeak_preauth_connection_limit", "Configured global unauthenticated connection limit by plane.", "gauge")
+	writeHeader("gospeak_preauth_active_sources", "Current source keys with unauthenticated connections by plane.", "gauge")
+	writeHeader("gospeak_preauth_source_max_connections", "Current highest unauthenticated connection occupancy for one source key by plane.", "gauge")
+	writeHeader("gospeak_preauth_source_max_connections_high_water", "Highest single-source unauthenticated connection occupancy since server start by plane.", "gauge")
+	writeHeader("gospeak_preauth_source_connection_limit", "Configured unauthenticated connection limit for one source key by plane.", "gauge")
+	writeHeader("gospeak_preauth_rejections_total", "Unauthenticated connections rejected at a capacity limit.", "counter")
+	for _, plane := range []preAuthPlane{preAuthControl, preAuthScreen} {
+		planeLabel := fmt.Sprintf(`plane=%q`, plane)
+		writeLabeled("gospeak_preauth_connections", planeLabel, int64(preAuth.current[plane]))
+		writeLabeled("gospeak_preauth_connection_limit", planeLabel, int64(s.cfg.MaxPreAuthConnections))
+		writeLabeled("gospeak_preauth_active_sources", planeLabel, int64(preAuth.activeSources[plane]))
+		writeLabeled("gospeak_preauth_source_max_connections", planeLabel, int64(preAuth.maxBySource[plane]))
+		writeLabeled("gospeak_preauth_source_connection_limit", planeLabel, maxPreAuthConnectionsPerIP)
+
+		var globalRejections, sourceRejections, globalHighWater, sourceHighWater int64
+		if plane == preAuthControl {
+			globalRejections = m.PreAuthControlGlobalRejections.Load()
+			sourceRejections = m.PreAuthControlSourceRejections.Load()
+			globalHighWater = m.PreAuthControlHighWater.Load()
+			sourceHighWater = m.PreAuthControlSourceHighWater.Load()
+		} else {
+			globalRejections = m.PreAuthScreenGlobalRejections.Load()
+			sourceRejections = m.PreAuthScreenSourceRejections.Load()
+			globalHighWater = m.PreAuthScreenHighWater.Load()
+			sourceHighWater = m.PreAuthScreenSourceHighWater.Load()
+		}
+		writeLabeled("gospeak_preauth_connections_high_water", planeLabel, globalHighWater)
+		writeLabeled("gospeak_preauth_source_max_connections_high_water", planeLabel, sourceHighWater)
+		writeLabeled("gospeak_preauth_rejections_total", planeLabel+`,reason="global"`, globalRejections)
+		writeLabeled("gospeak_preauth_rejections_total", planeLabel+`,reason="source"`, sourceRejections)
+	}
+
+	write("gospeak_auth_rate_limit_source_max_usage", "Current highest authentication budget usage for one source key.", "gauge", int64(authUsage.maxUsage))
+	write("gospeak_auth_rate_limit_source_high_water_usage", "Highest single-source authentication budget usage since server start.", "gauge", authHighWater)
+	write("gospeak_auth_rate_limit_active_sources", "Current source keys tracked by the authentication limiter.", "gauge", int64(authUsage.activeSources))
+	write("gospeak_auth_rate_limit_source_limit", "Configured authentication attempt limit for one source key.", "gauge", int64(authUsage.sourceLimit))
+	write("gospeak_auth_rate_limit_tracker_limit", "Configured maximum source keys tracked by the authentication limiter.", "gauge", int64(authUsage.trackerLimit))
+	writeHeader("gospeak_auth_rate_limit_rejections_total", "Authentication attempts rejected by the rate limiter.", "counter")
+	writeLabeled("gospeak_auth_rate_limit_rejections_total", `reason="source"`, m.AuthRateLimitSourceRejections.Load())
+	writeLabeled("gospeak_auth_rate_limit_rejections_total", `reason="tracker_capacity"`, m.AuthRateLimitTrackerRejections.Load())
+	writeLabeled("gospeak_auth_rate_limit_rejections_total", `reason="window_transition"`, m.AuthRateLimitWindowRejections.Load())
+
+	write("gospeak_account_provisioning_source_max_usage", "Current highest account provisioning budget usage for one source key.", "gauge", int64(provisionUsage.maxUsage))
+	write("gospeak_account_provisioning_source_high_water_usage", "Highest single-source account provisioning budget usage since server start.", "gauge", provisionHighWater)
+	write("gospeak_account_provisioning_active_sources", "Current source keys tracked by the account provisioning limiter.", "gauge", int64(provisionUsage.activeSources))
+	write("gospeak_account_provisioning_source_limit", "Configured successful account provisioning limit for one source key.", "gauge", int64(provisionUsage.sourceLimit))
+	write("gospeak_account_provisioning_tracker_limit", "Configured maximum source keys tracked by the account provisioning limiter.", "gauge", int64(provisionUsage.trackerLimit))
+	writeHeader("gospeak_account_provisioning_rejections_total", "Account provisioning attempts rejected by the limiter.", "counter")
+	writeLabeled("gospeak_account_provisioning_rejections_total", `reason="source"`, m.AccountProvisionSourceRejections.Load())
+	writeLabeled("gospeak_account_provisioning_rejections_total", `reason="tracker_capacity"`, m.AccountProvisionTrackerRejections.Load())
+	writeLabeled("gospeak_account_provisioning_rejections_total", `reason="window_transition"`, m.AccountProvisionWindowRejections.Load())
 
 	write("gospeak_voice_packets_in_total", "Total UDP voice packets received.", "counter",
 		m.VoicePacketsIn.Load())

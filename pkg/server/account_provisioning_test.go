@@ -40,6 +40,29 @@ func authenticateControl(t *testing.T, srv *Server, st datastore.DataProviderFac
 	return response
 }
 
+func expectControlRejectedBeforeAuth(t *testing.T, srv *Server, st datastore.DataProviderFactory) {
+	t.Helper()
+	serverConn, clientConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		_ = clientConn.Close()
+		t.Fatal("control handler did not reject before authentication")
+	}
+	var one [1]byte
+	if _, err := clientConn.Read(one[:]); err == nil {
+		_ = clientConn.Close()
+		t.Fatal("rejected control connection remained readable")
+	}
+	_ = clientConn.Close()
+}
+
 func TestInviteProvisioningRollsBackUseWhenUsernameIsTaken(t *testing.T) {
 	srv, st, _ := newTestServer(t)
 	if _, err := st.NonTx().CreateUser("taken", model.RoleUser); err != nil {
@@ -128,6 +151,68 @@ func TestAuthenticationFailuresDoNotRevealUsernameState(t *testing.T) {
 	}
 }
 
+func TestAuthenticationNonSourceRejectionsAreCountedThroughControlPath(t *testing.T) {
+	t.Run("tracker capacity", func(t *testing.T) {
+		srv, st, _ := newTestServer(t)
+		srv.authLimiter = newAuthRateLimiter(3, time.Minute)
+		srv.authLimiter.maxEntries = 1
+		if !srv.authLimiter.Allow("occupied") {
+			t.Fatal("failed to occupy authentication tracker")
+		}
+
+		expectControlRejectedBeforeAuth(t, srv, st)
+		if got := srv.metrics.AuthRateLimitTrackerRejections.Load(); got != 1 {
+			t.Fatalf("authentication tracker rejections = %d, want 1", got)
+		}
+		if got := srv.metrics.AuthRateLimitSourceRejections.Load() + srv.metrics.AuthRateLimitWindowRejections.Load(); got != 0 {
+			t.Fatalf("other authentication rejection counters = %d, want 0", got)
+		}
+	})
+
+	t.Run("window transition", func(t *testing.T) {
+		srv, st, _ := newTestServer(t)
+		now := time.Unix(1_700_000_000, 0)
+		srv.authLimiter = newAuthRateLimiter(3, time.Minute)
+		srv.authLimiter.now = func() time.Time { return now }
+		if !srv.authLimiter.Allow("pipe") {
+			t.Fatal("failed to reserve authentication window")
+		}
+		now = now.Add(time.Minute)
+
+		expectControlRejectedBeforeAuth(t, srv, st)
+		if got := srv.metrics.AuthRateLimitWindowRejections.Load(); got != 1 {
+			t.Fatalf("authentication window rejections = %d, want 1", got)
+		}
+		if got := srv.metrics.AuthRateLimitSourceRejections.Load() + srv.metrics.AuthRateLimitTrackerRejections.Load(); got != 0 {
+			t.Fatalf("other authentication rejection counters = %d, want 0", got)
+		}
+	})
+}
+
+func TestOpenModeProvisioningTrackerRejectionIsCountedThroughControlPath(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+	srv.cfg.AllowNoToken = true
+	srv.accountProvisionLimiter = newAccountProvisionLimiter(2, time.Hour)
+	srv.accountProvisionLimiter.maxEntries = 1
+	if !srv.accountProvisionLimiter.Reserve("occupied") {
+		t.Fatal("failed to occupy provisioning tracker")
+	}
+
+	response := authenticateControl(t, srv, st, "blocked", "")
+	if response.ErrorResponse == nil || response.ErrorResponse.Message != "authentication failed" {
+		t.Fatalf("provisioning tracker rejection response = %#v", response)
+	}
+	if got := srv.metrics.AccountProvisionTrackerRejections.Load(); got != 1 {
+		t.Fatalf("account provisioning tracker rejections = %d, want 1", got)
+	}
+	if got := srv.metrics.AccountProvisionSourceRejections.Load() + srv.metrics.AccountProvisionWindowRejections.Load(); got != 0 {
+		t.Fatalf("other account provisioning rejection counters = %d, want 0", got)
+	}
+	if user, err := st.NonTx().GetUserByUsername("blocked"); err != nil || user != nil {
+		t.Fatalf("tracker-rejected account persisted: user=%#v err=%v", user, err)
+	}
+}
+
 func TestOpenModeAccountProvisioningBudgetIsEnforced(t *testing.T) {
 	srv, st, _ := newTestServer(t)
 	srv.cfg.AllowNoToken = true
@@ -143,5 +228,11 @@ func TestOpenModeAccountProvisioningBudgetIsEnforced(t *testing.T) {
 	}
 	if user, err := st.NonTx().GetUserByUsername("second"); err != nil || user != nil {
 		t.Fatalf("rate-limited account persisted: user=%#v err=%v", user, err)
+	}
+	if got := srv.metrics.AccountProvisionSourceRejections.Load(); got != 1 {
+		t.Fatalf("account provisioning rejection metric = %d, want 1", got)
+	}
+	if got := srv.metrics.AccountProvisionSourceHighWater.Load(); got != 1 {
+		t.Fatalf("account provisioning source high-water mark = %d, want 1", got)
 	}
 }
