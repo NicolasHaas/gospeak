@@ -3,6 +3,7 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,8 +29,23 @@ func TestLoadSettingsMigratesLegacyFileToUserConfig(t *testing.T) {
 }
 
 func TestConfigFilePathUsesUserConfigDirectory(t *testing.T) {
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	root := t.TempDir()
+	var configHome string
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("AppData", root)
+		configHome = root
+	case "darwin", "ios":
+		t.Setenv("HOME", root)
+		configHome = filepath.Join(root, "Library", "Application Support")
+	case "plan9":
+		t.Setenv("home", root)
+		configHome = filepath.Join(root, "lib")
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+		configHome = root
+	}
+
 	got, err := configFilePath("settings.yaml")
 	if err != nil {
 		t.Fatal(err)
