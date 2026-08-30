@@ -360,6 +360,212 @@
         },
         "overrides": []
       }
+    },
+    {
+      "type": "row",
+      "title": "Capacity and abuse",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "gauge",
+      "title": "Pre-auth global utilization",
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_preauth_connections / gospeak_preauth_connection_limit",
+          "legendFormat": "{{plane}} current",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_preauth_connections_high_water / gospeak_preauth_connection_limit",
+          "legendFormat": "{{plane}} high water",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Busiest pre-auth source",
+      "gridPos": { "h": 7, "w": 6, "x": 6, "y": 33 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_preauth_source_max_connections / gospeak_preauth_source_connection_limit",
+          "legendFormat": "{{plane}} current",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_preauth_source_max_connections_high_water / gospeak_preauth_source_connection_limit",
+          "legendFormat": "{{plane}} high water",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Authentication budget",
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 33 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_auth_rate_limit_source_max_usage / gospeak_auth_rate_limit_source_limit",
+          "legendFormat": "current busiest source",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_auth_rate_limit_source_high_water_usage / gospeak_auth_rate_limit_source_limit",
+          "legendFormat": "high water",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Account provisioning budget",
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 33 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_account_provisioning_source_max_usage / gospeak_account_provisioning_source_limit",
+          "legendFormat": "current busiest source",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_account_provisioning_source_high_water_usage / gospeak_account_provisioning_source_limit",
+          "legendFormat": "high water",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Capacity rejections / min",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "expr": "sum by (plane, reason) (rate(gospeak_preauth_rejections_total[5m])) * 60",
+          "legendFormat": "pre-auth {{plane}} {{reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(gospeak_auth_rate_limit_rejections_total[5m])) * 60",
+          "legendFormat": "authentication {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (reason) (rate(gospeak_account_provisioning_rejections_total[5m])) * 60",
+          "legendFormat": "account provisioning {{reason}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tracked source keys and capacity",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "expr": "gospeak_preauth_active_sources",
+          "legendFormat": "pre-auth {{plane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "gospeak_auth_rate_limit_active_sources",
+          "legendFormat": "authentication",
+          "refId": "B"
+        },
+        {
+          "expr": "gospeak_account_provisioning_active_sources",
+          "legendFormat": "account provisioning",
+          "refId": "C"
+        },
+        {
+          "expr": "gospeak_auth_rate_limit_tracker_limit",
+          "legendFormat": "authentication capacity",
+          "refId": "D"
+        },
+        {
+          "expr": "gospeak_account_provisioning_tracker_limit",
+          "legendFormat": "account provisioning capacity",
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
     }
   ],
   "schemaVersion": 39,
@@ -370,5 +576,5 @@
   "timezone": "browser",
   "title": "GoSpeak Server",
   "uid": "gospeak-server",
-  "version": 2
+  "version": 3
 }

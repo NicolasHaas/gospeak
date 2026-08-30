@@ -178,14 +178,22 @@ func newAuthRateLimiter(maxAttempts int, window time.Duration) *authRateLimiter 
 }
 
 func (rl *authRateLimiter) Allow(key string) bool {
+	allowed, _, _, _ := rl.AllowWithDetails(key)
+	return allowed
+}
+
+func (rl *authRateLimiter) AllowWithDetails(key string) (allowed bool, reason string, current, limit int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return rl.allowWithDetailsLocked(key)
+}
 
+func (rl *authRateLimiter) allowWithDetailsLocked(key string) (allowed bool, reason string, current, limit int) {
 	now := rl.now()
 	entry, ok := rl.entries[key]
 	if ok && !now.Before(entry.resetAt) {
 		if entry.inFlight > 0 {
-			return false
+			return false, "window_transition", entry.count + entry.inFlight, rl.maxAttempts
 		}
 		delete(rl.entries, key)
 		entry = nil
@@ -199,17 +207,17 @@ func (rl *authRateLimiter) Allow(key string) bool {
 				}
 			}
 			if len(rl.entries) >= rl.maxEntries {
-				return false
+				return false, "tracker_capacity", len(rl.entries), rl.maxEntries
 			}
 		}
 		entry = &authEntry{resetAt: now.Add(rl.window)}
 		rl.entries[key] = entry
 	}
 	if entry.count+entry.inFlight >= rl.maxAttempts {
-		return false
+		return false, "source", entry.count + entry.inFlight, rl.maxAttempts
 	}
 	entry.inFlight++
-	return true
+	return true, "", entry.count + entry.inFlight, rl.maxAttempts
 }
 
 func (rl *authRateLimiter) RecordFailure(key string) {
@@ -262,13 +270,22 @@ func newAccountProvisionLimiter(maxSuccess int, window time.Duration) *accountPr
 }
 
 func (rl *accountProvisionLimiter) Reserve(key string) bool {
+	reserved, _, _, _ := rl.ReserveWithDetails(key)
+	return reserved
+}
+
+func (rl *accountProvisionLimiter) ReserveWithDetails(key string) (reserved bool, reason string, current, limit int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return rl.reserveWithDetailsLocked(key)
+}
+
+func (rl *accountProvisionLimiter) reserveWithDetailsLocked(key string) (reserved bool, reason string, current, limit int) {
 	now := rl.now()
 	entry, ok := rl.entries[key]
 	if ok && !now.Before(entry.resetAt) {
 		if entry.inFlight > 0 {
-			return false
+			return false, "window_transition", entry.successes + entry.inFlight, rl.maxSuccess
 		}
 		delete(rl.entries, key)
 		entry = nil
@@ -282,17 +299,17 @@ func (rl *accountProvisionLimiter) Reserve(key string) bool {
 				}
 			}
 			if len(rl.entries) >= rl.maxEntries {
-				return false
+				return false, "tracker_capacity", len(rl.entries), rl.maxEntries
 			}
 		}
 		entry = &accountProvisionEntry{resetAt: now.Add(rl.window)}
 		rl.entries[key] = entry
 	}
 	if entry.successes+entry.inFlight >= rl.maxSuccess {
-		return false
+		return false, "source", entry.successes + entry.inFlight, rl.maxSuccess
 	}
 	entry.inFlight++
-	return true
+	return true, "", entry.successes + entry.inFlight, rl.maxSuccess
 }
 
 func (rl *accountProvisionLimiter) Release(key string) {
@@ -474,9 +491,7 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 					continue
 				}
 			}
-			if !s.beginPreAuth(conn, preAuthControl) {
-				slog.Warn("control pre-auth connection limit reached", "remote", conn.RemoteAddr())
-				_ = conn.Close()
+			if !s.admitPreAuthConn(conn, preAuthControl) {
 				continue
 			}
 			acceptedConn := conn
@@ -541,8 +556,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	slog.Debug("new control connection", "remote", remoteAddr)
 
 	// Rate limit failed authentication attempts per remote IP.
-	if !s.authLimiter.Allow(rateLimitKey) {
-		slog.Warn("rate limited", "remote", remoteAddr)
+	authAllowed, authReason, authUsage, authLimit := s.allowAuthWithObservability(rateLimitKey)
+	if !authAllowed {
+		s.recordAuthRateLimitRejection(remoteAddr, authReason, authUsage, authLimit)
 		return
 	}
 	authenticated := false
@@ -626,9 +642,10 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 
 		if !bootstrapProvisioned {
-			if !s.accountProvisionLimiter.Reserve(rateLimitKey) {
+			provisionReserved, provisionReason, provisionUsage, provisionLimit := s.reserveAccountWithObservability(rateLimitKey)
+			if !provisionReserved {
 				s.metrics.FailedAuths.Add(1)
-				slog.Warn("account provisioning rate limited", "remote", remoteAddr)
+				s.recordAccountProvisionRejection(remoteAddr, provisionReason, provisionUsage, provisionLimit)
 				sendError(conn, 2, "authentication failed")
 				return
 			}

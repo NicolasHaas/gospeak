@@ -89,6 +89,10 @@ type Server struct {
 	acceptedConns           map[net.Conn]trackedConn
 	preAuthCount            map[preAuthPlane]int
 	preAuthByIP             map[preAuthPlane]map[string]int
+	capacityLogMu           sync.Mutex
+	capacityLogLast         map[string]time.Time
+	capacityLogDrop         map[string]int64
+	capacityLogNow          func() time.Time
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -122,6 +126,9 @@ func New(cfg Config, deps Dependencies) *Server {
 		acceptedConns:           make(map[net.Conn]trackedConn),
 		preAuthCount:            make(map[preAuthPlane]int),
 		preAuthByIP:             make(map[preAuthPlane]map[string]int),
+		capacityLogLast:         make(map[string]time.Time),
+		capacityLogDrop:         make(map[string]int64),
+		capacityLogNow:          time.Now,
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}
@@ -185,14 +192,26 @@ const (
 
 func (s *Server) beginPreAuth(conn net.Conn, plane preAuthPlane) bool {
 	s.preAuthMu.Lock()
-	defer s.preAuthMu.Unlock()
 	if _, ok := s.acceptedConns[conn]; ok {
+		s.preAuthMu.Unlock()
 		return true
 	}
+	if s.ctx.Err() != nil {
+		s.preAuthMu.Unlock()
+		return false
+	}
+
 	admissionKey := authRateLimitKey(conn.RemoteAddr())
-	if s.ctx.Err() != nil ||
-		s.preAuthCount[plane] >= s.cfg.MaxPreAuthConnections ||
-		s.preAuthByIP[plane][admissionKey] >= maxPreAuthConnectionsPerIP {
+	globalCurrent := s.preAuthCount[plane]
+	if globalCurrent >= s.cfg.MaxPreAuthConnections {
+		s.preAuthMu.Unlock()
+		s.recordPreAuthRejection(plane, "global", conn.RemoteAddr().String(), globalCurrent, s.cfg.MaxPreAuthConnections)
+		return false
+	}
+	sourceCurrent := s.preAuthByIP[plane][admissionKey]
+	if sourceCurrent >= maxPreAuthConnectionsPerIP {
+		s.preAuthMu.Unlock()
+		s.recordPreAuthRejection(plane, "source", conn.RemoteAddr().String(), sourceCurrent, maxPreAuthConnectionsPerIP)
 		return false
 	}
 	if s.preAuthByIP[plane] == nil {
@@ -201,6 +220,10 @@ func (s *Server) beginPreAuth(conn net.Conn, plane preAuthPlane) bool {
 	s.acceptedConns[conn] = trackedConn{plane: plane, preAuth: true, admissionKey: admissionKey}
 	s.preAuthCount[plane]++
 	s.preAuthByIP[plane][admissionKey]++
+	current := s.preAuthCount[plane]
+	sourceCurrent = s.preAuthByIP[plane][admissionKey]
+	s.observePreAuthUsage(plane, current, sourceCurrent)
+	s.preAuthMu.Unlock()
 	return true
 }
 
@@ -210,6 +233,14 @@ func (s *Server) releasePreAuth(tracked trackedConn) {
 	if s.preAuthByIP[tracked.plane][tracked.admissionKey] == 0 {
 		delete(s.preAuthByIP[tracked.plane], tracked.admissionKey)
 	}
+}
+
+func (s *Server) admitPreAuthConn(conn net.Conn, plane preAuthPlane) bool {
+	if s.beginPreAuth(conn, plane) {
+		return true
+	}
+	_ = conn.Close()
+	return false
 }
 
 func (s *Server) finishPreAuth(conn net.Conn) {

@@ -19,6 +19,26 @@ type Metrics struct {
 	SuccessfulAuths   atomic.Int64 // successful authentication attempts
 	TotalDisconnects  atomic.Int64 // total client disconnects (clean + unclean)
 
+	// Capacity-limit counters and startup-lifetime high-water marks. Current
+	// occupancy and configured limits are read from owning server state when
+	// Prometheus scrapes.
+	PreAuthControlGlobalRejections    atomic.Int64
+	PreAuthControlSourceRejections    atomic.Int64
+	PreAuthScreenGlobalRejections     atomic.Int64
+	PreAuthScreenSourceRejections     atomic.Int64
+	PreAuthControlHighWater           atomic.Int64
+	PreAuthControlSourceHighWater     atomic.Int64
+	PreAuthScreenHighWater            atomic.Int64
+	PreAuthScreenSourceHighWater      atomic.Int64
+	AuthRateLimitSourceRejections     atomic.Int64
+	AuthRateLimitTrackerRejections    atomic.Int64
+	AuthRateLimitWindowRejections     atomic.Int64
+	AuthRateLimitSourceHighWater      atomic.Int64
+	AccountProvisionSourceRejections  atomic.Int64
+	AccountProvisionTrackerRejections atomic.Int64
+	AccountProvisionWindowRejections  atomic.Int64
+	AccountProvisionSourceHighWater   atomic.Int64
+
 	// Voice counters
 	VoicePacketsIn      atomic.Int64 // total UDP voice packets received
 	VoicePacketsOut     atomic.Int64 // total UDP voice packets forwarded
@@ -66,6 +86,23 @@ type MetricsSnapshot struct {
 	FailedAuths       int64 `json:"failed_auths"`
 	TotalDisconnects  int64 `json:"total_disconnects"`
 
+	PreAuthControlGlobalRejections    int64 `json:"preauth_control_global_rejections"`
+	PreAuthControlSourceRejections    int64 `json:"preauth_control_source_rejections"`
+	PreAuthScreenGlobalRejections     int64 `json:"preauth_screen_global_rejections"`
+	PreAuthScreenSourceRejections     int64 `json:"preauth_screen_source_rejections"`
+	PreAuthControlHighWater           int64 `json:"preauth_control_high_water"`
+	PreAuthControlSourceHighWater     int64 `json:"preauth_control_source_high_water"`
+	PreAuthScreenHighWater            int64 `json:"preauth_screen_high_water"`
+	PreAuthScreenSourceHighWater      int64 `json:"preauth_screen_source_high_water"`
+	AuthRateLimitSourceRejections     int64 `json:"auth_rate_limit_source_rejections"`
+	AuthRateLimitTrackerRejections    int64 `json:"auth_rate_limit_tracker_rejections"`
+	AuthRateLimitWindowRejections     int64 `json:"auth_rate_limit_window_rejections"`
+	AuthRateLimitSourceHighWater      int64 `json:"auth_rate_limit_source_high_water"`
+	AccountProvisionSourceRejections  int64 `json:"account_provision_source_rejections"`
+	AccountProvisionTrackerRejections int64 `json:"account_provision_tracker_rejections"`
+	AccountProvisionWindowRejections  int64 `json:"account_provision_window_rejections"`
+	AccountProvisionSourceHighWater   int64 `json:"account_provision_source_high_water"`
+
 	VoicePacketsIn      int64 `json:"voice_packets_in"`
 	VoicePacketsOut     int64 `json:"voice_packets_out"`
 	VoicePacketsDropped int64 `json:"voice_packets_dropped"`
@@ -94,31 +131,47 @@ type MetricsSnapshot struct {
 func (m *Metrics) Snapshot() MetricsSnapshot {
 	uptime := time.Since(m.startTime)
 	return MetricsSnapshot{
-		Uptime:                 uptime.Truncate(time.Second).String(),
-		UptimeSeconds:          int64(uptime.Seconds()),
-		ActiveConnections:      m.ActiveConnections.Load(),
-		TotalConnections:       m.TotalConnections.Load(),
-		SuccessfulAuths:        m.SuccessfulAuths.Load(),
-		FailedAuths:            m.FailedAuths.Load(),
-		TotalDisconnects:       m.TotalDisconnects.Load(),
-		VoicePacketsIn:         m.VoicePacketsIn.Load(),
-		VoicePacketsOut:        m.VoicePacketsOut.Load(),
-		VoicePacketsDropped:    m.VoicePacketsDropped.Load(),
-		VoiceBytesIn:           m.VoiceBytesIn.Load(),
-		VoiceBytesOut:          m.VoiceBytesOut.Load(),
-		ChatMessagesSent:       m.ChatMessagesSent.Load(),
-		ScreenSharesStarted:    m.ScreenSharesStarted.Load(),
-		ScreenSharesStopped:    m.ScreenSharesStopped.Load(),
-		ScreenShareFramesIn:    m.ScreenShareFramesIn.Load(),
-		ScreenShareFramesOut:   m.ScreenShareFramesOut.Load(),
-		ScreenShareBytesIn:     m.ScreenShareBytesIn.Load(),
-		ScreenShareBytesOut:    m.ScreenShareBytesOut.Load(),
-		ScreenShareSubscribers: m.ScreenShareSubscribers.Load(),
-		ChannelsCreated:        m.ChannelsCreated.Load(),
-		ChannelsDeleted:        m.ChannelsDeleted.Load(),
-		TokensCreated:          m.TokensCreated.Load(),
-		KickCount:              m.KickCount.Load(),
-		BanCount:               m.BanCount.Load(),
+		Uptime:                            uptime.Truncate(time.Second).String(),
+		UptimeSeconds:                     int64(uptime.Seconds()),
+		ActiveConnections:                 m.ActiveConnections.Load(),
+		TotalConnections:                  m.TotalConnections.Load(),
+		SuccessfulAuths:                   m.SuccessfulAuths.Load(),
+		FailedAuths:                       m.FailedAuths.Load(),
+		TotalDisconnects:                  m.TotalDisconnects.Load(),
+		PreAuthControlGlobalRejections:    m.PreAuthControlGlobalRejections.Load(),
+		PreAuthControlSourceRejections:    m.PreAuthControlSourceRejections.Load(),
+		PreAuthScreenGlobalRejections:     m.PreAuthScreenGlobalRejections.Load(),
+		PreAuthScreenSourceRejections:     m.PreAuthScreenSourceRejections.Load(),
+		PreAuthControlHighWater:           m.PreAuthControlHighWater.Load(),
+		PreAuthControlSourceHighWater:     m.PreAuthControlSourceHighWater.Load(),
+		PreAuthScreenHighWater:            m.PreAuthScreenHighWater.Load(),
+		PreAuthScreenSourceHighWater:      m.PreAuthScreenSourceHighWater.Load(),
+		AuthRateLimitSourceRejections:     m.AuthRateLimitSourceRejections.Load(),
+		AuthRateLimitTrackerRejections:    m.AuthRateLimitTrackerRejections.Load(),
+		AuthRateLimitWindowRejections:     m.AuthRateLimitWindowRejections.Load(),
+		AuthRateLimitSourceHighWater:      m.AuthRateLimitSourceHighWater.Load(),
+		AccountProvisionSourceRejections:  m.AccountProvisionSourceRejections.Load(),
+		AccountProvisionTrackerRejections: m.AccountProvisionTrackerRejections.Load(),
+		AccountProvisionWindowRejections:  m.AccountProvisionWindowRejections.Load(),
+		AccountProvisionSourceHighWater:   m.AccountProvisionSourceHighWater.Load(),
+		VoicePacketsIn:                    m.VoicePacketsIn.Load(),
+		VoicePacketsOut:                   m.VoicePacketsOut.Load(),
+		VoicePacketsDropped:               m.VoicePacketsDropped.Load(),
+		VoiceBytesIn:                      m.VoiceBytesIn.Load(),
+		VoiceBytesOut:                     m.VoiceBytesOut.Load(),
+		ChatMessagesSent:                  m.ChatMessagesSent.Load(),
+		ScreenSharesStarted:               m.ScreenSharesStarted.Load(),
+		ScreenSharesStopped:               m.ScreenSharesStopped.Load(),
+		ScreenShareFramesIn:               m.ScreenShareFramesIn.Load(),
+		ScreenShareFramesOut:              m.ScreenShareFramesOut.Load(),
+		ScreenShareBytesIn:                m.ScreenShareBytesIn.Load(),
+		ScreenShareBytesOut:               m.ScreenShareBytesOut.Load(),
+		ScreenShareSubscribers:            m.ScreenShareSubscribers.Load(),
+		ChannelsCreated:                   m.ChannelsCreated.Load(),
+		ChannelsDeleted:                   m.ChannelsDeleted.Load(),
+		TokensCreated:                     m.TokensCreated.Load(),
+		KickCount:                         m.KickCount.Load(),
+		BanCount:                          m.BanCount.Load(),
 	}
 }
 
