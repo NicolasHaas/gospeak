@@ -136,30 +136,38 @@ func WriteControlMessage(w io.Writer, msg *pb.ControlMessage) error {
 
 // ReadControlMessage reads a length-prefixed JSON control message from a reader.
 func ReadControlMessage(r io.Reader) (*pb.ControlMessage, error) {
+	msg, _, err := ReadControlMessageWithSize(r)
+	return msg, err
+}
+
+// ReadControlMessageWithSize reads a control message and reports its encoded
+// payload size so authenticated callers can budget both semantic and parsing
+// work without marshaling the message again.
+func ReadControlMessageWithSize(r io.Reader) (*pb.ControlMessage, int, error) {
 	// Read length prefix
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
-		return nil, fmt.Errorf("protocol: read length: %w", err)
+		return nil, 0, fmt.Errorf("protocol: read length: %w", err)
 	}
 	length := binary.BigEndian.Uint32(lenBuf)
 	if length > MaxControlMessage {
-		return nil, fmt.Errorf("protocol: message too large: %d bytes", length)
+		return nil, MaxControlMessage + 1, fmt.Errorf("protocol: message too large: %d bytes", length)
 	}
 
 	// Read payload
 	data := make([]byte, length)
 	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, fmt.Errorf("protocol: read payload: %w", err)
+		return nil, int(length), fmt.Errorf("protocol: read payload: %w", err)
 	}
 	if err := validateControlEnvelope(data); err != nil {
-		return nil, err
+		return nil, int(length), err
 	}
 
 	msg := &pb.ControlMessage{}
 	if err := json.Unmarshal(data, msg); err != nil {
-		return nil, fmt.Errorf("protocol: unmarshal: %w", err)
+		return nil, int(length), fmt.Errorf("protocol: unmarshal: %w", err)
 	}
-	return msg, nil
+	return msg, int(length), nil
 }
 
 func validateControlEnvelope(data []byte) error {

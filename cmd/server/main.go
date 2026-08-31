@@ -26,6 +26,12 @@ func main() {
 	flag.BoolVar(&cfg.EnableScreenShare, "screen-share", false, "Enable basic per-channel screen sharing")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for plaintext /metrics and /healthz (empty to disable)")
+	flag.IntVar(&cfg.MaxSessions, "max-sessions", cfg.MaxSessions, "Maximum concurrent authenticated sessions")
+	flag.IntVar(&cfg.MaxSessionsPerUser, "max-sessions-per-user", cfg.MaxSessionsPerUser, "Maximum concurrent sessions per account")
+	flag.IntVar(&cfg.ControlMessageBurst, "control-message-burst", cfg.ControlMessageBurst, "Maximum control-message cost burst per session and account (minimum 5)")
+	flag.IntVar(&cfg.ControlMessagesPerSec, "control-messages-per-second", cfg.ControlMessagesPerSec, "Per-session and per-account control-message cost replenished per second")
+	flag.IntVar(&cfg.ControlGlobalBurst, "control-global-burst", cfg.ControlGlobalBurst, "Maximum server-wide control-message cost burst (minimum 5)")
+	flag.IntVar(&cfg.ControlGlobalMessagesPerSec, "control-global-messages-per-second", cfg.ControlGlobalMessagesPerSec, "Server-wide control-message cost replenished per second")
 	flag.BoolVar(&cfg.ExportUsers, "export-users", false, "Export all users as YAML and exit")
 	flag.BoolVar(&cfg.ExportChannels, "export-channels", false, "Export all channels as YAML and exit")
 

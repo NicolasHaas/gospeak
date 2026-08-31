@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +127,10 @@ func TestAuthenticationFailuresDoNotRevealUsernameState(t *testing.T) {
 		t.Fatalf("seed user: %v", err)
 	}
 	srv.cfg.AllowNoToken = true
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	requests := []struct {
 		name     string
@@ -148,6 +155,12 @@ func TestAuthenticationFailuresDoNotRevealUsernameState(t *testing.T) {
 				t.Fatalf("externally distinguishable auth error = %q, want %q", got, want)
 			}
 		})
+	}
+	if got := strings.Count(logs.String(), "authentication failed"); got != 1 {
+		t.Fatalf("account provisioning failure log count = %d, want 1; logs=%q", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "invalid token") || strings.Contains(logs.String(), "username already taken") {
+		t.Fatalf("account provisioning log revealed authentication state: %s", logs.String())
 	}
 }
 

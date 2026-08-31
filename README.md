@@ -46,16 +46,10 @@ GRAFANA_ADMIN_PASSWORD='<choose-password>' \
 docker compose -f compose.yaml -f compose.monitoring.yaml up -d
 ```
 
-Grafana is then available only on `127.0.0.1:3000`. Prometheus is not published
-on the host. The bundled dashboard shows current and startup-lifetime high-water
-utilization for pre-auth admission, authentication, and account provisioning.
-Authentication usage is failed attempts plus in-flight checks against the
-30-attempt, one-minute source window; provisioning usage is successful creations
-plus in-flight reservations against the 120-account, one-hour source window.
-The rejection chart distinguishes source exhaustion, tracker capacity, and
-in-flight window transitions without exposing source identities as labels. The
-75% yellow and 90% red thresholds are dashboard guidance, not configured alerts;
-high-water values reset when the server restarts.
+Grafana is then available only on `127.0.0.1:3000`; Prometheus is not
+published on the host. See [Monitoring and Capacity](docs/monitoring.md) for
+metric semantics, dashboard thresholds, authenticated-session limits,
+control-message budget costs, rejection labels, and throttled-log behavior.
 
 On first run, GoSpeak writes an admin bootstrap credential to
 `bootstrap-admin.token` in the data directory. For this Compose setup, read it
@@ -122,6 +116,7 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 | [Architecture](docs/architecture.md) | Package structure, data models, server/client lifecycle |
 | [Protocol](docs/protocol.md) | Control plane messages, voice packet format, wire protocol |
 | [Security](docs/security.md) | Encryption details, key distribution, RBAC, threat model |
+| [Monitoring and Capacity](docs/monitoring.md) | Prometheus/Grafana setup, metric semantics, limits, and control budgets |
 | [Audio Pipeline](docs/audio.md) | Capture/playback, Opus codec, VAD, jitter buffer |
 | [Building](docs/building.md) | Container builds, local dev setup, build targets |
 | [Deployment](deploy/README.md) | Rocky Linux 10 cloud-init example |
@@ -140,6 +135,12 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 | `-channels-file` | | YAML file for initial channel setup |
 | `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data`. On the first new TLS connection within 30 days of expiry, it renews the automatic certificate without changing the private key or TOFU identity |
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` HTTP bind address; opt in with a trusted bind such as `127.0.0.1:9602` |
+| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions |
+| `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account |
+| `-control-message-burst` | `60` | Per-session and aggregate per-account control-message cost burst |
+| `-control-messages-per-second` | `20` | Per-session and aggregate per-account control-message cost replenished each second |
+| `-control-global-burst` | `300` | Server-wide control-message cost burst |
+| `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level |

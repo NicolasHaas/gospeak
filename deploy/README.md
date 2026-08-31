@@ -81,6 +81,12 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(empty)* | YAML file defining channels created on startup |
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` bind address; disabled by default |
+| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
+| `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
+| `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
+| `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
+| `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
+| `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |

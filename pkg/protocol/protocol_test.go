@@ -22,6 +22,25 @@ func (w *shortWriter) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
+func TestReadControlMessageWithSizeReportsEncodedPayload(t *testing.T) {
+	want := &pb.ControlMessage{Ping: &pb.Ping{Timestamp: 42}}
+	var frame bytes.Buffer
+	if err := WriteControlMessage(&frame, want); err != nil {
+		t.Fatalf("WriteControlMessage: %v", err)
+	}
+	wantSize := frame.Len() - 4
+	got, gotSize, err := ReadControlMessageWithSize(&frame)
+	if err != nil {
+		t.Fatalf("ReadControlMessageWithSize: %v", err)
+	}
+	if gotSize != wantSize {
+		t.Fatalf("payload size = %d, want %d", gotSize, wantSize)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("message = %#v, want %#v", got, want)
+	}
+}
+
 func TestWriteControlMessageHandlesShortWrites(t *testing.T) {
 	want := &pb.ControlMessage{Ping: &pb.Ping{Timestamp: 42}}
 	writer := &shortWriter{max: 3}

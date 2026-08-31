@@ -277,6 +277,96 @@ func TestBoundedLimiterRejectionReasonsAreCounted(t *testing.T) {
 	})
 }
 
+func TestControlReadFailureLoggingIsThrottled(t *testing.T) {
+	srv := New(DefaultConfig(), Dependencies{})
+	now := time.Unix(1_700_000_000, 0)
+	srv.capacityLogNow = func() time.Time { return now }
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	srv.logControlReadFailure("192.0.2.10:4000", "pre_auth")
+	srv.logControlReadFailure("192.0.2.11:4001", "pre_auth")
+	if got := strings.Count(logs.String(), "invalid control message rejected"); got != 1 {
+		t.Fatalf("control read log count = %d, want 1; logs=%q", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "alice") || strings.Contains(logs.String(), "bob") {
+		t.Fatalf("control read log included attacker-controlled identity: %s", logs.String())
+	}
+	if got := srv.metrics.ControlInvalidMessages.Load(); got != 2 {
+		t.Fatalf("invalid control message count = %d, want 2", got)
+	}
+
+	now = now.Add(capacityLogInterval)
+	srv.logControlReadFailure("192.0.2.12:4002", "pre_auth")
+	if !strings.Contains(logs.String(), "suppressed=1") {
+		t.Fatalf("next control read log did not report suppression: %s", logs.String())
+	}
+}
+
+func TestAuthenticationFailureLoggingIsThrottledWithoutErrorDetails(t *testing.T) {
+	srv := New(DefaultConfig(), Dependencies{})
+	now := time.Unix(1_700_000_000, 0)
+	srv.capacityLogNow = func() time.Time { return now }
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	srv.logAuthenticationFailure("192.0.2.10:4000", "account_provisioning")
+	srv.logAuthenticationFailure("192.0.2.11:4001", "account_provisioning")
+	if got := strings.Count(logs.String(), "authentication failed"); got != 1 {
+		t.Fatalf("authentication failure log count = %d, want 1; logs=%q", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "invalid token") || strings.Contains(logs.String(), "username already taken") {
+		t.Fatalf("authentication log exposed failure details: %s", logs.String())
+	}
+
+	now = now.Add(capacityLogInterval)
+	srv.logAuthenticationFailure("192.0.2.12:4002", "account_provisioning")
+	if !strings.Contains(logs.String(), "suppressed=1") {
+		t.Fatalf("next authentication failure log did not report suppression: %s", logs.String())
+	}
+}
+
+func TestScreenFailureLoggingIsThrottledAndCounted(t *testing.T) {
+	srv := New(DefaultConfig(), Dependencies{})
+	now := time.Unix(1_700_000_000, 0)
+	srv.capacityLogNow = func() time.Time { return now }
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	for range 2 {
+		srv.recordScreenAuthRejection("192.0.2.10:4000", "invalid_message")
+		srv.recordScreenAuthRejection("192.0.2.11:4001", "authentication")
+		srv.recordScreenPacketRejection("192.0.2.12:4002")
+	}
+	if got := strings.Count(logs.String(), "screen message rejected"); got != 3 {
+		t.Fatalf("screen rejection log count = %d, want 3; logs=%q", got, logs.String())
+	}
+	if got := srv.metrics.ScreenAuthInvalidRejections.Load(); got != 2 {
+		t.Fatalf("invalid screen auth rejections = %d, want 2", got)
+	}
+	if got := srv.metrics.ScreenAuthCredentialRejections.Load(); got != 2 {
+		t.Fatalf("screen credential rejections = %d, want 2", got)
+	}
+	if got := srv.metrics.ScreenInvalidPackets.Load(); got != 2 {
+		t.Fatalf("invalid screen packets = %d, want 2", got)
+	}
+
+	now = now.Add(capacityLogInterval)
+	srv.recordScreenAuthRejection("192.0.2.13:4003", "invalid_message")
+	if !strings.Contains(logs.String(), "suppressed=1") {
+		t.Fatalf("next screen rejection log did not report suppression: %s", logs.String())
+	}
+}
+
 func TestMetricsEndpointExposesCapacityWithoutSourceLabels(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxPreAuthConnections = 2
@@ -332,6 +422,9 @@ func TestMetricsEndpointExposesCapacityWithoutSourceLabels(t *testing.T) {
 		`gospeak_account_provisioning_rejections_total{reason="source"} 0`,
 		`gospeak_account_provisioning_rejections_total{reason="tracker_capacity"} 0`,
 		`gospeak_account_provisioning_rejections_total{reason="window_transition"} 0`,
+		`gospeak_screen_auth_rejections_total{reason="invalid_message"} 0`,
+		`gospeak_screen_auth_rejections_total{reason="authentication"} 0`,
+		`gospeak_screen_invalid_packets_total 0`,
 	} {
 		if !strings.Contains(body, line+"\n") {
 			t.Fatalf("metrics output missing %q:\n%s", line, body)

@@ -85,7 +85,7 @@ func deriveBootstrapPersonalToken(rawToken, username string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) tryProvisionBootstrapUser(st datastore.DataProviderFactory, tokenHash, rawToken, username string) (*model.User, string, bool, error) {
+func (s *Server) tryProvisionBootstrapUser(st datastore.DataProviderFactory, tokenHash, rawToken, username string, beforeCommit func(datastore.DataStoreTx, *model.User) error) (*model.User, string, bool, error) {
 	s.bootstrapMu.Lock()
 	defer s.bootstrapMu.Unlock()
 
@@ -104,6 +104,14 @@ func (s *Server) tryProvisionBootstrapUser(st datastore.DataProviderFactory, tok
 			return nil, "", true, fmt.Errorf("provision user: %w (rollback: %v)", err, rollbackErr)
 		}
 		return nil, "", true, err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(tx, user); err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				return nil, "", true, fmt.Errorf("before bootstrap commit: %w (rollback: %v)", err, rollbackErr)
+			}
+			return nil, "", true, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		_ = tx.Rollback()
