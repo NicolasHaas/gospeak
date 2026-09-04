@@ -16,19 +16,25 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	ControlAddr           string        // TCP/TLS bind address (e.g. ":9600")
-	VoiceAddr             string        // UDP bind address (e.g. ":9601")
-	ScreenAddr            string        // TCP/TLS screen-share bind address (e.g. ":9603")
-	DBPath                string        // SQLite database path
-	CertFile              string        // TLS certificate file path
-	KeyFile               string        // TLS private key file path
-	DataDir               string        // directory for generated certs and data
-	AllowNoToken          bool          // allow users to join without a token (open server)
-	EnableScreenShare     bool          // enable per-channel screen sharing support
-	ChannelsFile          string        // YAML file defining channels to create on startup
-	MetricsAddr           string        // HTTP bind address for /metrics endpoint (empty = disabled)
-	PreAuthTimeout        time.Duration // maximum TLS handshake and authentication time
-	MaxPreAuthConnections int           // maximum concurrent unauthenticated connections per TCP plane
+	ControlAddr                 string        // TCP/TLS bind address (e.g. ":9600")
+	VoiceAddr                   string        // UDP bind address (e.g. ":9601")
+	ScreenAddr                  string        // TCP/TLS screen-share bind address (e.g. ":9603")
+	DBPath                      string        // SQLite database path
+	CertFile                    string        // TLS certificate file path
+	KeyFile                     string        // TLS private key file path
+	DataDir                     string        // directory for generated certs and data
+	AllowNoToken                bool          // allow users to join without a token (open server)
+	EnableScreenShare           bool          // enable per-channel screen sharing support
+	ChannelsFile                string        // YAML file defining channels to create on startup
+	MetricsAddr                 string        // HTTP bind address for /metrics endpoint (empty = disabled)
+	PreAuthTimeout              time.Duration // maximum TLS handshake and authentication time
+	MaxPreAuthConnections       int           // maximum concurrent unauthenticated connections per TCP plane
+	MaxSessions                 int           // maximum concurrent authenticated sessions
+	MaxSessionsPerUser          int           // maximum concurrent sessions for one account
+	ControlMessageBurst         int           // maximum control-message cost burst per session
+	ControlMessagesPerSec       int           // control-message cost replenished per second per session
+	ControlGlobalBurst          int           // maximum server-wide control-message cost burst
+	ControlGlobalMessagesPerSec int           // server-wide control-message cost replenished per second
 
 	// CLI-only actions (run and exit)
 	ExportUsers    bool // export all users as YAML and exit
@@ -44,14 +50,20 @@ type Dependencies struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		ControlAddr:           ":9600",
-		VoiceAddr:             ":9601",
-		ScreenAddr:            ":9603",
-		MetricsAddr:           "",
-		DBPath:                "gospeak.db",
-		DataDir:               ".",
-		PreAuthTimeout:        10 * time.Second,
-		MaxPreAuthConnections: 64,
+		ControlAddr:                 ":9600",
+		VoiceAddr:                   ":9601",
+		ScreenAddr:                  ":9603",
+		MetricsAddr:                 "",
+		DBPath:                      "gospeak.db",
+		DataDir:                     ".",
+		PreAuthTimeout:              10 * time.Second,
+		MaxPreAuthConnections:       64,
+		MaxSessions:                 1024,
+		MaxSessionsPerUser:          8,
+		ControlMessageBurst:         60,
+		ControlMessagesPerSec:       20,
+		ControlGlobalBurst:          300,
+		ControlGlobalMessagesPerSec: 100,
 	}
 }
 
@@ -85,6 +97,9 @@ type Server struct {
 	authLimiter             *authRateLimiter
 	accountProvisionLimiter *accountProvisionLimiter
 	bootstrapMu             sync.Mutex
+	sessionBanMu            sync.Mutex
+	sessionBanChecks        map[int64]int
+	sessionBanPending       map[int64]bool
 	preAuthMu               sync.Mutex
 	acceptedConns           map[net.Conn]trackedConn
 	preAuthCount            map[preAuthPlane]int
@@ -93,6 +108,10 @@ type Server struct {
 	capacityLogLast         map[string]time.Time
 	capacityLogDrop         map[string]int64
 	capacityLogNow          func() time.Time
+	controlBudgetMu         sync.RWMutex
+	controlBudgets          map[uint32]*controlMessageLimiter
+	controlUserBudgets      *controlUserBudgetManager
+	controlGlobalBudget     *controlMessageLimiter
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -111,13 +130,41 @@ func New(cfg Config, deps Dependencies) *Server {
 	if cfg.MaxPreAuthConnections <= 0 {
 		cfg.MaxPreAuthConnections = 64
 	}
+	if cfg.MaxSessions <= 0 {
+		cfg.MaxSessions = 1024
+	}
+	if cfg.MaxSessionsPerUser <= 0 {
+		cfg.MaxSessionsPerUser = 8
+	}
+	if cfg.ControlMessageBurst <= 0 {
+		cfg.ControlMessageBurst = 60
+	} else if cfg.ControlMessageBurst < controlExpensiveCost {
+		cfg.ControlMessageBurst = controlExpensiveCost
+	}
+	if cfg.ControlMessagesPerSec <= 0 {
+		cfg.ControlMessagesPerSec = 20
+	}
+	if cfg.ControlGlobalBurst <= 0 {
+		cfg.ControlGlobalBurst = 300
+	} else if cfg.ControlGlobalBurst < controlExpensiveCost {
+		cfg.ControlGlobalBurst = controlExpensiveCost
+	}
+	if cfg.ControlGlobalMessagesPerSec <= 0 {
+		cfg.ControlGlobalMessagesPerSec = 100
+	}
 	ctx, cancel := context.WithCancel(context.Background())
+	metrics := NewMetrics()
+	controlUserBudgets := newControlUserBudgetManager(cfg.ControlMessageBurst, cfg.ControlMessagesPerSec, time.Now)
+	controlUserBudgets.maxEntries = max(controlUserBudgets.maxEntries, cfg.MaxSessions)
+	controlUserBudgets.highWater = &metrics.ControlUserBudgetHighWater
+	controlGlobalBudget := newControlMessageLimiter(cfg.ControlGlobalBurst, cfg.ControlGlobalMessagesPerSec, time.Now)
+	controlGlobalBudget.highWater = &metrics.ControlGlobalBudgetHighWater
 	return &Server{
 		cfg:                     cfg,
-		sessions:                NewSessionManager(),
+		sessions:                NewSessionManagerWithLimits(cfg.MaxSessions, cfg.MaxSessionsPerUser),
 		channels:                NewChannelManager(),
 		screenShare:             NewScreenShareManager(),
-		metrics:                 NewMetrics(),
+		metrics:                 metrics,
 		screenConns:             make(map[uint32]*screenClientConn),
 		voiceStats:              make(map[uint32]*perSessionVoiceStat),
 		store:                   deps.Store,
@@ -129,6 +176,11 @@ func New(cfg Config, deps Dependencies) *Server {
 		capacityLogLast:         make(map[string]time.Time),
 		capacityLogDrop:         make(map[string]int64),
 		capacityLogNow:          time.Now,
+		sessionBanChecks:        make(map[int64]int),
+		sessionBanPending:       make(map[int64]bool),
+		controlBudgets:          make(map[uint32]*controlMessageLimiter),
+		controlUserBudgets:      controlUserBudgets,
+		controlGlobalBudget:     controlGlobalBudget,
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}

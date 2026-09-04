@@ -105,6 +105,28 @@ func TestEnsureAdminTokenWritesRetryableCredentialWithoutLoggingSecret(t *testin
 	}
 }
 
+func TestBootstrapProvisioningRollsBackSessionPreparationFailure(t *testing.T) {
+	srv, st, credentialPath := newBootstrapTestServer(t)
+	if err := srv.ensureAdminToken(st); err != nil {
+		t.Fatalf("ensureAdminToken() error = %v", err)
+	}
+	rawToken := readBootstrapToken(t, credentialPath)
+	srv.sessions.issuedSessionIDs = usableSessionIDs
+
+	if _, err := authenticateBootstrap(t, srv, st, "bootstrap-prepare", rawToken); err == nil {
+		t.Fatal("bootstrap authentication succeeded despite session ID exhaustion")
+	}
+	if user, err := st.NonTx().GetUserByUsername("bootstrap-prepare"); err != nil || user != nil {
+		t.Fatalf("session-preparation-rejected bootstrap user persisted: user=%#v err=%v", user, err)
+	}
+
+	srv.sessions.issuedSessionIDs = 0
+	response, err := authenticateBootstrap(t, srv, st, "bootstrap-prepare", rawToken)
+	if err != nil || response.AutoToken == "" {
+		t.Fatalf("bootstrap retry after session preparation failure = %#v, error = %v", response, err)
+	}
+}
+
 func TestBootstrapProvisioningRetriesAfterAuthResponseWriteFailure(t *testing.T) {
 	srv, st, credentialPath := newBootstrapTestServer(t)
 	if err := srv.ensureAdminToken(st); err != nil {
@@ -279,6 +301,41 @@ func TestEnsureAdminTokenRejectsCredentialSymlink(t *testing.T) {
 
 	if err := srv.ensureAdminToken(st); err == nil {
 		t.Fatal("ensureAdminToken() accepted a credential symlink")
+	}
+}
+
+func TestBootstrapProvisioningRollsBackControlBudgetTrackerFailure(t *testing.T) {
+	srv, st, credentialPath := newBootstrapTestServer(t)
+	if err := srv.ensureAdminToken(st); err != nil {
+		t.Fatalf("ensureAdminToken() error = %v", err)
+	}
+	bootstrapToken := readBootstrapToken(t, credentialPath)
+
+	now := time.Unix(1_700_000_000, 0)
+	srv.controlUserBudgets = newControlUserBudgetManager(1, 1, func() time.Time { return now })
+	srv.controlUserBudgets.maxEntries = 1
+	occupied, _, _, ok := srv.controlUserBudgets.Acquire(999)
+	if !ok || !occupied.Allow(&pb.ControlMessage{Ping: &pb.Ping{}}).Allowed {
+		t.Fatal("could not occupy control user budget tracker")
+	}
+	srv.controlUserBudgets.Release(999)
+
+	if _, err := authenticateBootstrap(t, srv, st, "bootstrap-budget-retry", bootstrapToken); err == nil || !strings.Contains(err.Error(), "server control capacity reached") {
+		t.Fatalf("bootstrap tracker-capacity error = %v", err)
+	}
+	if user, err := st.NonTx().GetUserByUsername("bootstrap-budget-retry"); err != nil || user != nil {
+		t.Fatalf("tracker-rejected bootstrap user persisted: user=%#v err=%v", user, err)
+	}
+	if got := srv.metrics.ControlUserTrackerRejections.Load(); got != 1 {
+		t.Fatalf("control user tracker rejections = %d, want 1", got)
+	}
+
+	now = now.Add(2 * time.Second)
+	if _, err := authenticateBootstrap(t, srv, st, "bootstrap-budget-retry", bootstrapToken); err != nil {
+		t.Fatalf("bootstrap retry after tracker refill: %v", err)
+	}
+	if user, err := st.NonTx().GetUserByUsername("bootstrap-budget-retry"); err != nil || user == nil {
+		t.Fatalf("bootstrap retry user = %#v, err = %v", user, err)
 	}
 }
 

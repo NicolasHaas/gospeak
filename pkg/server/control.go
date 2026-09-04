@@ -21,6 +21,45 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/rbac"
 )
 
+func (s *Server) beginSessionBanCheck(userID int64) {
+	s.sessionBanMu.Lock()
+	s.sessionBanChecks[userID]++
+	s.sessionBanMu.Unlock()
+}
+
+func (s *Server) cancelSessionBanCheck(userID int64) {
+	if userID == 0 {
+		return
+	}
+	s.sessionBanMu.Lock()
+	s.finishSessionBanCheckLocked(userID)
+	s.sessionBanMu.Unlock()
+}
+
+func (s *Server) finishSessionBanCheckLocked(userID int64) {
+	if s.sessionBanChecks[userID] <= 1 {
+		delete(s.sessionBanChecks, userID)
+		delete(s.sessionBanPending, userID)
+		return
+	}
+	s.sessionBanChecks[userID]--
+}
+
+func (s *Server) activateAfterBanCheck(userID int64, reservation *SessionReservation, persistedBan bool, register func(*model.Session)) (*model.Session, bool) {
+	s.sessionBanMu.Lock()
+	defer s.sessionBanMu.Unlock()
+	banned := persistedBan || s.sessionBanPending[userID]
+	var session *model.Session
+	if !banned {
+		session = reservation.Activate()
+		if session != nil && register != nil {
+			register(session)
+		}
+	}
+	s.finishSessionBanCheckLocked(userID)
+	return session, banned
+}
+
 // ControlHandler handles TCP/TLS control plane connections.
 type ControlHandler struct {
 	server  *Server
@@ -546,6 +585,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	if !s.beginPreAuth(conn, preAuthControl) {
 		return
 	}
+	preAuthConn := conn
 	defer s.forgetAcceptedConn(conn)
 
 	remoteAddr := conn.RemoteAddr().String()
@@ -561,10 +601,47 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		s.recordAuthRateLimitRejection(remoteAddr, authReason, authUsage, authLimit)
 		return
 	}
-	authenticated := false
+	credentialsValid := false
+	markCredentialsValid := func() {
+		if credentialsValid {
+			return
+		}
+		s.authLimiter.RecordSuccess(rateLimitKey)
+		credentialsValid = true
+	}
 	defer func() {
-		if !authenticated {
+		if !credentialsValid {
 			s.authLimiter.RecordFailure(rateLimitKey)
+		}
+	}()
+	rejectSessionCapacity := func(capacityErr error) bool {
+		var limitErr *SessionCapacityError
+		if !errors.As(capacityErr, &limitErr) {
+			return false
+		}
+		s.recordSessionRejection(remoteAddr, capacityErr)
+		markCredentialsValid()
+		sendError(conn, 3, "server session capacity reached")
+		return true
+	}
+	var userControlLimiter *controlMessageLimiter
+	var controlBudgetUserID int64
+	acquireUserControlBudget := func(userID int64) bool {
+		if userControlLimiter != nil {
+			return true
+		}
+		limiter, current, limit, ok := s.controlUserBudgets.Acquire(userID)
+		if !ok {
+			s.recordControlBudgetTrackerRejection(remoteAddr, current, limit)
+			return false
+		}
+		userControlLimiter = limiter
+		controlBudgetUserID = userID
+		return true
+	}
+	defer func() {
+		if userControlLimiter != nil {
+			s.controlUserBudgets.Release(controlBudgetUserID)
 		}
 	}()
 
@@ -572,7 +649,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.PreAuthTimeout))
 	msg, err := protocol.ReadControlMessage(conn)
 	if err != nil {
-		slog.Error("auth read failed", "remote", remoteAddr, "err", err)
+		s.logControlReadFailure(remoteAddr, "pre_auth")
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear deadline
@@ -608,6 +685,18 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	var channelScope int64
+	var sessionReservation *SessionReservation
+	var preparedSession *model.Session
+	var persistedBan bool
+	var banCheckUserID int64
+	beginBanCheck := func(userID int64) {
+		if banCheckUserID == 0 {
+			s.beginSessionBanCheck(userID)
+			banCheckUserID = userID
+		}
+	}
+	defer func() { s.cancelSessionBanCheck(banCheckUserID) }()
+	errProvisionedUserBanned := errors.New("server: provisioned user is banned")
 	bootstrapProvisioned := false
 	if user != nil {
 		sessionRole = user.Role
@@ -626,14 +715,75 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				return
 			}
 		} else {
-			bootstrapUser, bootstrapToken, isBootstrap, bootstrapErr := s.tryProvisionBootstrapUser(st, tokenHash, authReq.Token, authReq.Username)
-			if bootstrapErr != nil {
+			bootstrapMatch, bootstrapMatchErr := s.bootstrapCredentialMatches(authReq.Token)
+			if bootstrapMatchErr != nil {
 				s.metrics.FailedAuths.Add(1)
-				slog.Warn("bootstrap provisioning failed", "err", bootstrapErr)
+				slog.Warn("bootstrap credential check failed", "err", bootstrapMatchErr)
 				sendError(conn, 2, "authentication failed")
 				return
 			}
-			if isBootstrap {
+			if bootstrapMatch {
+				sessionReservation, err = s.sessions.Reserve(0)
+				if err != nil {
+					if !rejectSessionCapacity(err) {
+						slog.Error("reserve session", "err", err)
+						sendError(conn, 3, "could not reserve session")
+					}
+					return
+				}
+				defer sessionReservation.Release()
+				bootstrapUser, bootstrapToken, isBootstrap, bootstrapErr := s.tryProvisionBootstrapUser(
+					st,
+					tokenHash,
+					authReq.Token,
+					authReq.Username,
+					func(tx datastore.DataStoreTx, user *model.User) error {
+						if !acquireUserControlBudget(user.ID) {
+							return errControlUserBudgetCapacity
+						}
+						if err := sessionReservation.BindUser(user.ID); err != nil {
+							return err
+						}
+						var err error
+						preparedSession, err = sessionReservation.Prepare(user.Username, user.Role, user.ChannelScope)
+						if err != nil {
+							return err
+						}
+						beginBanCheck(user.ID)
+						persistedBan, err = tx.IsUserBanned(user.ID)
+						if err != nil {
+							return err
+						}
+						if persistedBan {
+							return errProvisionedUserBanned
+						}
+						return nil
+					},
+				)
+				if bootstrapErr != nil {
+					if errors.Is(bootstrapErr, errControlUserBudgetCapacity) {
+						markCredentialsValid()
+						sendError(conn, 3, "server control capacity reached")
+						return
+					}
+					if errors.Is(bootstrapErr, errProvisionedUserBanned) {
+						markCredentialsValid()
+						sendError(conn, 4, "you are banned from this server")
+						return
+					}
+					if rejectSessionCapacity(bootstrapErr) {
+						return
+					}
+					markCredentialsValid()
+					slog.Error("prepare bootstrap session", "err", bootstrapErr)
+					sendError(conn, 3, "could not create session")
+					return
+				}
+				if !isBootstrap {
+					s.metrics.FailedAuths.Add(1)
+					sendError(conn, 2, "authentication failed")
+					return
+				}
 				user = bootstrapUser
 				autoToken = bootstrapToken
 				channelScope = user.ChannelScope
@@ -679,8 +829,48 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			user, err = tx.ProvisionUser(tokenHash, authReq.Username, crypto.HashToken(rawToken), time.Now().UTC(), s.cfg.AllowNoToken)
 			if err != nil {
 				s.metrics.FailedAuths.Add(1)
-				slog.Warn("account provisioning failed", "err", err)
+				s.logAuthenticationFailure(remoteAddr, "account_provisioning")
 				sendError(conn, 2, "authentication failed")
+				return
+			}
+			if !acquireUserControlBudget(user.ID) {
+				markCredentialsValid()
+				sendError(conn, 3, "server control capacity reached")
+				return
+			}
+			if sessionReservation == nil {
+				sessionReservation, err = s.sessions.Reserve(user.ID)
+				if err == nil {
+					defer sessionReservation.Release()
+				}
+			} else {
+				err = sessionReservation.BindUser(user.ID)
+			}
+			if err != nil {
+				if !rejectSessionCapacity(err) {
+					slog.Error("reserve provisioned user session", "err", err)
+					sendError(conn, 3, "could not reserve session")
+				}
+				return
+			}
+			preparedSession, err = sessionReservation.Prepare(user.Username, user.Role, user.ChannelScope)
+			if err != nil {
+				markCredentialsValid()
+				slog.Error("prepare provisioned user session", "err", err)
+				sendError(conn, 3, "could not create session")
+				return
+			}
+			beginBanCheck(user.ID)
+			persistedBan, err = tx.IsUserBanned(user.ID)
+			if err != nil {
+				markCredentialsValid()
+				slog.Error("check provisioned user ban", "err", err)
+				sendError(conn, 3, "internal error")
+				return
+			}
+			if persistedBan {
+				markCredentialsValid()
+				sendError(conn, 4, "you are banned from this server")
 				return
 			}
 			if err := tx.Commit(); err != nil {
@@ -698,22 +888,52 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			sessionRole = user.Role
 		}
 	}
-
-	// Check ban
-	banned, err := st.NonTx().IsUserBanned(user.ID)
-	if err != nil {
-		sendError(conn, 3, "internal error")
+	if !acquireUserControlBudget(user.ID) {
+		markCredentialsValid()
+		sendError(conn, 3, "server control capacity reached")
 		return
 	}
+	markCredentialsValid()
+
+	if sessionReservation == nil {
+		sessionReservation, err = s.sessions.Reserve(user.ID)
+		if err != nil {
+			if !rejectSessionCapacity(err) {
+				slog.Error("reserve existing user session", "err", err)
+				sendError(conn, 3, "could not reserve session")
+			}
+			return
+		}
+		defer sessionReservation.Release()
+	}
+
+	// Prepare all fallible resources before provisioning commits, then activate.
+	if preparedSession == nil {
+		preparedSession, err = sessionReservation.Prepare(user.Username, sessionRole, channelScope)
+		if err != nil {
+			slog.Error("prepare session", "err", err)
+			sendError(conn, 3, "could not create session")
+			return
+		}
+	}
+	if banCheckUserID == 0 {
+		beginBanCheck(user.ID)
+		persistedBan, err = st.NonTx().IsUserBanned(user.ID)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
+	session, banned := s.activateAfterBanCheck(user.ID, sessionReservation, persistedBan, func(session *model.Session) {
+		conn = handler.setConn(session.ID, conn)
+	})
+	banCheckUserID = 0
 	if banned {
 		sendError(conn, 4, "you are banned from this server")
 		return
 	}
-
-	// Create session (voice key is shared server-wide for SFU model)
-	session, err := s.sessions.CreateWithChannelScope(user.ID, user.Username, sessionRole, channelScope)
-	if err != nil {
-		slog.Error("create session", "err", err)
+	if session == nil {
+		slog.Error("activate prepared session")
 		sendError(conn, 3, "could not create session")
 		return
 	}
@@ -735,7 +955,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		s.sessions.Remove(sessionID)
 		s.removeVoiceStat(sessionID)
 		s.metrics.TotalDisconnects.Add(1)
-		slog.Info("client disconnected", "user", user.Username, "session", sessionID)
+		slog.Debug("client disconnected", "user", user.Username, "session", sessionID)
 
 		if chID > 0 {
 			handler.broadcastToChannel(chID, &pb.ControlMessage{
@@ -784,13 +1004,20 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		slog.Error("auth response write failed", "err", err)
 		return
 	}
-	authenticated = true
-	s.authLimiter.RecordSuccess(rateLimitKey)
-	s.finishPreAuth(conn)
-	conn = handler.setConn(sessionID, conn)
+	s.finishPreAuth(preAuthConn)
 
-	slog.Info("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
+	slog.Debug("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
 	s.metrics.SuccessfulAuths.Add(1)
+	controlLimiter := newControlMessageLimiter(s.cfg.ControlMessageBurst, s.cfg.ControlMessagesPerSec, time.Now)
+	controlLimiter.highWater = &s.metrics.ControlSessionBudgetHighWater
+	s.controlBudgetMu.Lock()
+	s.controlBudgets[sessionID] = controlLimiter
+	s.controlBudgetMu.Unlock()
+	defer func() {
+		s.controlBudgetMu.Lock()
+		delete(s.controlBudgets, sessionID)
+		s.controlBudgetMu.Unlock()
+	}()
 
 	// Message loop
 	for {
@@ -800,12 +1027,47 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		default:
 		}
 
-		msg, err := protocol.ReadControlMessage(conn)
+		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(conn)
 		if err != nil {
-			if err == io.EOF || isClosedErr(err) {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || isClosedErr(err) {
 				return
 			}
-			slog.Error("read error", "user", user.Username, "err", err)
+			s.logControlReadFailure(remoteAddr, "authenticated")
+			return
+		}
+		userDecision := userControlLimiter.AllowSized(msg, payloadBytes)
+		if !userDecision.Allowed {
+			s.recordControlBudgetRejection(remoteAddr, "user", userDecision)
+			response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "control message rate limit exceeded"}}
+			if client, ok := conn.(*controlClient); ok {
+				client.sendAndClose(response)
+			} else {
+				_ = writeControlMessage(conn, response)
+			}
+			return
+		}
+
+		sessionDecision := controlLimiter.AllowSized(msg, payloadBytes)
+		if !sessionDecision.Allowed {
+			s.recordControlBudgetRejection(remoteAddr, "session", sessionDecision)
+			response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "control message rate limit exceeded"}}
+			if client, ok := conn.(*controlClient); ok {
+				client.sendAndClose(response)
+			} else {
+				_ = writeControlMessage(conn, response)
+			}
+			return
+		}
+
+		globalDecision := s.controlGlobalBudget.AllowSized(msg, payloadBytes)
+		if !globalDecision.Allowed {
+			s.recordControlBudgetRejection(remoteAddr, "global", globalDecision)
+			response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}
+			if client, ok := conn.(*controlClient); ok {
+				client.sendAndClose(response)
+			} else {
+				_ = writeControlMessage(conn, response)
+			}
 			return
 		}
 
@@ -1206,6 +1468,12 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 		return
 	}
 
+	// Serialize the pending-ban marker and active-session snapshot with activation.
+	s.sessionBanMu.Lock()
+	defer s.sessionBanMu.Unlock()
+	if s.sessionBanChecks[req.UserID] > 0 {
+		s.sessionBanPending[req.UserID] = true
+	}
 	// Also kick every active session for the banned user.
 	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
 	handler.sendAndCloseSessions(targets, &pb.ControlMessage{

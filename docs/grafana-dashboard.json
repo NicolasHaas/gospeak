@@ -374,12 +374,12 @@
       "gridPos": { "h": 7, "w": 6, "x": 0, "y": 33 },
       "targets": [
         {
-          "expr": "100 * gospeak_preauth_connections / gospeak_preauth_connection_limit",
+          "expr": "100 * gospeak_preauth_connections / clamp_min(gospeak_preauth_connection_limit, 1)",
           "legendFormat": "{{plane}} current",
           "refId": "A"
         },
         {
-          "expr": "100 * gospeak_preauth_connections_high_water / gospeak_preauth_connection_limit",
+          "expr": "100 * gospeak_preauth_connections_high_water / clamp_min(gospeak_preauth_connection_limit, 1)",
           "legendFormat": "{{plane}} high water",
           "refId": "B"
         }
@@ -407,12 +407,12 @@
       "gridPos": { "h": 7, "w": 6, "x": 6, "y": 33 },
       "targets": [
         {
-          "expr": "100 * gospeak_preauth_source_max_connections / gospeak_preauth_source_connection_limit",
+          "expr": "100 * gospeak_preauth_source_max_connections / clamp_min(gospeak_preauth_source_connection_limit, 1)",
           "legendFormat": "{{plane}} current",
           "refId": "A"
         },
         {
-          "expr": "100 * gospeak_preauth_source_max_connections_high_water / gospeak_preauth_source_connection_limit",
+          "expr": "100 * gospeak_preauth_source_max_connections_high_water / clamp_min(gospeak_preauth_source_connection_limit, 1)",
           "legendFormat": "{{plane}} high water",
           "refId": "B"
         }
@@ -440,12 +440,12 @@
       "gridPos": { "h": 7, "w": 6, "x": 12, "y": 33 },
       "targets": [
         {
-          "expr": "100 * gospeak_auth_rate_limit_source_max_usage / gospeak_auth_rate_limit_source_limit",
+          "expr": "100 * gospeak_auth_rate_limit_source_max_usage / clamp_min(gospeak_auth_rate_limit_source_limit, 1)",
           "legendFormat": "current busiest source",
           "refId": "A"
         },
         {
-          "expr": "100 * gospeak_auth_rate_limit_source_high_water_usage / gospeak_auth_rate_limit_source_limit",
+          "expr": "100 * gospeak_auth_rate_limit_source_high_water_usage / clamp_min(gospeak_auth_rate_limit_source_limit, 1)",
           "legendFormat": "high water",
           "refId": "B"
         }
@@ -473,12 +473,12 @@
       "gridPos": { "h": 7, "w": 6, "x": 18, "y": 33 },
       "targets": [
         {
-          "expr": "100 * gospeak_account_provisioning_source_max_usage / gospeak_account_provisioning_source_limit",
+          "expr": "100 * gospeak_account_provisioning_source_max_usage / clamp_min(gospeak_account_provisioning_source_limit, 1)",
           "legendFormat": "current busiest source",
           "refId": "A"
         },
         {
-          "expr": "100 * gospeak_account_provisioning_source_high_water_usage / gospeak_account_provisioning_source_limit",
+          "expr": "100 * gospeak_account_provisioning_source_high_water_usage / clamp_min(gospeak_account_provisioning_source_limit, 1)",
           "legendFormat": "high water",
           "refId": "B"
         }
@@ -519,6 +519,26 @@
           "expr": "sum by (reason) (rate(gospeak_account_provisioning_rejections_total[5m])) * 60",
           "legendFormat": "account provisioning {{reason}}",
           "refId": "C"
+        },
+        {
+          "expr": "sum by (reason) (rate(gospeak_session_rejections_total[5m])) * 60",
+          "legendFormat": "sessions {{reason}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (scope, reason) (rate(gospeak_control_budget_rejections_total[5m])) * 60",
+          "legendFormat": "control {{scope}} {{reason}}",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (reason) (rate(gospeak_screen_auth_rejections_total[5m])) * 60",
+          "legendFormat": "screen auth {{reason}}",
+          "refId": "F"
+        },
+        {
+          "expr": "rate(gospeak_screen_invalid_packets_total[5m]) * 60",
+          "legendFormat": "screen invalid packets",
+          "refId": "G"
         }
       ],
       "fieldConfig": {
@@ -558,12 +578,164 @@
           "expr": "gospeak_account_provisioning_tracker_limit",
           "legendFormat": "account provisioning capacity",
           "refId": "E"
+        },
+        {
+          "expr": "gospeak_sessions",
+          "legendFormat": "authenticated sessions",
+          "refId": "F"
+        },
+        {
+          "expr": "gospeak_session_limit",
+          "legendFormat": "authenticated session capacity",
+          "refId": "G"
+        },
+        {
+          "expr": "gospeak_control_budget_active_sessions",
+          "legendFormat": "control sessions",
+          "refId": "H"
+        },
+        {
+          "expr": "gospeak_control_budget_tracked_users",
+          "legendFormat": "control users tracked",
+          "refId": "I"
+        },
+        {
+          "expr": "gospeak_control_budget_user_tracker_limit",
+          "legendFormat": "control user tracker capacity",
+          "refId": "J"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": { "drawStyle": "line", "fillOpacity": 10 }
         },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Authenticated session utilization",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_session_capacity_used / clamp_min(gospeak_session_limit, 1)",
+          "legendFormat": "global capacity current",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_session_capacity_high_water / clamp_min(gospeak_session_limit, 1)",
+          "legendFormat": "global capacity high-water",
+          "refId": "B"
+        },
+        {
+          "expr": "100 * gospeak_session_user_capacity_max / clamp_min(gospeak_session_user_limit, 1)",
+          "legendFormat": "busiest user capacity current",
+          "refId": "C"
+        },
+        {
+          "expr": "100 * gospeak_session_user_capacity_high_water / clamp_min(gospeak_session_user_limit, 1)",
+          "legendFormat": "busiest user capacity high-water",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Control message budget utilization",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "targets": [
+        {
+          "expr": "100 * gospeak_control_budget_session_max_usage / clamp_min(gospeak_control_budget_limit, 1)",
+          "legendFormat": "busiest session current",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * gospeak_control_budget_session_high_water_usage / clamp_min(gospeak_control_budget_limit, 1)",
+          "legendFormat": "busiest session high-water",
+          "refId": "B"
+        },
+        {
+          "expr": "100 * gospeak_control_budget_user_max_usage / clamp_min(gospeak_control_budget_limit, 1)",
+          "legendFormat": "busiest user current",
+          "refId": "C"
+        },
+        {
+          "expr": "100 * gospeak_control_budget_user_high_water_usage / clamp_min(gospeak_control_budget_limit, 1)",
+          "legendFormat": "busiest user high-water",
+          "refId": "D"
+        },
+        {
+          "expr": "100 * gospeak_control_budget_global_usage / clamp_min(gospeak_control_budget_global_limit, 1)",
+          "legendFormat": "server-wide current",
+          "refId": "E"
+        },
+        {
+          "expr": "100 * gospeak_control_budget_global_high_water_usage / clamp_min(gospeak_control_budget_global_limit, 1)",
+          "legendFormat": "server-wide high-water",
+          "refId": "F"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Control message budget configuration",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 56 },
+      "targets": [
+        {
+          "expr": "gospeak_control_budget_limit",
+          "legendFormat": "burst capacity",
+          "refId": "A"
+        },
+        {
+          "expr": "gospeak_control_budget_refill_per_second",
+          "legendFormat": "refill per second",
+          "refId": "B"
+        },
+        {
+          "expr": "gospeak_control_budget_global_limit",
+          "legendFormat": "server-wide burst capacity",
+          "refId": "C"
+        },
+        {
+          "expr": "gospeak_control_budget_global_refill_per_second",
+          "legendFormat": "server-wide refill per second",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
         "overrides": []
       }
     }
@@ -576,5 +748,5 @@
   "timezone": "browser",
   "title": "GoSpeak Server",
   "uid": "gospeak-server",
-  "version": 3
+  "version": 5
 }

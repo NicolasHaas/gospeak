@@ -38,6 +38,25 @@ type Metrics struct {
 	AccountProvisionTrackerRejections atomic.Int64
 	AccountProvisionWindowRejections  atomic.Int64
 	AccountProvisionSourceHighWater   atomic.Int64
+	SessionGlobalRejections           atomic.Int64
+	SessionUserRejections             atomic.Int64
+	ControlSessionMutationRejections  atomic.Int64
+	ControlSessionChatRejections      atomic.Int64
+	ControlSessionExpensiveRejections atomic.Int64
+	ControlSessionByteRejections      atomic.Int64
+	ControlUserMutationRejections     atomic.Int64
+	ControlUserChatRejections         atomic.Int64
+	ControlUserExpensiveRejections    atomic.Int64
+	ControlUserByteRejections         atomic.Int64
+	ControlUserTrackerRejections      atomic.Int64
+	ControlGlobalMutationRejections   atomic.Int64
+	ControlGlobalChatRejections       atomic.Int64
+	ControlGlobalExpensiveRejections  atomic.Int64
+	ControlGlobalByteRejections       atomic.Int64
+	ControlInvalidMessages            atomic.Int64
+	ControlSessionBudgetHighWater     atomic.Int64
+	ControlUserBudgetHighWater        atomic.Int64
+	ControlGlobalBudgetHighWater      atomic.Int64
 
 	// Voice counters
 	VoicePacketsIn      atomic.Int64 // total UDP voice packets received
@@ -50,13 +69,16 @@ type Metrics struct {
 	ChatMessagesSent atomic.Int64 // total chat messages relayed
 
 	// Screen sharing counters
-	ScreenSharesStarted    atomic.Int64 // total screen shares started
-	ScreenSharesStopped    atomic.Int64 // total screen shares stopped
-	ScreenShareFramesIn    atomic.Int64 // total screen share frames received from sharers
-	ScreenShareFramesOut   atomic.Int64 // total screen share frames forwarded to viewers
-	ScreenShareBytesIn     atomic.Int64 // total screen share bytes received
-	ScreenShareBytesOut    atomic.Int64 // total screen share bytes forwarded
-	ScreenShareSubscribers atomic.Int64 // current active subscribers across all shares
+	ScreenSharesStarted            atomic.Int64 // total screen shares started
+	ScreenSharesStopped            atomic.Int64 // total screen shares stopped
+	ScreenShareFramesIn            atomic.Int64 // total screen share frames received from sharers
+	ScreenShareFramesOut           atomic.Int64 // total screen share frames forwarded to viewers
+	ScreenShareBytesIn             atomic.Int64 // total screen share bytes received
+	ScreenShareBytesOut            atomic.Int64 // total screen share bytes forwarded
+	ScreenShareSubscribers         atomic.Int64 // current active subscribers across all shares
+	ScreenAuthInvalidRejections    atomic.Int64
+	ScreenAuthCredentialRejections atomic.Int64
+	ScreenInvalidPackets           atomic.Int64
 
 	// Channel counters
 	ChannelsCreated atomic.Int64 // channels created during this run
@@ -102,6 +124,25 @@ type MetricsSnapshot struct {
 	AccountProvisionTrackerRejections int64 `json:"account_provision_tracker_rejections"`
 	AccountProvisionWindowRejections  int64 `json:"account_provision_window_rejections"`
 	AccountProvisionSourceHighWater   int64 `json:"account_provision_source_high_water"`
+	SessionGlobalRejections           int64 `json:"session_global_rejections"`
+	SessionUserRejections             int64 `json:"session_user_rejections"`
+	ControlSessionMutationRejections  int64 `json:"control_session_mutation_rejections"`
+	ControlSessionChatRejections      int64 `json:"control_session_chat_rejections"`
+	ControlSessionExpensiveRejections int64 `json:"control_session_expensive_rejections"`
+	ControlSessionByteRejections      int64 `json:"control_session_byte_rejections"`
+	ControlUserMutationRejections     int64 `json:"control_user_mutation_rejections"`
+	ControlUserChatRejections         int64 `json:"control_user_chat_rejections"`
+	ControlUserExpensiveRejections    int64 `json:"control_user_expensive_rejections"`
+	ControlUserByteRejections         int64 `json:"control_user_byte_rejections"`
+	ControlUserTrackerRejections      int64 `json:"control_user_tracker_rejections"`
+	ControlGlobalMutationRejections   int64 `json:"control_global_mutation_rejections"`
+	ControlGlobalChatRejections       int64 `json:"control_global_chat_rejections"`
+	ControlGlobalExpensiveRejections  int64 `json:"control_global_expensive_rejections"`
+	ControlGlobalByteRejections       int64 `json:"control_global_byte_rejections"`
+	ControlInvalidMessages            int64 `json:"control_invalid_messages"`
+	ControlSessionBudgetHighWater     int64 `json:"control_session_budget_high_water"`
+	ControlUserBudgetHighWater        int64 `json:"control_user_budget_high_water"`
+	ControlGlobalBudgetHighWater      int64 `json:"control_global_budget_high_water"`
 
 	VoicePacketsIn      int64 `json:"voice_packets_in"`
 	VoicePacketsOut     int64 `json:"voice_packets_out"`
@@ -111,13 +152,16 @@ type MetricsSnapshot struct {
 
 	ChatMessagesSent int64 `json:"chat_messages_sent"`
 
-	ScreenSharesStarted    int64 `json:"screen_shares_started"`
-	ScreenSharesStopped    int64 `json:"screen_shares_stopped"`
-	ScreenShareFramesIn    int64 `json:"screen_share_frames_in"`
-	ScreenShareFramesOut   int64 `json:"screen_share_frames_out"`
-	ScreenShareBytesIn     int64 `json:"screen_share_bytes_in"`
-	ScreenShareBytesOut    int64 `json:"screen_share_bytes_out"`
-	ScreenShareSubscribers int64 `json:"screen_share_subscribers"`
+	ScreenSharesStarted            int64 `json:"screen_shares_started"`
+	ScreenSharesStopped            int64 `json:"screen_shares_stopped"`
+	ScreenShareFramesIn            int64 `json:"screen_share_frames_in"`
+	ScreenShareFramesOut           int64 `json:"screen_share_frames_out"`
+	ScreenShareBytesIn             int64 `json:"screen_share_bytes_in"`
+	ScreenShareBytesOut            int64 `json:"screen_share_bytes_out"`
+	ScreenShareSubscribers         int64 `json:"screen_share_subscribers"`
+	ScreenAuthInvalidRejections    int64 `json:"screen_auth_invalid_rejections"`
+	ScreenAuthCredentialRejections int64 `json:"screen_auth_credential_rejections"`
+	ScreenInvalidPackets           int64 `json:"screen_invalid_packets"`
 
 	ChannelsCreated int64 `json:"channels_created"`
 	ChannelsDeleted int64 `json:"channels_deleted"`
@@ -154,6 +198,25 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		AccountProvisionTrackerRejections: m.AccountProvisionTrackerRejections.Load(),
 		AccountProvisionWindowRejections:  m.AccountProvisionWindowRejections.Load(),
 		AccountProvisionSourceHighWater:   m.AccountProvisionSourceHighWater.Load(),
+		SessionGlobalRejections:           m.SessionGlobalRejections.Load(),
+		SessionUserRejections:             m.SessionUserRejections.Load(),
+		ControlSessionMutationRejections:  m.ControlSessionMutationRejections.Load(),
+		ControlSessionChatRejections:      m.ControlSessionChatRejections.Load(),
+		ControlSessionExpensiveRejections: m.ControlSessionExpensiveRejections.Load(),
+		ControlSessionByteRejections:      m.ControlSessionByteRejections.Load(),
+		ControlUserMutationRejections:     m.ControlUserMutationRejections.Load(),
+		ControlUserChatRejections:         m.ControlUserChatRejections.Load(),
+		ControlUserExpensiveRejections:    m.ControlUserExpensiveRejections.Load(),
+		ControlUserByteRejections:         m.ControlUserByteRejections.Load(),
+		ControlUserTrackerRejections:      m.ControlUserTrackerRejections.Load(),
+		ControlGlobalMutationRejections:   m.ControlGlobalMutationRejections.Load(),
+		ControlGlobalChatRejections:       m.ControlGlobalChatRejections.Load(),
+		ControlGlobalExpensiveRejections:  m.ControlGlobalExpensiveRejections.Load(),
+		ControlGlobalByteRejections:       m.ControlGlobalByteRejections.Load(),
+		ControlInvalidMessages:            m.ControlInvalidMessages.Load(),
+		ControlSessionBudgetHighWater:     m.ControlSessionBudgetHighWater.Load(),
+		ControlUserBudgetHighWater:        m.ControlUserBudgetHighWater.Load(),
+		ControlGlobalBudgetHighWater:      m.ControlGlobalBudgetHighWater.Load(),
 		VoicePacketsIn:                    m.VoicePacketsIn.Load(),
 		VoicePacketsOut:                   m.VoicePacketsOut.Load(),
 		VoicePacketsDropped:               m.VoicePacketsDropped.Load(),
@@ -167,6 +230,9 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		ScreenShareBytesIn:                m.ScreenShareBytesIn.Load(),
 		ScreenShareBytesOut:               m.ScreenShareBytesOut.Load(),
 		ScreenShareSubscribers:            m.ScreenShareSubscribers.Load(),
+		ScreenAuthInvalidRejections:       m.ScreenAuthInvalidRejections.Load(),
+		ScreenAuthCredentialRejections:    m.ScreenAuthCredentialRejections.Load(),
+		ScreenInvalidPackets:              m.ScreenInvalidPackets.Load(),
 		ChannelsCreated:                   m.ChannelsCreated.Load(),
 		ChannelsDeleted:                   m.ChannelsDeleted.Load(),
 		TokensCreated:                     m.TokensCreated.Load(),

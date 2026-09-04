@@ -87,11 +87,11 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 
 	auth, err := protocol.ReadScreenAuth(conn)
 	if err != nil {
-		slog.Error("screen auth read failed", "err", err)
+		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "invalid_message")
 		return
 	}
 	if !s.sessions.ValidateScreenAuth(auth.SessionID, auth.Token) {
-		slog.Warn("screen auth rejected", "session", auth.SessionID)
+		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
 		return
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
@@ -109,7 +109,7 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 			if err == io.EOF || isClosedErr(err) {
 				return
 			}
-			slog.Error("screen read error", "session", auth.SessionID, "err", err)
+			s.recordScreenPacketRejection(conn.RemoteAddr().String())
 			return
 		}
 		s.handleScreenPacket(auth.SessionID, pkt)

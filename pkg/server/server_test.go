@@ -214,6 +214,93 @@ func TestHandleBanUserClosesEverySession(t *testing.T) {
 	requireClosed(t, connTwo)
 }
 
+func TestBanCommittedDuringAuthenticationPreventsPreparedSessionActivation(t *testing.T) {
+	srv, st, handler := newTestServer(t)
+	adminUser, err := st.NonTx().CreateUser("admin-race", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser(admin): %v", err)
+	}
+	targetUser, err := st.NonTx().CreateUser("target-race", model.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	reservation, err := srv.sessions.Reserve(targetUser.ID)
+	if err != nil {
+		t.Fatalf("Reserve(target): %v", err)
+	}
+	defer reservation.Release()
+	prepared, err := reservation.Prepare(targetUser.Username, targetUser.Role, 0)
+	if err != nil {
+		t.Fatalf("Prepare(target): %v", err)
+	}
+
+	srv.beginSessionBanCheck(targetUser.ID)
+	srv.handleBanUser(handler, admin.ID, &pb.BanUserRequest{UserID: targetUser.ID, Reason: "race"}, st, &nopConn{})
+	session, banned := srv.activateAfterBanCheck(targetUser.ID, reservation, false, nil)
+	if !banned || session != nil {
+		t.Fatalf("activation = (%#v, banned=%t), want rejected as banned", session, banned)
+	}
+	if _, ok := srv.sessions.GetSnapshot(prepared.ID); ok {
+		t.Fatalf("prepared session %d became visible after concurrent ban", prepared.ID)
+	}
+	if len(srv.sessionBanChecks) != 0 || len(srv.sessionBanPending) != 0 {
+		t.Fatalf("ban coordination state leaked: checks=%v pending=%v", srv.sessionBanChecks, srv.sessionBanPending)
+	}
+}
+
+func TestBanStartedDuringActivationClosesAtomicallyRegisteredConnection(t *testing.T) {
+	srv, st, handler := newTestServer(t)
+	adminUser, err := st.NonTx().CreateUser("admin-register-race", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser(admin): %v", err)
+	}
+	targetUser, err := st.NonTx().CreateUser("target-register-race", model.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	reservation, err := srv.sessions.Reserve(targetUser.ID)
+	if err != nil {
+		t.Fatalf("Reserve(target): %v", err)
+	}
+	defer reservation.Release()
+	if _, err := reservation.Prepare(targetUser.Username, targetUser.Role, 0); err != nil {
+		t.Fatalf("Prepare(target): %v", err)
+	}
+
+	conn := newCloseTrackingConn()
+	registered := make(chan struct{})
+	releaseActivation := make(chan struct{})
+	activationDone := make(chan struct{})
+	srv.beginSessionBanCheck(targetUser.ID)
+	go func() {
+		defer close(activationDone)
+		session, banned := srv.activateAfterBanCheck(targetUser.ID, reservation, false, func(session *model.Session) {
+			handler.setConn(session.ID, conn)
+			close(registered)
+			<-releaseActivation
+		})
+		if banned || session == nil {
+			t.Errorf("activation = (%#v, banned=%t), want active", session, banned)
+		}
+	}()
+	<-registered
+
+	banStarted := make(chan struct{})
+	banDone := make(chan struct{})
+	go func() {
+		close(banStarted)
+		srv.handleBanUser(handler, admin.ID, &pb.BanUserRequest{UserID: targetUser.ID, Reason: "registration race"}, st, &nopConn{})
+		close(banDone)
+	}()
+	<-banStarted
+	close(releaseActivation)
+	<-activationDone
+	<-banDone
+	requireClosed(t, conn)
+}
+
 func TestHandleSetUserRoleUpdatesEverySession(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	adminUser, err := st.NonTx().CreateUser("admin", model.RoleAdmin)
