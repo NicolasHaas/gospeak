@@ -74,8 +74,21 @@ func (c *ControlClient) Send(msg *pb.ControlMessage) error {
 }
 
 // Authenticate sends an auth request and returns the auth response.
-func (c *ControlClient) Authenticate(token, username string) (*pb.AuthResponse, error) {
-	if err := c.Send(&pb.ControlMessage{
+func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthResponse, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.conn.SetDeadline(time.Now().Add(connectTimeout)); err != nil {
+		return nil, fmt.Errorf("client: set auth deadline: %w", err)
+	}
+	defer func() {
+		if clearErr := c.conn.SetDeadline(time.Time{}); err == nil && clearErr != nil {
+			err = fmt.Errorf("client: clear auth deadline: %w", clearErr)
+			response = nil
+		}
+	}()
+
+	if err := protocol.WriteControlMessage(c.conn, &pb.ControlMessage{
 		AuthRequest: &pb.AuthRequest{
 			Token:    token,
 			Username: username,
