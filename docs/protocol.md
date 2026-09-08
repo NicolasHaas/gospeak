@@ -103,9 +103,15 @@ sequenceDiagram
     S->>Others: ChannelLeftEvent{channelID, userID}
     S->>C: ServerStateEvent{channels}
 
-    Note over C,S: Create Channel (Admin)
-    C->>S: CreateChannelRequest{name, desc, maxUsers, parentID, isTemp}
+    Note over C,S: Create permanent channel (Admin)
+    C->>S: CreateChannelRequest{name, desc, maxUsers, parentID, isTemp=false}
     S->>S: RBAC check → PermCreateChannel
+    S->>C: ServerStateEvent{channels}
+
+    Note over C,S: Create temporary sub-channel
+    C->>S: CreateChannelRequest{name, parentID, isTemp=true}
+    S->>S: Require parent membership, invite scope and AllowSubChannels
+    S->>S: Enforce 2/open-user or 5/invite-user, 8/parent and 64/server limits
     S->>C: ServerStateEvent{channels}
 
     Note over C,S: Delete Channel (Admin)
@@ -113,6 +119,8 @@ sequenceDiagram
     S->>S: RBAC check → PermDeleteChannel
     S->>C: ServerStateEvent{channels}
 ```
+
+Temporary sub-channels are removed five minutes after becoming empty. Occupied temporary channels remain available, while deleting a parent makes its temporary children eligible for removal. Open servers allow two temporary channels per user; invite-only servers allow five.
 
 ### Chat
 

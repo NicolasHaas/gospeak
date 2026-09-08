@@ -112,6 +112,7 @@ type Server struct {
 	controlBudgets          map[uint32]*controlMessageLimiter
 	controlUserBudgets      *controlUserBudgetManager
 	controlGlobalBudget     *controlMessageLimiter
+	tempChannels            *tempChannelLifecycle
 
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
@@ -181,6 +182,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		controlBudgets:          make(map[uint32]*controlMessageLimiter),
 		controlUserBudgets:      controlUserBudgets,
 		controlGlobalBudget:     controlGlobalBudget,
+		tempChannels:            newTempChannelLifecycle(cfg.AllowNoToken),
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}

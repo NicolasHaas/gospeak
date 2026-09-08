@@ -67,9 +67,6 @@ type ControlHandler struct {
 	mu      sync.RWMutex
 	connMap map[uint32]*controlClient // sessionID -> serialized outbound connection
 
-	// Rate limiting for temp sub-channel creation: userID -> last creation time
-	tempChanMu    sync.Mutex
-	tempChanTimes map[int64]time.Time
 }
 
 const (
@@ -391,10 +388,9 @@ func authRateLimitKey(addr net.Addr) string {
 // newControlHandler creates a control handler.
 func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHandler {
 	return &ControlHandler{
-		server:        srv,
-		store:         st,
-		connMap:       make(map[uint32]*controlClient),
-		tempChanTimes: make(map[int64]time.Time),
+		server:  srv,
+		store:   st,
+		connMap: make(map[uint32]*controlClient),
 	}
 }
 
@@ -511,6 +507,10 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 
 	handler := newControlHandler(s, st)
 	slog.Info("control plane listening", "addr", s.cfg.ControlAddr)
+	if !s.startWorker(func() { s.runTempChannelJanitor(handler, st) }) {
+		_ = ln.Close()
+		return fmt.Errorf("server: start temporary-channel janitor: %w", s.ctx.Err())
+	}
 	if s.cfg.EnableScreenShare {
 		if !s.startWorker(func() { s.runScreenShareJanitor(handler) }) {
 			_ = ln.Close()
@@ -1167,7 +1167,12 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		return
 	}
 
-	prevCh, joined := s.channels.TryJoin(session.ID, ch.ID, ch.MaxUsers)
+	prevCh, joined, err := s.tempChannels.tryJoin(ch, session.ID, s.channels, s.sessions, st)
+	if err != nil {
+		slog.Warn("join channel", "session", sessionID, "channel", ch.ID, "err", err)
+		respond(false, "channel not found")
+		return
+	}
 	if !joined {
 		respond(false, "channel is full")
 		return
@@ -1181,12 +1186,12 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 			handler.broadcastToChannel(prevCh, &pb.ControlMessage{ScreenShareEvent: stopEvent}, session.ID)
 		}
 	}
-	s.sessions.SetChannel(session.ID, ch.ID)
 	s.screenShare.Unsubscribe(session.ID)
 	respond(true, "")
 
 	// Notify old channel
 	if prevCh > 0 {
+		s.cleanupTempChannel(prevCh, st)
 		handler.broadcastToChannel(prevCh, &pb.ControlMessage{
 			ChannelLeftEvent: &pb.ChannelLeftEvent{
 				ChannelID: prevCh,
@@ -1277,14 +1282,23 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 		sendError(conn, 3, "session not found")
 		return
 	}
-	// Validate and sanitize channel name
+	// Validate and sanitize channel fields.
 	name := sanitizeText(strings.TrimSpace(req.Name))
 	if len(name) == 0 || len(name) > 64 {
 		sendError(conn, 31, "channel name must be 1-64 characters")
 		return
 	}
+	desc := sanitizeText(strings.TrimSpace(req.Description))
+	if len(desc) > 256 {
+		desc = desc[:256]
+	}
 
-	if req.ParentID > 0 && req.IsTemp {
+	var ch *model.Channel
+	if req.IsTemp && req.ParentID <= 0 {
+		sendError(conn, 31, "temporary channels require a parent channel")
+		return
+	}
+	if req.IsTemp {
 		// Temp sub-channel creation: any user can create if parent AllowSubChannels
 		parent, err := st.NonTx().GetChannel(req.ParentID)
 		if err != nil || parent == nil {
@@ -1295,41 +1309,43 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 			sendError(conn, 31, "parent channel does not allow sub-channels")
 			return
 		}
-		// Rate limit: 1 temp channel per user per 10 seconds
-		handler.tempChanMu.Lock()
-		last, ok := handler.tempChanTimes[session.UserID]
-		if ok && time.Since(last) < 10*time.Second {
-			handler.tempChanMu.Unlock()
-			sendError(conn, 31, "please wait before creating another sub-channel")
+		ch, err = s.tempChannels.create(session, req, s.channels, st, name, desc)
+		if err != nil {
+			switch {
+			case errors.Is(err, errTempChannelParentMembership):
+				sendError(conn, 31, "join the parent channel before creating a sub-channel")
+			case errors.Is(err, errTempChannelScope):
+				sendError(conn, 31, "parent channel is outside your invite scope")
+			case errors.Is(err, errTempChannelCooldown):
+				sendError(conn, 31, "please wait before creating another sub-channel")
+			case errors.Is(err, errTempChannelUserQuota), errors.Is(err, errTempChannelParentQuota), errors.Is(err, errTempChannelGlobalQuota):
+				sendError(conn, 31, "temporary channel capacity reached")
+			default:
+				slog.Error("create temporary channel", "err", err)
+				sendError(conn, 31, "could not create channel")
+			}
 			return
 		}
-		handler.tempChanTimes[session.UserID] = time.Now()
-		handler.tempChanMu.Unlock()
 	} else {
-		// Permanent channel: require PermCreateChannel (admin/mod)
+		// Permanent channel: require PermCreateChannel (admin)
 		if errMsg := rbac.RequirePermission(session.Role, rbac.PermCreateChannel); errMsg != "" {
 			sendError(conn, 30, errMsg)
 			return
 		}
-	}
 
-	desc := sanitizeText(strings.TrimSpace(req.Description))
-	if len(desc) > 256 {
-		desc = desc[:256]
-	}
-
-	ch := &model.Channel{
-		Name:             name,
-		Description:      desc,
-		MaxUsers:         int(req.MaxUsers),
-		ParentID:         req.ParentID,
-		IsTemp:           req.IsTemp,
-		AllowSubChannels: req.AllowSubChannels,
-	}
-	if err := st.NonTx().CreateChannel(ch); err != nil {
-		slog.Error("create channel", "err", err)
-		sendError(conn, 31, "could not create channel")
-		return
+		ch = &model.Channel{
+			Name:             name,
+			Description:      desc,
+			MaxUsers:         int(req.MaxUsers),
+			ParentID:         req.ParentID,
+			IsTemp:           req.IsTemp,
+			AllowSubChannels: req.AllowSubChannels,
+		}
+		if err := st.NonTx().CreateChannel(ch); err != nil {
+			slog.Error("create channel", "err", err)
+			sendError(conn, 31, "could not create channel")
+			return
+		}
 	}
 
 	slog.Info("channel created", "name", ch.Name, "parent", ch.ParentID, "temp", ch.IsTemp, "by", session.Username)
@@ -1350,18 +1366,13 @@ func (s *Server) handleDeleteChannel(sessionID uint32, req *pb.DeleteChannelRequ
 		return
 	}
 
-	if err := st.NonTx().DeleteChannel(req.ChannelID); err != nil {
+	if err := s.tempChannels.delete(st, req.ChannelID); err != nil {
 		slog.Error("delete channel", "err", err)
 		sendError(conn, 31, "could not delete channel")
 		return
 	}
 
-	// Move users out of deleted channel
-	members := s.channels.Members(req.ChannelID)
-	for _, sid := range members {
-		s.channels.Leave(sid)
-		s.sessions.SetChannel(sid, 0)
-	}
+	s.evictChannelMembers(req.ChannelID, handler)
 
 	slog.Info("channel deleted", "id", req.ChannelID, "by", session.Username)
 	s.metrics.ChannelsDeleted.Add(1)
@@ -1621,35 +1632,21 @@ func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 	return infos
 }
 
-// cleanupTempChannel schedules a temp channel for deletion after a 5-minute grace period.
-// If someone rejoins within that window the deletion is cancelled.
+// cleanupTempChannel records when a temporary channel becomes empty. One
+// server-owned janitor applies the empty grace period.
 func (s *Server) cleanupTempChannel(channelID int64, st datastore.DataProviderFactory) {
-	ch, err := st.NonTx().GetChannel(channelID)
-	if err != nil || ch == nil || !ch.IsTemp {
-		return
-	}
 	if s.channels.MembersCount(channelID) > 0 {
 		return
 	}
-
-	s.startWorker(func() {
-		timer := time.NewTimer(5 * time.Minute)
-		defer timer.Stop()
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-timer.C:
-		}
-		// Re-check after grace period
-		if s.channels.MembersCount(channelID) > 0 {
-			return
-		}
-		if err := st.NonTx().DeleteChannel(channelID); err != nil {
-			slog.Error("failed to delete empty temp channel", "id", channelID, "err", err)
-			return
-		}
-		slog.Debug("auto-deleted empty temp channel after 5m", "name", ch.Name, "id", channelID)
-	})
+	channel, err := st.NonTx().GetChannel(channelID)
+	if err != nil {
+		slog.Warn("check temporary channel after leave", "channel", channelID, "err", err)
+		return
+	}
+	if channel == nil || !channel.IsTemp {
+		return
+	}
+	s.tempChannels.markEmpty(channelID)
 }
 
 func sendError(conn net.Conn, code int32, message string) {

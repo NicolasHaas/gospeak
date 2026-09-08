@@ -191,6 +191,7 @@ erDiagram
         int64 parent_id FK
         bool is_temp
         bool allow_sub_channels
+        int64 created_by
         datetime created_at
     }
     TOKEN {

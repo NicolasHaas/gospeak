@@ -93,6 +93,24 @@ func (cm *ChannelManager) Leave(sessionID uint32) (channelID int64) {
 	return current
 }
 
+// LeaveIf removes a session only when it still belongs to the expected
+// channel. It prevents delayed cleanup from removing a later join.
+func (cm *ChannelManager) LeaveIf(sessionID uint32, expectedChannelID int64) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.sessionToChannel[sessionID] != expectedChannelID {
+		return false
+	}
+	delete(cm.sessionToChannel, sessionID)
+	if sessions := cm.members[expectedChannelID]; sessions != nil {
+		delete(sessions, sessionID)
+		if len(sessions) == 0 {
+			delete(cm.members, expectedChannelID)
+		}
+	}
+	return true
+}
+
 // Members returns all session IDs in a channel.
 func (cm *ChannelManager) Members(channelID int64) []uint32 {
 	cm.mu.RLock()
