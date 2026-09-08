@@ -40,6 +40,7 @@ type Channel struct {
 	ParentID         int64     `json:"parent_id"`          // 0 = root channel
 	IsTemp           bool      `json:"is_temp"`            // temp channels auto-delete when empty
 	AllowSubChannels bool      `json:"allow_sub_channels"` // users can create temp sub-channels here
+	CreatedBy        int64     `json:"created_by"`         // creator of a temporary channel; 0 for configured channels
 	CreatedAt        time.Time `json:"created_at"`
 }
 

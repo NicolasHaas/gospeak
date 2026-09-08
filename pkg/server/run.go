@@ -54,6 +54,8 @@ func (s *Server) Run() error {
 	if err := initializeChannels(channelConfig, st); err != nil {
 		return fmt.Errorf("server: initialize channels: %w", err)
 	}
+	// Reconcile persisted temporary channels before listeners expose them.
+	s.sweepTempChannels(nil, st)
 
 	// Ensure at least one admin token exists
 	if err := s.ensureAdminToken(st); err != nil {

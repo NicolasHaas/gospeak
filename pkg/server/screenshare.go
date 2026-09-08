@@ -89,6 +89,23 @@ func (m *ScreenShareManager) StopBySession(sessionID uint32) (*pb.ScreenShareEve
 
 }
 
+// LeaveChannel removes sharing and viewing state only when it still belongs to
+// the channel a caller is evicting.
+func (m *ScreenShareManager) LeaveChannel(sessionID uint32, channelID int64) (*pb.ScreenShareEvent, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.channelBySession[sessionID] == channelID {
+		return m.stopBySessionLocked(sessionID)
+	}
+	if sharerID, ok := m.viewerTarget[sessionID]; ok && m.channelBySession[sharerID] == channelID {
+		m.removeSubscriberLocked(sessionID)
+	}
+	if sharerID, ok := m.authorizedTarget[sessionID]; ok && m.channelBySession[sharerID] == channelID {
+		m.removeAuthorizationLocked(sessionID)
+	}
+	return nil, false
+}
+
 func (m *ScreenShareManager) ExpireInactive(idleTimeout time.Duration) []*pb.ScreenShareEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()

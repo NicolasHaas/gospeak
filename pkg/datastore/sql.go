@@ -135,6 +135,7 @@ func (s *ProviderFactory) migrate() error {
 		parent_id          INTEGER NOT NULL DEFAULT 0,
 		is_temp            INTEGER NOT NULL DEFAULT 0,
 		allow_sub_channels INTEGER NOT NULL DEFAULT 0,
+		created_by         INTEGER NOT NULL DEFAULT 0,
 		created_at         TEXT    NOT NULL DEFAULT (datetime('now'))
 	);
 
@@ -228,7 +229,14 @@ func (s *ProviderFactory) migrate() error {
 			statements: []string{
 				"ALTER TABLE tokens ADD COLUMN kind INTEGER NOT NULL DEFAULT 0 CHECK(kind IN (0, 1))",
 			},
-			column: "kind",
+			column: "tokens.kind",
+		},
+		{
+			version: 8,
+			statements: []string{
+				"ALTER TABLE channels ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0",
+			},
+			column: "channels.created_by",
 		},
 	}
 
@@ -237,7 +245,8 @@ func (s *ProviderFactory) migrate() error {
 			continue
 		}
 		if m.column != "" {
-			exists, err := s.tokenColumnExists(ctx, m.column)
+			table, column, _ := strings.Cut(m.column, ".")
+			exists, err := s.tableColumnExists(ctx, table, column)
 			if err != nil {
 				return err
 			}
@@ -260,11 +269,18 @@ func (s *ProviderFactory) migrate() error {
 	return nil
 }
 
-func (s *ProviderFactory) tokenColumnExists(ctx context.Context, column string) (bool, error) {
+func (s *ProviderFactory) tableColumnExists(ctx context.Context, table, column string) (bool, error) {
+	var query string
+	switch table {
+	case "tokens":
+		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tokens') WHERE name = ?)"
+	case "channels":
+		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('channels') WHERE name = ?)"
+	default:
+		return false, fmt.Errorf("datastore: inspect unsupported schema table %q", table)
+	}
 	var exists int
-	if err := s.DB.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM pragma_table_info('tokens') WHERE name = ?)", column,
-	).Scan(&exists); err != nil {
+	if err := s.DB.QueryRowContext(ctx, query, column).Scan(&exists); err != nil {
 		return false, fmt.Errorf("datastore: inspect schema column: %w", err)
 	}
 	return exists != 0, nil
@@ -527,13 +543,14 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		channel.Name,
 		channel.Description,
 		channel.MaxUsers,
 		channel.ParentID,
 		isTempInt,
 		allowSubInt,
+		channel.CreatedBy,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: channels.parent_id, channels.name") {
@@ -561,7 +578,7 @@ func (s *baseProvider) DeleteChannel(id int64) error {
 
 // ListChannels returns all channels.
 func (s *baseProvider) ListChannels() ([]model.Channel, error) {
-	rows, err := s.QueryContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_at FROM channels ORDER BY parent_id, id")
+	rows, err := s.QueryContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by, created_at FROM channels ORDER BY parent_id, id")
 	if err != nil {
 		return nil, fmt.Errorf("datastore: list channels: %w", err)
 	}
@@ -572,7 +589,7 @@ func (s *baseProvider) ListChannels() ([]model.Channel, error) {
 		var ch model.Channel
 		var createdAt string
 		var isTempInt, allowSubInt int
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &createdAt); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &ch.CreatedBy, &createdAt); err != nil {
 			return nil, fmt.Errorf("datastore: scan channel: %w", err)
 		}
 		ch.IsTemp = isTempInt != 0
@@ -592,8 +609,8 @@ func (s *baseProvider) GetChannel(id int64) (*model.Channel, error) {
 	ch := &model.Channel{}
 	var createdAt string
 	var isTempInt, allowSubInt int
-	err := s.QueryRowContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_at FROM channels WHERE id = ?", id).
-		Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &createdAt)
+	err := s.QueryRowContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by, created_at FROM channels WHERE id = ?", id).
+		Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &ch.CreatedBy, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -615,8 +632,8 @@ func (s *baseProvider) GetChannelByNameAndParent(name string, parentID int64) (*
 	ch := &model.Channel{}
 	var createdAt string
 	var isTempInt, allowSubInt int
-	err := s.QueryRowContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_at FROM channels WHERE name = ? AND parent_id = ?", name, parentID).
-		Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &createdAt)
+	err := s.QueryRowContext(context.Background(), "SELECT id, name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by, created_at FROM channels WHERE name = ? AND parent_id = ?", name, parentID).
+		Scan(&ch.ID, &ch.Name, &ch.Description, &ch.MaxUsers, &ch.ParentID, &isTempInt, &allowSubInt, &ch.CreatedBy, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

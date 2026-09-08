@@ -50,8 +50,15 @@ func (c *closeTrackingConn) Close() error {
 }
 
 func newTestServer(t *testing.T) (*Server, datastore.DataProviderFactory, *ControlHandler) {
+	return newTestServerWithConfig(t, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, configure func(*Config)) (*Server, datastore.DataProviderFactory, *ControlHandler) {
 	t.Helper()
 	cfg := DefaultConfig()
+	if configure != nil {
+		configure(&cfg)
+	}
 	cfg.DBPath = filepath.Join(t.TempDir(), "gospeak.db")
 	st, err := datastore.NewProviderFactory(cfg.DBPath)
 	if err != nil {

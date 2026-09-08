@@ -458,6 +458,19 @@ func (sm *SessionManager) SetChannel(id uint32, channelID int64) {
 	}
 }
 
+// ClearChannelIf clears a session's channel only if it has not moved since
+// cleanup selected it.
+func (sm *SessionManager) ClearChannelIf(id uint32, expectedChannelID int64) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.sessions[id]
+	if !ok || s.ChannelID != expectedChannelID {
+		return false
+	}
+	s.ChannelID = 0
+	return true
+}
+
 // UpdateRoleByUserID updates the role for every active session of a user.
 func (sm *SessionManager) UpdateRoleByUserID(userID int64, role model.Role) {
 	sm.mu.Lock()
