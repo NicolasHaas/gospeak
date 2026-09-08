@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -104,9 +105,21 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 	defer s.removeScreenConn(auth.SessionID, client)
 
 	for {
-		pkt, err := protocol.ReadScreenPacket(conn)
+		pkt, err := protocol.ReadScreenPacketValidated(conn, func(header *protocol.ScreenPacketHeader) protocol.ScreenPacketReadDecision {
+			switch s.screenShare.ReserveFrameIngress(auth.SessionID, header.SessionID, minScreenShareFrameInterval) {
+			case screenFrameIngressDiscard:
+				return protocol.ScreenPacketDiscard
+			case screenFrameIngressRead:
+				return protocol.ScreenPacketRead
+			default:
+				return protocol.ScreenPacketReject
+			}
+		})
 		if err != nil {
-			if err == io.EOF || isClosedErr(err) {
+			if errors.Is(err, protocol.ErrScreenPacketDiscarded) {
+				continue
+			}
+			if errors.Is(err, io.EOF) || isClosedErr(err) {
 				return
 			}
 			s.recordScreenPacketRejection(conn.RemoteAddr().String())
@@ -127,7 +140,7 @@ func (s *Server) handleScreenPacket(sessionID uint32, pkt *protocol.ScreenPacket
 	if !s.screenShare.IsSharer(sessionID, session.ChannelID) {
 		return
 	}
-	if !s.screenShare.AcceptFrame(sessionID, pkt, minScreenShareFrameInterval) {
+	if !s.screenShare.AcceptFrame(sessionID, pkt, 0) {
 		return
 	}
 

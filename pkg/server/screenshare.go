@@ -20,8 +20,10 @@ type ScreenShareManager struct {
 	authorizedTarget        map[uint32]uint32
 	viewerTarget            map[uint32]uint32
 	lastFrameAt             map[uint32]time.Time
+	lastFrameIngressAt      map[uint32]time.Time
 	cipherByShare           map[uint32]*gospeakCrypto.VoiceCipher
 	lastFrameSequence       map[uint32]uint32
+	frameIngressNow         func() time.Time
 	beforeFrameReplayCommit func()
 }
 
@@ -34,8 +36,10 @@ func NewScreenShareManager() *ScreenShareManager {
 		authorizedTarget:   make(map[uint32]uint32),
 		viewerTarget:       make(map[uint32]uint32),
 		lastFrameAt:        make(map[uint32]time.Time),
+		lastFrameIngressAt: make(map[uint32]time.Time),
 		cipherByShare:      make(map[uint32]*gospeakCrypto.VoiceCipher),
 		lastFrameSequence:  make(map[uint32]uint32),
+		frameIngressNow:    time.Now,
 	}
 }
 
@@ -72,6 +76,7 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	m.channelBySession[sessionID] = channelID
 	m.cipherByShare[sessionID] = cipher
 	delete(m.lastFrameSequence, sessionID)
+	delete(m.lastFrameIngressAt, sessionID)
 	if _, ok := m.authorizedByShare[sessionID]; !ok {
 		m.authorizedByShare[sessionID] = make(map[uint32]bool)
 	}
@@ -132,6 +137,7 @@ func (m *ScreenShareManager) ExpireInactive(idleTimeout time.Duration) []*pb.Scr
 func (m *ScreenShareManager) stopBySessionLocked(sessionID uint32) (*pb.ScreenShareEvent, bool) {
 	delete(m.cipherByShare, sessionID)
 	delete(m.lastFrameSequence, sessionID)
+	delete(m.lastFrameIngressAt, sessionID)
 
 	channelID, ok := m.channelBySession[sessionID]
 	if !ok {
@@ -254,6 +260,38 @@ func (m *ScreenShareManager) IsSharer(sessionID uint32, channelID int64) bool {
 	defer m.mu.RUnlock()
 	active, ok := m.activeByChannel[channelID]
 	return ok && active.Active && active.SessionID == sessionID
+}
+
+type screenFrameIngressDecision uint8
+
+const (
+	screenFrameIngressReject screenFrameIngressDecision = iota
+	screenFrameIngressDiscard
+	screenFrameIngressRead
+)
+
+// ReserveFrameIngress verifies that the screen connection owns the active
+// share and applies the frame pacing gate before its encrypted body is
+// allocated. Invalid senders are rejected; over-rate bodies may be drained
+// without a payload-sized allocation so the stream remains synchronized.
+func (m *ScreenShareManager) ReserveFrameIngress(connectionSessionID, packetSessionID uint32, minInterval time.Duration) screenFrameIngressDecision {
+	if connectionSessionID == 0 || packetSessionID != connectionSessionID {
+		return screenFrameIngressReject
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	channelID, ok := m.channelBySession[connectionSessionID]
+	active := m.activeByChannel[channelID]
+	if !ok || active == nil || !active.Active || active.SessionID != connectionSessionID || m.cipherByShare[connectionSessionID] == nil {
+		return screenFrameIngressReject
+	}
+	now := m.frameIngressNow()
+	last := m.lastFrameIngressAt[connectionSessionID]
+	if minInterval > 0 && !last.IsZero() && now.Sub(last) < minInterval {
+		return screenFrameIngressDiscard
+	}
+	m.lastFrameIngressAt[connectionSessionID] = now
+	return screenFrameIngressRead
 }
 
 func (m *ScreenShareManager) SubscribersForSharer(sessionID uint32) []uint32 {
