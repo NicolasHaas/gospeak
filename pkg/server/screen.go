@@ -91,18 +91,17 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "invalid_message")
 		return
 	}
-	if !s.sessions.ValidateScreenAuth(auth.SessionID, auth.Token) {
-		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
-		return
-	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		slog.Error("clear screen auth deadline", "session", auth.SessionID, "err", err)
 		return
 	}
-	s.finishPreAuth(conn)
-
-	client := s.setScreenConn(auth.SessionID, conn)
+	client, ok := s.bindScreenConn(auth.SessionID, auth.Token, conn)
+	if !ok {
+		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
+		return
+	}
 	defer s.removeScreenConn(auth.SessionID, client)
+	s.finishPreAuth(conn)
 
 	for {
 		pkt, err := protocol.ReadScreenPacketValidated(conn, func(header *protocol.ScreenPacketHeader) protocol.ScreenPacketReadDecision {

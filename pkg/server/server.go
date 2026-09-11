@@ -375,12 +375,30 @@ func (c *screenClientConn) enqueue(frame []byte) bool {
 }
 
 func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) *screenClientConn {
+	client, _ := s.setScreenConnIf(sessionID, conn, nil)
+	return client
+}
+
+// bindScreenConn validates and installs a screen socket while screenMu keeps
+// control-session removal from interleaving between those operations. The lock
+// order for this lifecycle boundary is screenMu followed by SessionManager.mu.
+func (s *Server) bindScreenConn(sessionID uint32, token string, conn net.Conn) (*screenClientConn, bool) {
+	return s.setScreenConnIf(sessionID, conn, func() bool {
+		return s.sessions.ValidateScreenAuth(sessionID, token)
+	})
+}
+
+func (s *Server) setScreenConnIf(sessionID uint32, conn net.Conn, validate func() bool) (*screenClientConn, bool) {
 	client := &screenClientConn{
 		conn:     conn,
 		outbound: make(chan []byte, 1),
 		done:     make(chan struct{}),
 	}
 	s.screenMu.Lock()
+	if validate != nil && !validate() {
+		s.screenMu.Unlock()
+		return nil, false
+	}
 	old := s.screenConns[sessionID]
 	s.screenConns[sessionID] = client
 	s.screenMu.Unlock()
@@ -390,7 +408,7 @@ func (s *Server) setScreenConn(sessionID uint32, conn net.Conn) *screenClientCon
 	if !s.startWorker(func() { s.writeScreenPackets(sessionID, client) }) {
 		s.removeScreenConn(sessionID, client)
 	}
-	return client
+	return client, true
 }
 
 func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) {
@@ -421,6 +439,19 @@ func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
 	}
 	s.screenMu.Unlock()
 	client.close()
+}
+
+// removeSessionAndScreenConn retires the control session and detaches its
+// screen socket under the same lifecycle lock used by bindScreenConn.
+func (s *Server) removeSessionAndScreenConn(sessionID uint32) {
+	s.screenMu.Lock()
+	client := s.screenConns[sessionID]
+	delete(s.screenConns, sessionID)
+	s.sessions.Remove(sessionID)
+	s.screenMu.Unlock()
+	if client != nil {
+		client.close()
+	}
 }
 
 func (s *Server) sendScreenPacketToSession(sessionID uint32, pkt *protocol.ScreenPacket) bool {

@@ -952,7 +952,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
 		}
 		handler.removeConn(sessionID)
-		s.sessions.Remove(sessionID)
+		s.removeSessionAndScreenConn(sessionID)
 		s.removeVoiceStat(sessionID)
 		s.metrics.TotalDisconnects.Add(1)
 		slog.Debug("client disconnected", "user", user.Username, "session", sessionID)
