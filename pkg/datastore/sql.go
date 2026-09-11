@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -78,7 +79,11 @@ func (sf ProviderFactory) Tx(ctx context.Context) (DataStoreTx, error) {
 
 // New opens (or creates) a SQLite database and runs migrations.
 func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
-	DB, err := sql.Open("sqlite", dbPath)
+	dsn, err := sqliteConnectionDSN(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: prepare DB path: %w", err)
+	}
+	DB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("datastore: open DB: %w", err)
 	}
@@ -90,22 +95,30 @@ func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 		_ = DB.Close()
 		return nil, fmt.Errorf("datastore: set WAL: %w", err)
 	}
-	if _, err := DB.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
-		_ = DB.Close()
-		return nil, fmt.Errorf("datastore: enable FK: %w", err)
-	}
-	// Set busy timeout to avoid "database is locked" under concurrency
-	if _, err := DB.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-		_ = DB.Close()
-		return nil, fmt.Errorf("datastore: set busy_timeout: %w", err)
-	}
-
 	s := &ProviderFactory{DB: DB}
 	if err := s.migrate(); err != nil {
 		_ = DB.Close()
 		return nil, fmt.Errorf("datastore: migrate: %w", err)
 	}
 	return s, nil
+}
+
+func sqliteConnectionDSN(dbPath string) (string, error) {
+	if dbPath == "" {
+		return "", fmt.Errorf("database path is empty")
+	}
+	base, rawQuery, _ := strings.Cut(dbPath, "?")
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", fmt.Errorf("parse SQLite query parameters: %w", err)
+	}
+	// The factory owns connection pragmas. Dropping every caller-supplied
+	// pragma avoids SQLite syntax variants changing these required values
+	// after the driver sorts and executes repeated _pragma parameters.
+	query.Del("_pragma")
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	return base + "?" + query.Encode(), nil
 }
 
 // Close closes the database connection pool.
