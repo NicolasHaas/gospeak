@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -90,23 +91,34 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "invalid_message")
 		return
 	}
-	if !s.sessions.ValidateScreenAuth(auth.SessionID, auth.Token) {
-		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
-		return
-	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		slog.Error("clear screen auth deadline", "session", auth.SessionID, "err", err)
 		return
 	}
+	client, ok := s.bindScreenConn(auth.SessionID, auth.Token, conn)
+	if !ok {
+		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
+		return
+	}
+	defer s.removeScreenConn(auth.SessionID, client)
 	s.finishPreAuth(conn)
 
-	client := s.setScreenConn(auth.SessionID, conn)
-	defer s.removeScreenConn(auth.SessionID, client)
-
 	for {
-		pkt, err := protocol.ReadScreenPacket(conn)
+		pkt, err := protocol.ReadScreenPacketValidated(conn, func(header *protocol.ScreenPacketHeader) protocol.ScreenPacketReadDecision {
+			switch s.screenShare.ReserveFrameIngress(auth.SessionID, header.SessionID, minScreenShareFrameInterval) {
+			case screenFrameIngressDiscard:
+				return protocol.ScreenPacketDiscard
+			case screenFrameIngressRead:
+				return protocol.ScreenPacketRead
+			default:
+				return protocol.ScreenPacketReject
+			}
+		})
 		if err != nil {
-			if err == io.EOF || isClosedErr(err) {
+			if errors.Is(err, protocol.ErrScreenPacketDiscarded) {
+				continue
+			}
+			if errors.Is(err, io.EOF) || isClosedErr(err) {
 				return
 			}
 			s.recordScreenPacketRejection(conn.RemoteAddr().String())
@@ -127,7 +139,7 @@ func (s *Server) handleScreenPacket(sessionID uint32, pkt *protocol.ScreenPacket
 	if !s.screenShare.IsSharer(sessionID, session.ChannelID) {
 		return
 	}
-	if !s.screenShare.AcceptFrame(sessionID, pkt, minScreenShareFrameInterval) {
+	if !s.screenShare.AcceptFrame(sessionID, pkt, 0) {
 		return
 	}
 

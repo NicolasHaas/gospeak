@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -9,6 +11,22 @@ type shortScreenWriter struct {
 	buf      bytes.Buffer
 	maxWrite int
 	writes   int
+}
+
+type screenLengthOnlyReader struct {
+	length         [4]byte
+	offset         int
+	readPastLength bool
+}
+
+func (r *screenLengthOnlyReader) Read(p []byte) (int, error) {
+	if r.offset < len(r.length) {
+		n := copy(p, r.length[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	r.readPastLength = true
+	return 0, errors.New("unexpected read past screen length")
 }
 
 func (w *shortScreenWriter) Write(p []byte) (int, error) {
@@ -43,6 +61,84 @@ func TestScreenPacketRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(roundTrip.Payload, original.Payload) {
 		t.Fatalf("Payload = %q, want %q", roundTrip.Payload, original.Payload)
+	}
+}
+
+func TestReadScreenPacketValidatedRejectsBeforePayloadRead(t *testing.T) {
+	const payloadLength uint32 = 15
+	payload := []byte("encrypted-frame")
+	var wire bytes.Buffer
+	var prefix [4 + ScreenHeaderSize]byte
+	binary.BigEndian.PutUint32(prefix[0:4], ScreenHeaderSize+payloadLength)
+	binary.BigEndian.PutUint32(prefix[4:8], 42)
+	binary.BigEndian.PutUint32(prefix[8:12], 7)
+	wire.Write(prefix[:])
+	wire.Write(payload)
+
+	var header *ScreenPacketHeader
+	_, err := ReadScreenPacketValidated(&wire, func(got *ScreenPacketHeader) ScreenPacketReadDecision {
+		header = got
+		return ScreenPacketReject
+	})
+	if err == nil {
+		t.Fatal("ReadScreenPacketValidated accepted rejected packet")
+	}
+	if header.SessionID != 42 || header.SeqNum != 7 || header.PayloadLength() != payloadLength {
+		t.Fatalf("header = %#v payload=%d, want session=42 sequence=7 payload=%d", header, header.PayloadLength(), len(payload))
+	}
+	if wire.Len() != len(payload) {
+		t.Fatalf("bytes remaining = %d, want payload length %d", wire.Len(), len(payload))
+	}
+}
+
+func TestReadScreenPacketValidatedDiscardsWithoutLosingFraming(t *testing.T) {
+	pkt := &ScreenPacket{SessionID: 42, SeqNum: 7, Payload: []byte("discard")}
+	var wire bytes.Buffer
+	if err := WriteScreenPacket(&wire, pkt); err != nil {
+		t.Fatalf("WriteScreenPacket(discard): %v", err)
+	}
+	if err := WriteScreenPacket(&wire, pkt); err != nil {
+		t.Fatalf("WriteScreenPacket(read): %v", err)
+	}
+	if _, err := ReadScreenPacketValidated(&wire, func(*ScreenPacketHeader) ScreenPacketReadDecision {
+		return ScreenPacketDiscard
+	}); !errors.Is(err, ErrScreenPacketDiscarded) {
+		t.Fatalf("discard error = %v, want %v", err, ErrScreenPacketDiscarded)
+	}
+	got, err := ReadScreenPacket(&wire)
+	if err != nil {
+		t.Fatalf("ReadScreenPacket after discard: %v", err)
+	}
+	if !bytes.Equal(got.Payload, pkt.Payload) {
+		t.Fatalf("payload after discard = %q, want %q", got.Payload, pkt.Payload)
+	}
+}
+
+func TestReadScreenPacketRejectsShortPacket(t *testing.T) {
+	var wire bytes.Buffer
+	if err := binary.Write(&wire, binary.BigEndian, uint32(ScreenHeaderSize-1)); err != nil {
+		t.Fatalf("write length: %v", err)
+	}
+	if _, err := ReadScreenPacket(&wire); err == nil {
+		t.Fatal("ReadScreenPacket accepted packet shorter than its header")
+	}
+}
+
+func TestReadScreenPacketValidatedRejectsOversizeBeforeHeaderRead(t *testing.T) {
+	reader := &screenLengthOnlyReader{}
+	binary.BigEndian.PutUint32(reader.length[:], MaxScreenPacket+1)
+	admissionCalled := false
+	if _, err := ReadScreenPacketValidated(reader, func(*ScreenPacketHeader) ScreenPacketReadDecision {
+		admissionCalled = true
+		return ScreenPacketRead
+	}); err == nil {
+		t.Fatal("ReadScreenPacketValidated accepted oversized packet")
+	}
+	if admissionCalled {
+		t.Fatal("oversized packet reached admission callback")
+	}
+	if reader.readPastLength {
+		t.Fatal("oversized packet read beyond its length prefix")
 	}
 }
 

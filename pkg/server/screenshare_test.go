@@ -274,6 +274,30 @@ func TestScreenShareManagerRateLimitedFrameStillConsumesSequence(t *testing.T) {
 	}
 }
 
+func TestScreenShareManagerReservesIngressBeforePayloadRead(t *testing.T) {
+	mgr := NewScreenShareManager()
+	mgr.frameIngressNow = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	if _, err := mgr.Start(1, 10, 20, "alice", 800, 600); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := mgr.ReserveFrameIngress(10, 10, time.Hour); got != screenFrameIngressRead {
+		t.Fatalf("first ingress decision = %v, want read", got)
+	}
+	if got := mgr.ReserveFrameIngress(10, 10, time.Hour); got != screenFrameIngressDiscard {
+		t.Fatalf("over-rate ingress decision = %v, want discard", got)
+	}
+	if got := mgr.ReserveFrameIngress(10, 11, 0); got != screenFrameIngressReject {
+		t.Fatalf("foreign packet decision = %v, want reject", got)
+	}
+	if _, ok := mgr.StopBySession(10); !ok {
+		t.Fatal("StopBySession failed")
+	}
+	if got := mgr.ReserveFrameIngress(10, 10, 0); got != screenFrameIngressReject {
+		t.Fatalf("stopped share decision = %v, want reject", got)
+	}
+}
+
 func TestScreenShareManagerStaleAuthenticationCannotAdvanceReplacementShare(t *testing.T) {
 	mgr := NewScreenShareManager()
 	started, err := mgr.Start(1, 10, 20, "alice", 800, 600)

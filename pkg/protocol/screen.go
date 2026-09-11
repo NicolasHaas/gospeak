@@ -26,6 +26,36 @@ type ScreenPacket struct {
 	Payload   []byte
 }
 
+// ScreenPacketHeader is the fixed-size portion of a length-prefixed screen
+// packet passed to a ReadScreenPacketValidated admission callback.
+type ScreenPacketHeader struct {
+	SessionID     uint32
+	SeqNum        uint32
+	payloadLength uint32
+}
+
+// PayloadLength returns the encrypted payload size that remains to be read.
+func (h *ScreenPacketHeader) PayloadLength() uint32 {
+	if h == nil {
+		return 0
+	}
+	return h.payloadLength
+}
+
+// ScreenPacketReadDecision controls whether a validated reader rejects,
+// bounded-buffer drains, or allocates and reads a screen packet payload.
+type ScreenPacketReadDecision uint8
+
+const (
+	ScreenPacketReject ScreenPacketReadDecision = iota
+	ScreenPacketDiscard
+	ScreenPacketRead
+)
+
+// ErrScreenPacketDiscarded reports that an admission callback drained a packet
+// without a payload-sized allocation.
+var ErrScreenPacketDiscarded = errors.New("protocol: screen packet discarded")
+
 type ScreenFrame struct {
 	Timestamp int64
 	Width     int32
@@ -108,19 +138,60 @@ func WriteScreenPacketFrame(w io.Writer, frame []byte) error {
 }
 
 func ReadScreenPacket(r io.Reader) (*ScreenPacket, error) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(r, lenBuf); err != nil {
+	return ReadScreenPacketValidated(r, func(*ScreenPacketHeader) ScreenPacketReadDecision {
+		return ScreenPacketRead
+	})
+}
+
+// ReadScreenPacketValidated reads and validates the fixed packet header before
+// its admission callback decides whether the encrypted payload may be
+// allocated. Rejected payloads remain unread; discarded payloads are drained
+// through a fixed-size copy buffer and return ErrScreenPacketDiscarded.
+func ReadScreenPacketValidated(r io.Reader, admit func(*ScreenPacketHeader) ScreenPacketReadDecision) (*ScreenPacket, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("protocol: read screen length: %w", err)
 	}
-	length := binary.BigEndian.Uint32(lenBuf)
+	length := binary.BigEndian.Uint32(lenBuf[:])
+	if length < ScreenHeaderSize {
+		return nil, fmt.Errorf("protocol: screen packet too short: %d bytes", length)
+	}
 	if length > MaxScreenPacket {
 		return nil, fmt.Errorf("protocol: screen packet too large: %d bytes", length)
 	}
-	data := make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
+	var headerBytes [ScreenHeaderSize]byte
+	if _, err := io.ReadFull(r, headerBytes[:]); err != nil {
+		return nil, fmt.Errorf("protocol: read screen header: %w", err)
+	}
+	header := &ScreenPacketHeader{
+		SessionID:     binary.BigEndian.Uint32(headerBytes[0:4]),
+		SeqNum:        binary.BigEndian.Uint32(headerBytes[4:8]),
+		payloadLength: length - ScreenHeaderSize,
+	}
+	if admit == nil {
+		return nil, errors.New("protocol: nil screen packet admission callback")
+	}
+	switch admit(header) {
+	case ScreenPacketReject:
+		return nil, errors.New("protocol: screen packet rejected")
+	case ScreenPacketDiscard:
+		if _, err := io.CopyN(io.Discard, r, int64(header.payloadLength)); err != nil {
+			return nil, fmt.Errorf("protocol: discard screen payload: %w", err)
+		}
+		return nil, ErrScreenPacketDiscarded
+	case ScreenPacketRead:
+	default:
+		return nil, errors.New("protocol: invalid screen packet read decision")
+	}
+	payload := make([]byte, header.payloadLength)
+	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, fmt.Errorf("protocol: read screen payload: %w", err)
 	}
-	return UnmarshalScreenPacket(data)
+	return &ScreenPacket{
+		SessionID: header.SessionID,
+		SeqNum:    header.SeqNum,
+		Payload:   payload,
+	}, nil
 }
 
 func MarshalScreenFrame(frame *ScreenFrame) ([]byte, error) {
