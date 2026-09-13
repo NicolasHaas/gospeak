@@ -55,6 +55,17 @@ type ProviderFactory struct {
 	DB *sql.DB
 }
 
+type migrationStep struct {
+	statement string
+	table     string
+	column    string
+}
+
+type schemaMigration struct {
+	version int
+	steps   []migrationStep
+}
+
 func (sf ProviderFactory) NonTx() DataStore {
 	return &nonTxProvider{
 		baseProvider: baseProvider{
@@ -183,73 +194,97 @@ func (s *ProviderFactory) migrate() error {
 	);
 	`
 	ctx := context.Background()
-	if err := s.ensureSchemaMigrations(ctx); err != nil {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("datastore: acquire migration connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("datastore: begin migration transaction: %w", err)
+	}
+	if err := migrateSchema(ctx, conn, schema); err != nil {
+		return rollbackMigration(ctx, conn, err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return rollbackMigration(ctx, conn, fmt.Errorf("datastore: commit migration transaction: %w", err))
+	}
+	return nil
+}
+
+func migrateSchema(ctx context.Context, db DB, schema string) error {
+	if err := ensureSchemaMigrations(ctx, db); err != nil {
 		return err
 	}
-	currentVersion, err := s.getSchemaVersion(ctx)
+	currentVersion, err := getSchemaVersion(ctx, db)
 	if err != nil {
 		return err
 	}
 
-	migrations := []struct {
-		version      int
-		statements   []string
-		ignoreErrors bool
-		column       string
-	}{
+	migrations := []schemaMigration{
 		{
-			version:    1,
-			statements: []string{schema},
+			version: 1,
+			steps:   []migrationStep{{statement: schema}},
 		},
 		{
 			version: 2,
-			statements: []string{
-				"ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0",
-				"ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0",
-				"ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0",
+			steps: []migrationStep{
+				{statement: "ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0", table: "channels", column: "parent_id"},
+				{statement: "ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0", table: "channels", column: "is_temp"},
+				{statement: "ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0", table: "channels", column: "allow_sub_channels"},
 			},
-			ignoreErrors: true,
 		},
 		{
 			version: 3,
-			statements: []string{
-				"ALTER TABLE users ADD COLUMN personal_token_hash TEXT NOT NULL DEFAULT ''",
-				"ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+			steps: []migrationStep{
+				{statement: "ALTER TABLE users ADD COLUMN personal_token_hash TEXT NOT NULL DEFAULT ''", table: "users", column: "personal_token_hash"},
+				{statement: "ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'", table: "users", column: "personal_token_created_at"},
+				{statement: "UPDATE users SET personal_token_created_at = datetime('now') WHERE personal_token_created_at = '1970-01-01 00:00:00'"},
 			},
-			ignoreErrors: true,
 		},
 		{
 			version: 4,
-			statements: []string{
-				"CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)",
+			steps: []migrationStep{
+				{statement: "CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)"},
 			},
-			ignoreErrors: true,
 		},
 		{
 			version: 5,
-			statements: []string{
-				"ALTER TABLE users ADD COLUMN channel_scope INTEGER NOT NULL DEFAULT 0",
+			steps: []migrationStep{
+				{statement: "ALTER TABLE users ADD COLUMN channel_scope INTEGER NOT NULL DEFAULT 0", table: "users", column: "channel_scope"},
 			},
 		},
 		{
 			version: 6,
-			statements: []string{
-				"CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_parent_name ON channels(parent_id, name)",
+			steps: []migrationStep{
+				{statement: "CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_parent_name ON channels(parent_id, name)"},
 			},
 		},
 		{
 			version: 7,
-			statements: []string{
-				"ALTER TABLE tokens ADD COLUMN kind INTEGER NOT NULL DEFAULT 0 CHECK(kind IN (0, 1))",
+			steps: []migrationStep{
+				{statement: "ALTER TABLE tokens ADD COLUMN kind INTEGER NOT NULL DEFAULT 0 CHECK(kind IN (0, 1))", table: "tokens", column: "kind"},
 			},
-			column: "tokens.kind",
 		},
 		{
 			version: 8,
-			statements: []string{
-				"ALTER TABLE channels ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0",
+			steps: []migrationStep{
+				{statement: "ALTER TABLE channels ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0", table: "channels", column: "created_by"},
 			},
-			column: "channels.created_by",
+		},
+		{
+			// Versions 2-4 historically swallowed every SQLite error. Reconcile
+			// their required schema once so databases carrying an overstated
+			// version are repaired without guessing from error strings.
+			version: 9,
+			steps: []migrationStep{
+				{statement: "ALTER TABLE channels ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0", table: "channels", column: "parent_id"},
+				{statement: "ALTER TABLE channels ADD COLUMN is_temp INTEGER NOT NULL DEFAULT 0", table: "channels", column: "is_temp"},
+				{statement: "ALTER TABLE channels ADD COLUMN allow_sub_channels INTEGER NOT NULL DEFAULT 0", table: "channels", column: "allow_sub_channels"},
+				{statement: "ALTER TABLE users ADD COLUMN personal_token_hash TEXT NOT NULL DEFAULT ''", table: "users", column: "personal_token_hash"},
+				{statement: "ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'", table: "users", column: "personal_token_created_at"},
+				{statement: "UPDATE users SET personal_token_created_at = datetime('now') WHERE personal_token_created_at = '1970-01-01 00:00:00'"},
+				{statement: "CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)"},
+			},
 		},
 	}
 
@@ -257,34 +292,39 @@ func (s *ProviderFactory) migrate() error {
 		if m.version <= currentVersion {
 			continue
 		}
-		if m.column != "" {
-			table, column, _ := strings.Cut(m.column, ".")
-			exists, err := s.tableColumnExists(ctx, table, column)
-			if err != nil {
-				return err
-			}
-			if exists {
-				if err := s.setSchemaVersion(ctx, m.version); err != nil {
+		for _, step := range m.steps {
+			if step.column != "" {
+				exists, err := tableColumnExists(ctx, db, step.table, step.column)
+				if err != nil {
 					return err
 				}
-				continue
+				if exists {
+					continue
+				}
+			}
+			if _, err := db.ExecContext(ctx, step.statement); err != nil {
+				return fmt.Errorf("datastore: apply schema migration %d: %w", m.version, err)
 			}
 		}
-		for _, stmt := range m.statements {
-			if err := s.execMigration(ctx, stmt, m.ignoreErrors); err != nil {
-				return err
-			}
-		}
-		if err := s.setSchemaVersion(ctx, m.version); err != nil {
+		if err := setSchemaVersion(ctx, db, m.version); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *ProviderFactory) tableColumnExists(ctx context.Context, table, column string) (bool, error) {
+func rollbackMigration(ctx context.Context, db DB, cause error) error {
+	if _, err := db.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return fmt.Errorf("%w; rollback migration transaction: %v", cause, err)
+	}
+	return cause
+}
+
+func tableColumnExists(ctx context.Context, db DB, table, column string) (bool, error) {
 	var query string
 	switch table {
+	case "users":
+		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('users') WHERE name = ?)"
 	case "tokens":
 		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tokens') WHERE name = ?)"
 	case "channels":
@@ -293,49 +333,39 @@ func (s *ProviderFactory) tableColumnExists(ctx context.Context, table, column s
 		return false, fmt.Errorf("datastore: inspect unsupported schema table %q", table)
 	}
 	var exists int
-	if err := s.DB.QueryRowContext(ctx, query, column).Scan(&exists); err != nil {
+	if err := db.QueryRowContext(ctx, query, column).Scan(&exists); err != nil {
 		return false, fmt.Errorf("datastore: inspect schema column: %w", err)
 	}
 	return exists != 0, nil
 }
 
-func (s *ProviderFactory) ensureSchemaMigrations(ctx context.Context) error {
-	if _, err := s.DB.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER NOT NULL)"); err != nil {
+func ensureSchemaMigrations(ctx context.Context, db DB) error {
+	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER NOT NULL)"); err != nil {
 		return fmt.Errorf("datastore: create schema_migrations: %w", err)
 	}
 	var count int
-	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		return fmt.Errorf("datastore: check schema_migrations: %w", err)
 	}
 	if count == 0 {
-		if _, err := s.DB.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (0)"); err != nil {
+		if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (0)"); err != nil {
 			return fmt.Errorf("datastore: init schema_migrations: %w", err)
 		}
 	}
 	return nil
 }
 
-func (s *ProviderFactory) getSchemaVersion(ctx context.Context) (int, error) {
+func getSchemaVersion(ctx context.Context, db DB) (int, error) {
 	var version int
-	if err := s.DB.QueryRowContext(ctx, "SELECT version FROM schema_migrations LIMIT 1").Scan(&version); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT version FROM schema_migrations LIMIT 1").Scan(&version); err != nil {
 		return 0, fmt.Errorf("datastore: read schema version: %w", err)
 	}
 	return version, nil
 }
 
-func (s *ProviderFactory) setSchemaVersion(ctx context.Context, version int) error {
-	if _, err := s.DB.ExecContext(ctx, "UPDATE schema_migrations SET version = ?", version); err != nil {
+func setSchemaVersion(ctx context.Context, db DB, version int) error {
+	if _, err := db.ExecContext(ctx, "UPDATE schema_migrations SET version = ?", version); err != nil {
 		return fmt.Errorf("datastore: update schema version: %w", err)
-	}
-	return nil
-}
-
-func (s *ProviderFactory) execMigration(ctx context.Context, stmt string, ignoreErrors bool) error {
-	if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
-		if ignoreErrors {
-			return nil
-		}
-		return fmt.Errorf("datastore: migrate: %w", err)
 	}
 	return nil
 }
