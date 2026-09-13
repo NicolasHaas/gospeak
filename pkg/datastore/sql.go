@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -94,6 +97,15 @@ func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 	if err != nil {
 		return nil, fmt.Errorf("datastore: prepare DB path: %w", err)
 	}
+	filePath, hasFile, createFile, err := sqliteFilesystemPath(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("datastore: prepare DB path: %w", err)
+	}
+	if hasFile {
+		if err := prepareSQLiteFiles(filePath, createFile); err != nil {
+			return nil, fmt.Errorf("datastore: protect DB files: %w", err)
+		}
+	}
 	DB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("datastore: open DB: %w", err)
@@ -110,6 +122,12 @@ func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 	if err := s.migrate(); err != nil {
 		_ = DB.Close()
 		return nil, fmt.Errorf("datastore: migrate: %w", err)
+	}
+	if hasFile {
+		if err := protectSQLiteFiles(filePath); err != nil {
+			_ = DB.Close()
+			return nil, fmt.Errorf("datastore: protect DB files: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -130,6 +148,155 @@ func sqliteConnectionDSN(dbPath string) (string, error) {
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
 	return base + "?" + query.Encode(), nil
+}
+
+func sqliteFilesystemPath(dbPath string) (string, bool, bool, error) {
+	base, rawQuery, _ := strings.Cut(dbPath, "?")
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", false, false, fmt.Errorf("parse SQLite query parameters: %w", err)
+	}
+	if base == ":memory:" {
+		return "", false, false, nil
+	}
+	vfs, err := sqliteURIParameter(query, "vfs")
+	if err != nil {
+		return "", false, false, err
+	}
+	if vfs != "" && vfs != "memdb" {
+		return "", false, false, fmt.Errorf("unsupported SQLite VFS %q", vfs)
+	}
+	if !strings.HasPrefix(base, "file:") {
+		if vfs == "memdb" {
+			return "", false, false, nil
+		}
+		return base, true, true, nil
+	}
+	mode, err := sqliteURIParameter(query, "mode")
+	if err != nil {
+		return "", false, false, err
+	}
+	if mode != "" && mode != "ro" && mode != "rw" && mode != "rwc" && mode != "memory" {
+		return "", false, false, fmt.Errorf("unsupported SQLite mode %q", mode)
+	}
+	if mode == "memory" || vfs == "memdb" {
+		return "", false, false, nil
+	}
+
+	uri, err := url.Parse(base)
+	if err != nil {
+		return "", false, false, fmt.Errorf("parse SQLite file URI: %w", err)
+	}
+	if uri.Host != "" && uri.Host != "localhost" {
+		return "", false, false, fmt.Errorf("unsupported SQLite file URI authority %q", uri.Host)
+	}
+	path, err := sqliteFileURIPath(uri, runtime.GOOS)
+	if err != nil {
+		return "", false, false, err
+	}
+	if path == "" {
+		return "", false, false, fmt.Errorf("temporary SQLite databases are unsupported")
+	}
+	if path == ":memory:" {
+		return "", false, false, nil
+	}
+	return path, true, mode == "" || mode == "rwc", nil
+}
+
+func sqliteURIParameter(query url.Values, name string) (string, error) {
+	values := query[name]
+	if len(values) > 1 {
+		return "", fmt.Errorf("SQLite URI contains multiple %s parameters", name)
+	}
+	if len(values) == 0 {
+		return "", nil
+	}
+	return values[0], nil
+}
+
+func sqliteFileURIPath(uri *url.URL, targetOS string) (string, error) {
+	path := uri.Path
+	if uri.Opaque != "" {
+		decoded, err := url.PathUnescape(uri.Opaque)
+		if err != nil {
+			return "", fmt.Errorf("decode SQLite file URI: %w", err)
+		}
+		path = decoded
+	}
+
+	if targetOS == "windows" && len(path) >= 3 && path[0] == '/' && path[2] == ':' &&
+		((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) {
+		path = path[1:]
+	}
+	if targetOS == "windows" {
+		return strings.ReplaceAll(path, "/", `\`), nil
+	}
+	return filepath.FromSlash(path), nil
+}
+
+func prepareSQLiteFiles(dbPath string, create bool) error {
+	parent := filepath.Dir(dbPath)
+	info, err := os.Stat(parent)
+	if os.IsNotExist(err) {
+		if !create {
+			return fmt.Errorf("database directory does not exist: %w", os.ErrNotExist)
+		}
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return fmt.Errorf("create database directory: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("inspect database directory: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("database parent is not a directory")
+	}
+
+	// Existing parents may intentionally be shared (for example "." or
+	// /tmp), so MkdirAll's owner-only mode applies only to directories it
+	// creates. The database artifacts themselves are always owner-only.
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	file, err := os.OpenFile(dbPath, flags, 0o600) //nolint:gosec // The server operator explicitly selects the SQLite path.
+	if err != nil {
+		return fmt.Errorf("open database file: %w", err)
+	}
+	if err := verifySQLiteFileOwner(file); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("verify database file owner: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("protect database file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close database file: %w", err)
+	}
+	return protectSQLiteFiles(dbPath)
+}
+
+func protectSQLiteFiles(dbPath string) error {
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		file, err := os.Open(path) //nolint:gosec // Sidecar paths are derived from the operator-selected SQLite path.
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("open %s: %w", filepath.Base(path), err)
+		}
+		if err := verifySQLiteFileOwner(file); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("verify %s owner: %w", filepath.Base(path), err)
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("protect %s: %w", filepath.Base(path), err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close %s: %w", filepath.Base(path), err)
+		}
+	}
+	return nil
 }
 
 // Close closes the database connection pool.
