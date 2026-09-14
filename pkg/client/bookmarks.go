@@ -39,37 +39,36 @@ func NewBookmarkStore() *BookmarkStore {
 	}
 }
 
-// Load reads bookmarks from disk. Returns empty list if file doesn't exist.
+// NewLegacyBookmarkStore creates a bookmark store pinned to the legacy
+// location. It is used when the user explicitly declines migration.
+func NewLegacyBookmarkStore() *BookmarkStore {
+	path := legacyFilePath("servers.yaml")
+	return &BookmarkStore{path: path, legacyPath: path}
+}
+
+// Load reads bookmarks from disk. It falls back to the legacy file without
+// migrating it; migration is an explicit user action.
 func (bs *BookmarkStore) Load() error {
-	data, err := os.ReadFile(bs.path)
-	if err != nil {
-		if !os.IsNotExist(err) || bs.legacyPath == "" || bs.legacyPath == bs.path {
-			if os.IsNotExist(err) {
-				bs.Bookmarks = nil
-				return nil
-			}
-			return err
-		}
-		data, err = os.ReadFile(bs.legacyPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				bs.Bookmarks = nil
-				return nil
-			}
-			return err
-		}
-		if err := yaml.Unmarshal(data, bs); err != nil {
-			return err
-		}
-		if err := bs.Save(); err != nil {
-			return err
-		}
-		if err := os.Remove(bs.legacyPath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	loaded := BookmarkStore{path: bs.path, legacyPath: bs.legacyPath}
+	bs.Bookmarks = nil
+	bs.TrustedServerPins = nil
+	data, err := readPrivateFile(bs.path, bs.path != bs.legacyPath)
+	if os.IsNotExist(err) && bs.legacyPath != "" && bs.legacyPath != bs.path {
+		data, err = readPrivateFile(bs.legacyPath, false)
+		loaded.path = bs.legacyPath
+	}
+	if os.IsNotExist(err) {
 		return nil
 	}
-	return yaml.Unmarshal(data, bs)
+	if err != nil {
+		return err
+	}
+	bs.path = loaded.path
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
+		return err
+	}
+	*bs = loaded
+	return nil
 }
 
 // Save writes bookmarks to disk.

@@ -116,7 +116,69 @@ func (a *App) Run() {
 		a.hotkeys.Stop()
 		a.fyneApp.Quit()
 	})
-	a.window.ShowAndRun()
+	a.window.Show()
+	a.promptLegacyConfigMigration()
+	a.fyneApp.Run()
+}
+
+func (a *App) promptLegacyConfigMigration() {
+	status, err := client.DetectLegacyConfig()
+	if !status.Any() {
+		if err != nil {
+			dialog.ShowError(err, a.window)
+		}
+		return
+	}
+	files := make([]string, 0, 2)
+	if status.Settings {
+		files = append(files, "settings")
+	}
+	if status.Bookmarks {
+		files = append(files, "saved servers and credentials")
+	}
+	message := fmt.Sprintf(
+		"GoSpeak found legacy %s beside the application. Migrate them to your private user configuration directory?\n\nThe original files are deleted only after a successful copy. Choosing No leaves them untouched.",
+		strings.Join(files, " and "),
+	)
+	if err != nil {
+		message += fmt.Sprintf("\n\nAnother legacy file could not be inspected and will be left untouched: %v", err)
+	}
+	dialog.ShowConfirm("Migrate GoSpeak Data?", message, func(confirmed bool) {
+		if !confirmed {
+			var legacyLoadErr error
+			if status.Settings {
+				a.settings = client.LoadLegacySettings()
+			}
+			if status.Bookmarks {
+				legacyBookmarks := client.NewLegacyBookmarkStore()
+				a.bookmarks = legacyBookmarks
+				legacyLoadErr = legacyBookmarks.Load()
+			}
+			a.engine.SetVADThreshold(a.settings.VADThreshold)
+			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
+			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
+			if legacyLoadErr != nil {
+				dialog.ShowError(legacyLoadErr, a.window)
+			}
+			return
+		}
+		migrationErr := client.MigrateLegacyConfig(status)
+		a.settings = client.LoadSettings()
+		a.bookmarks = client.NewBookmarkStore()
+		loadErr := a.bookmarks.Load()
+		a.engine.SetVADThreshold(a.settings.VADThreshold)
+		a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
+		a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
+		if migrationErr != nil {
+			dialog.ShowError(migrationErr, a.window)
+			return
+		}
+		if loadErr != nil {
+			dialog.ShowError(loadErr, a.window)
+			return
+		}
+		dialog.ShowInformation("Migration Complete", "Your GoSpeak data was migrated and the legacy files were removed.", a.window)
+	}, a.window)
 }
 
 func (a *App) buildUI() {

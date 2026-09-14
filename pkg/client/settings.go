@@ -14,6 +14,7 @@ type Settings struct {
 	VADThreshold float64 `yaml:"vad_threshold"`
 	AudioInput   string  `yaml:"audio_input,omitempty"`
 	AudioOutput  string  `yaml:"audio_output,omitempty"`
+	path         string
 }
 
 // DefaultSettings returns default settings.
@@ -35,40 +36,31 @@ func LoadSettings() *Settings {
 	return loadSettings(path, legacyFilePath("settings.yaml"))
 }
 
+// LoadLegacySettings loads settings directly from the legacy location. It is
+// used when the user explicitly declines migration.
+func LoadLegacySettings() *Settings {
+	path := legacyFilePath("settings.yaml")
+	return loadSettings(path, "")
+}
+
 func loadSettings(path, legacyPath string) *Settings {
 	s := DefaultSettings()
-	data, err := os.ReadFile(path) //nolint:gosec // path is resolved from the OS user config directory
-	if err == nil {
-		if err := yaml.Unmarshal(data, s); err != nil {
-			slog.Error("parse settings", "err", err)
-			return DefaultSettings()
-		}
-		return s
+	loadedPath := path
+	data, err := readPrivateFile(path, path != legacyPath)
+	if os.IsNotExist(err) && legacyPath != "" && legacyPath != path {
+		data, err = readPrivateFile(legacyPath, false)
+		loadedPath = legacyPath
 	}
-	if !os.IsNotExist(err) || legacyPath == path {
+	if err != nil {
 		if !os.IsNotExist(err) {
 			slog.Error("read settings", "err", err)
 		}
 		return s
 	}
-
-	data, err = os.ReadFile(legacyPath) //nolint:gosec // legacy path is derived from the current executable
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Error("read legacy settings", "err", err)
-		}
-		return s
-	}
+	s.path = loadedPath
 	if err := yaml.Unmarshal(data, s); err != nil {
-		slog.Error("parse legacy settings", "err", err)
-		return DefaultSettings()
-	}
-	if err := writePrivateFile(path, data); err != nil {
-		slog.Error("migrate settings", "err", err)
+		slog.Error("parse settings", "err", err)
 		return s
-	}
-	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
-		slog.Warn("remove migrated legacy settings", "err", err)
 	}
 	return s
 }
@@ -79,9 +71,13 @@ func (s *Settings) Save() error {
 	if err != nil {
 		return err
 	}
-	path, err := configFilePath("settings.yaml")
-	if err != nil {
-		return err
+	path := s.path
+	if path == "" {
+		var err error
+		path, err = configFilePath("settings.yaml")
+		if err != nil {
+			return err
+		}
 	}
 	return writePrivateFile(path, data)
 }
