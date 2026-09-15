@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
@@ -19,6 +20,11 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/rbac"
+)
+
+const (
+	maxChatMessageRunes      = 2000
+	maxModerationReasonRunes = 256
 )
 
 func (s *Server) beginSessionBanCheck(userID int64) {
@@ -1284,14 +1290,12 @@ func (s *Server) handleCreateChannel(sessionID uint32, req *pb.CreateChannelRequ
 	}
 	// Validate and sanitize channel fields.
 	name := sanitizeText(strings.TrimSpace(req.Name))
-	if len(name) == 0 || len(name) > 64 {
+	if len(name) == 0 || utf8.RuneCountInString(name) > model.MaxChannelNameLength {
 		sendError(conn, 31, "channel name must be 1-64 characters")
 		return
 	}
 	desc := sanitizeText(strings.TrimSpace(req.Description))
-	if len(desc) > 256 {
-		desc = desc[:256]
-	}
+	desc = truncateRunes(desc, model.MaxChannelDescLength)
 
 	var ch *model.Channel
 	if req.IsTemp && req.ParentID <= 0 {
@@ -1434,9 +1438,7 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 	}
 
 	reason := sanitizeText(strings.TrimSpace(req.Reason))
-	if len(reason) > 256 {
-		reason = reason[:256]
-	}
+	reason = truncateRunes(reason, maxModerationReasonRunes)
 
 	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
 	if len(targets) == 0 {
@@ -1465,9 +1467,7 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 	}
 
 	reason := sanitizeText(strings.TrimSpace(req.Reason))
-	if len(reason) > 256 {
-		reason = reason[:256]
-	}
+	reason = truncateRunes(reason, maxModerationReasonRunes)
 
 	var expiresAt time.Time
 	if req.DurationSeconds > 0 {
@@ -1526,7 +1526,7 @@ func (s *Server) handleChatMessage(handler *ControlHandler, sessionID uint32, ch
 
 	// Validate and sanitize message
 	text := sanitizeText(strings.TrimSpace(chat.Text))
-	if len(text) == 0 || len(text) > 2000 {
+	if len(text) == 0 || utf8.RuneCountInString(text) > maxChatMessageRunes {
 		return // empty or too long, silently drop
 	}
 
@@ -1680,6 +1680,20 @@ func sanitizeText(s string) string {
 		}
 		return r
 	}, s)
+}
+
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	count := 0
+	for index := range s {
+		if count == limit {
+			return s[:index]
+		}
+		count++
+	}
+	return s
 }
 
 func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, st datastore.DataProviderFactory, conn net.Conn) {
