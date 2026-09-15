@@ -1,12 +1,15 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
 const configDirName = "gospeak"
+
+var errExclusiveConfigPublicationUnsupported = errors.New("atomic no-clobber config publication is unsupported on this platform")
 
 func configFilePath(name string) (string, error) {
 	dir, err := os.UserConfigDir()
@@ -24,42 +27,45 @@ func legacyFilePath(name string) string {
 	return filepath.Join(filepath.Dir(executable), name)
 }
 
-func writePrivateFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0700); err != nil { //nolint:gosec // private directories require owner execute permission
-		return fmt.Errorf("secure config directory: %w", err)
-	}
+type privateFileSnapshot struct {
+	data     []byte
+	closeFn  func() error
+	verifyFn func() error
+	removeFn func() error
+}
 
-	temporary, err := os.CreateTemp(dir, ".gospeak-*")
+func (snapshot *privateFileSnapshot) Close() error {
+	if snapshot.closeFn == nil {
+		return nil
+	}
+	closeFn := snapshot.closeFn
+	snapshot.closeFn = nil
+	return closeFn()
+}
+
+func (snapshot *privateFileSnapshot) Verify() error {
+	if snapshot.verifyFn == nil {
+		return fmt.Errorf("verify private file: unsupported")
+	}
+	return snapshot.verifyFn()
+}
+
+func (snapshot *privateFileSnapshot) Remove() error {
+	if snapshot.removeFn == nil {
+		return fmt.Errorf("remove private file: unsupported")
+	}
+	if err := snapshot.removeFn(); err != nil {
+		return err
+	}
+	snapshot.removeFn = nil
+	return snapshot.Close()
+}
+
+func readPrivateFile(path string, protectParent bool) ([]byte, error) {
+	snapshot, err := openPrivateFileSnapshot(path, protectParent)
 	if err != nil {
-		return fmt.Errorf("create temporary config: %w", err)
+		return nil, err
 	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-
-	if err := temporary.Chmod(0600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("secure temporary config: %w", err)
-	}
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("write temporary config: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("sync temporary config: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary config: %w", err)
-	}
-	if err := replaceFile(temporaryPath, path); err != nil {
-		return fmt.Errorf("replace config: %w", err)
-	}
-	if err := os.Chmod(path, 0600); err != nil {
-		return fmt.Errorf("secure config: %w", err)
-	}
-	return nil
+	defer func() { _ = snapshot.Close() }()
+	return snapshot.data, nil
 }
