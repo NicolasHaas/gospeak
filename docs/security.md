@@ -216,6 +216,18 @@ graph TB
 
 Every admin operation is checked server-side via `rbac.HasPermission()` before execution. The client's role is determined by the stored user role, and logins require the user's personal token.
 
+### Moderation and ban privacy
+
+- Moderators may kick ordinary users only. They cannot kick moderators or administrators and cannot create, inspect, or remove bans.
+- Administrators may kick or ban ordinary users, moderators, and other administrators. Self-kick and self-ban are rejected.
+- The administrator provisioned through the bootstrap credential is the remote recovery anchor: it cannot be remotely banned or demoted. Operator-local database recovery remains possible. A later exact-address ban also does not disconnect or block this account.
+- An account ban is identity-only, terminates all current sessions for that account, and is synchronized with authentication so a racing reconnect cannot publish a new session. Zero duration means permanent; positive durations are capped at ten years and invalid values are rejected.
+- An IP ban is a separate, explicit administrator choice tied to one selected live session. It stores one canonical exact address only; it never expands to a subnet. IPv4-mapped IPv6 addresses are normalized to IPv4.
+- Exact-address bans can affect unrelated users behind a shared NAT or VPN. The client warns before creating one, and all matching non-bootstrap sessions are disconnected.
+- Normal kicks and account bans never persist an IP address. Client-supplied moderation reasons are neither persisted, logged, nor echoed to affected connections; disconnect notices are generic. Runtime address use for connection handling and rate limiting remains in memory.
+- Upgrading removes legacy ban reasons and clears legacy IP data that was not created through the explicit IP-ban action.
+- Active account and exact-address bans can be listed in bounded cursor pages and removed only by administrators.
+
 ## Password Hashing
 
 Used internally for potential future password-based auth:
