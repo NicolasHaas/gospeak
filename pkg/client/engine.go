@@ -269,6 +269,8 @@ type Engine struct {
 	OnScreenFrame      func(img image.Image)
 	OnTokenCreated     func(token string)
 	OnRoleChanged      func(success bool, message string)
+	OnBanList          func(bans []pb.BanInfo, hasMore bool)
+	OnUnban            func(success bool)
 	OnAutoToken        func(token string) // called when server auto-generates a token for this user
 	OnExportData       func(dataType, data string)
 	OnImportResult     func(success bool, message string)
@@ -1209,6 +1211,18 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.SetUserRoleResp.Success, msg.SetUserRoleResp.Message) })
 		}
 
+	case msg.ListBansResp != nil:
+		if callback := e.OnBanList; callback != nil {
+			bans := append([]pb.BanInfo(nil), msg.ListBansResp.Bans...)
+			hasMore := msg.ListBansResp.HasMore
+			e.enqueueGenerationCallbackLocked(g, func() { callback(bans, hasMore) })
+		}
+
+	case msg.UnbanResp != nil:
+		if callback := e.OnUnban; callback != nil {
+			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.UnbanResp.Success) })
+		}
+
 	case msg.ExportDataResp != nil:
 		if callback := e.OnExportData; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.ExportDataResp.Type, msg.ExportDataResp.Data) })
@@ -1675,8 +1689,20 @@ func (e *Engine) KickUser(userID int64, reason string) error {
 	})
 }
 
-// BanUser sends a ban request (admin only).
+// BanUser sends an account-only ban request (admin only).
 func (e *Engine) BanUser(userID int64, reason string, durationSeconds int64) error {
+	return e.banUser(userID, 0, reason, durationSeconds)
+}
+
+// BanUserWithIP bans an account and the exact address of one selected live session.
+func (e *Engine) BanUserWithIP(userID int64, sessionID uint32, reason string, durationSeconds int64) error {
+	if sessionID == 0 {
+		return fmt.Errorf("IP ban requires a live session")
+	}
+	return e.banUser(userID, sessionID, reason, durationSeconds)
+}
+
+func (e *Engine) banUser(userID int64, ipBanSessionID uint32, reason string, durationSeconds int64) error {
 	g, ctrl, ok := e.beginControlOperation()
 	if !ok {
 		return fmt.Errorf("not connected")
@@ -1684,8 +1710,44 @@ func (e *Engine) BanUser(userID int64, reason string, durationSeconds int64) err
 	defer g.wg.Done()
 
 	return ctrl.Send(&pb.ControlMessage{
-		BanUserReq: &pb.BanUserRequest{UserID: userID, Reason: reason, DurationSeconds: durationSeconds},
+		BanUserReq: &pb.BanUserRequest{
+			UserID:          userID,
+			Reason:          reason,
+			DurationSeconds: durationSeconds,
+			IPBanSessionID:  ipBanSessionID,
+		},
 	})
+}
+
+// ListBans requests active account and exact-address bans (admin only).
+func (e *Engine) ListBans() error {
+	return e.ListBansAfter(0)
+}
+
+// ListBansAfter requests the next bounded page after one ban ID (admin only).
+func (e *Engine) ListBansAfter(afterID int64) error {
+	if afterID < 0 {
+		return fmt.Errorf("invalid ban cursor")
+	}
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
+	return ctrl.Send(&pb.ControlMessage{ListBansReq: &pb.ListBansRequest{AfterID: afterID, Limit: 100}})
+}
+
+// Unban removes one ban by ID (admin only).
+func (e *Engine) Unban(banID int64) error {
+	if banID <= 0 {
+		return fmt.Errorf("invalid ban ID")
+	}
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
+	return ctrl.Send(&pb.ControlMessage{UnbanReq: &pb.UnbanRequest{BanID: banID}})
 }
 
 // Disconnect disconnects from the server.
