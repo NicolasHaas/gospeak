@@ -104,8 +104,56 @@ func TestMigrationRepairsVersionEightMissingTokenTimestamp(t *testing.T) {
 	if err := store.DB.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatalf("read repaired schema version: %v", err)
 	}
-	if version != 9 {
-		t.Fatalf("repaired schema version = %d, want 9", version)
+	if version != 10 {
+		t.Fatalf("repaired schema version = %d, want 10", version)
+	}
+}
+
+func TestMigrationTenClearsLegacyBanNetworkDataAndReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-bans.db")
+	store, err := NewProviderFactory(path)
+	if err != nil {
+		t.Fatalf("create current datastore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close current datastore: %v", err)
+	}
+
+	raw := openRawSQLite(t, path)
+	if _, err := raw.ExecContext(context.Background(), `
+		DROP TABLE bans;
+		CREATE TABLE bans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			ip TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			banned_by INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT INTO bans (user_id, ip, reason, banned_by) VALUES (7, '192.0.2.7', 'legacy reason', 1);
+		INSERT INTO bans (user_id, ip, reason, banned_by) VALUES (0, '198.51.100.8', 'implicit legacy IP ban', 1);
+		UPDATE schema_migrations SET version = 9;
+	`); err != nil {
+		t.Fatalf("create legacy ban fixture: %v", err)
+	}
+	closeRawSQLite(t, raw)
+
+	store, err = NewProviderFactory(path)
+	if err != nil {
+		t.Fatalf("migrate legacy bans: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if sqliteColumnExists(t, store.DB, "bans", "reason") {
+		t.Fatal("legacy ban reason column survived privacy migration")
+	}
+	var count int
+	var ip string
+	if err := store.DB.QueryRowContext(context.Background(), "SELECT COUNT(*), COALESCE(MAX(ip), '') FROM bans").Scan(&count, &ip); err != nil {
+		t.Fatalf("read migrated bans: %v", err)
+	}
+	if count != 1 || ip != "" {
+		t.Fatalf("migrated bans count=%d ip=%q, want one account-only ban", count, ip)
 	}
 }
 

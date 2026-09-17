@@ -97,9 +97,12 @@ type Server struct {
 	authLimiter             *authRateLimiter
 	accountProvisionLimiter *accountProvisionLimiter
 	bootstrapMu             sync.Mutex
+	remoteModerationMu      sync.Mutex
 	sessionBanMu            sync.Mutex
 	sessionBanChecks        map[int64]int
 	sessionBanPending       map[int64]bool
+	ipBanChecks             map[string]int
+	ipBanPending            map[string]bool
 	preAuthMu               sync.Mutex
 	acceptedConns           map[net.Conn]trackedConn
 	preAuthCount            map[preAuthPlane]int
@@ -179,6 +182,8 @@ func New(cfg Config, deps Dependencies) *Server {
 		capacityLogNow:          time.Now,
 		sessionBanChecks:        make(map[int64]int),
 		sessionBanPending:       make(map[int64]bool),
+		ipBanChecks:             make(map[string]int),
+		ipBanPending:            make(map[string]bool),
 		controlBudgets:          make(map[uint32]*controlMessageLimiter),
 		controlUserBudgets:      controlUserBudgets,
 		controlGlobalBudget:     controlGlobalBudget,
@@ -416,12 +421,12 @@ func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) 
 		select {
 		case frame := <-client.outbound:
 			if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
-				slog.Error("set screen write deadline", "session", sessionID, "err", err)
+				slog.Error("set screen write deadline", "session", sessionID)
 				s.removeScreenConn(sessionID, client)
 				return
 			}
 			if err := protocol.WriteScreenPacketFrame(client.conn, frame); err != nil {
-				slog.Warn("screen write failed", "session", sessionID, "err", err)
+				slog.Warn("screen write failed", "session", sessionID)
 				s.removeScreenConn(sessionID, client)
 				return
 			}

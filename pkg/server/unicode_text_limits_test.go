@@ -108,71 +108,58 @@ func TestChatMessagesUseRuneLimits(t *testing.T) {
 	}
 }
 
-func TestModerationReasonsTruncateAtRuneBoundary(t *testing.T) {
+func TestModerationResponsesDoNotEchoReasons(t *testing.T) {
 	for _, action := range []struct {
 		name string
 		ban  bool
+		want string
 	}{
-		{name: "kick"},
-		{name: "ban", ban: true},
+		{name: "kick", want: "you have been kicked"},
+		{name: "ban", ban: true, want: "you have been banned"},
 	} {
-		for _, reasonRunes := range []int{maxModerationReasonRunes, maxModerationReasonRunes + 1} {
-			name := "at limit"
-			if reasonRunes > maxModerationReasonRunes {
-				name = "over limit"
+		t.Run(action.name, func(t *testing.T) {
+			srv, st, handler := newTestServer(t)
+			adminUser, err := st.NonTx().CreateUser("admin-"+action.name, model.RoleAdmin)
+			if err != nil {
+				t.Fatalf("CreateUser(admin): %v", err)
 			}
-			t.Run(action.name+" "+name, func(t *testing.T) {
-				srv, st, handler := newTestServer(t)
-				adminUser, err := st.NonTx().CreateUser("admin-"+action.name, model.RoleAdmin)
-				if err != nil {
-					t.Fatalf("CreateUser(admin): %v", err)
-				}
-				targetUser, err := st.NonTx().CreateUser("target-"+action.name, model.RoleUser)
-				if err != nil {
-					t.Fatalf("CreateUser(target): %v", err)
-				}
-				admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
-				target := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
-				serverConn, clientConn := net.Pipe()
-				t.Cleanup(func() { _ = clientConn.Close() })
-				handler.setConn(target.ID, serverConn)
+			targetUser, err := st.NonTx().CreateUser("target-"+action.name, model.RoleUser)
+			if err != nil {
+				t.Fatalf("CreateUser(target): %v", err)
+			}
+			admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+			target := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
+			serverConn, clientConn := net.Pipe()
+			t.Cleanup(func() { _ = clientConn.Close() })
+			handler.setConn(target.ID, serverConn)
 
-				if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-					t.Fatalf("SetReadDeadline(): %v", err)
-				}
-				type readResult struct {
-					response *pb.ControlMessage
-					err      error
-				}
-				readDone := make(chan readResult, 1)
-				go func() {
-					response, readErr := protocol.ReadControlMessage(clientConn)
-					readDone <- readResult{response: response, err: readErr}
-				}()
+			if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatalf("SetReadDeadline(): %v", err)
+			}
+			type readResult struct {
+				response *pb.ControlMessage
+				err      error
+			}
+			readDone := make(chan readResult, 1)
+			go func() {
+				response, readErr := protocol.ReadControlMessage(clientConn)
+				readDone <- readResult{response: response, err: readErr}
+			}()
 
-				reason := strings.Repeat("界", reasonRunes)
-				if action.ban {
-					srv.handleBanUser(handler, admin.ID, &pb.BanUserRequest{UserID: targetUser.ID, Reason: reason}, st, &nopConn{})
-				} else {
-					srv.handleKickUser(handler, admin.ID, &pb.KickUserRequest{UserID: targetUser.ID, Reason: reason}, &nopConn{})
-				}
+			reason := "sensitive reason containing 203.0.113.77 and 界"
+			if action.ban {
+				srv.handleBanUser(handler, admin.ID, &pb.BanUserRequest{UserID: targetUser.ID, Reason: reason}, st, &nopConn{})
+			} else {
+				srv.handleKickUser(handler, admin.ID, &pb.KickUserRequest{UserID: targetUser.ID, Reason: reason}, st, &nopConn{})
+			}
 
-				result := <-readDone
-				if result.err != nil {
-					t.Fatalf("ReadControlMessage(): %v", result.err)
-				}
-				if result.response.ErrorResponse == nil {
-					t.Fatalf("response = %#v, want moderation disconnect", result.response)
-				}
-				prefix := "you have been kicked: "
-				if action.ban {
-					prefix = "you have been banned: "
-				}
-				want := prefix + strings.Repeat("界", maxModerationReasonRunes)
-				if got := result.response.ErrorResponse.Message; got != want || !utf8.ValidString(got) {
-					t.Fatalf("message = %q (valid UTF-8: %t), want %d-rune reason", got, utf8.ValidString(got), maxModerationReasonRunes)
-				}
-			})
-		}
+			result := <-readDone
+			if result.err != nil {
+				t.Fatalf("ReadControlMessage(): %v", result.err)
+			}
+			if result.response.ErrorResponse == nil || result.response.ErrorResponse.Message != action.want {
+				t.Fatalf("response = %#v, want generic moderation disconnect %q", result.response, action.want)
+			}
+		})
 	}
 }

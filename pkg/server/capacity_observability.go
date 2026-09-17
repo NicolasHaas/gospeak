@@ -252,22 +252,22 @@ func (s *Server) controlBudgetSnapshot() controlBudgetSnapshot {
 	return snapshot
 }
 
-func (s *Server) logControlReadFailure(remote, stage string) {
+func (s *Server) logControlReadFailure(_ string, stage string) {
 	s.metrics.ControlInvalidMessages.Add(1)
 	key := "control_read|control|" + stage
 	suppressed, ok := s.takeCapacityLogSlot(key)
 	if !ok {
 		return
 	}
-	slog.Warn("invalid control message rejected", "remote", remote, "stage", stage, "suppressed", suppressed)
+	slog.Warn("invalid control message rejected", "stage", stage, "suppressed", suppressed)
 }
 
-func (s *Server) logAuthenticationFailure(remote, stage string) {
+func (s *Server) logAuthenticationFailure(_ string, stage string) {
 	suppressed, ok := s.takeCapacityLogSlot("authentication_failure|" + stage)
 	if !ok {
 		return
 	}
-	slog.Warn("authentication failed", "stage", stage, "remote", remote, "suppressed", suppressed, "plane", "control")
+	slog.Warn("authentication failed", "stage", stage, "suppressed", suppressed, "plane", "control")
 }
 
 func (s *Server) recordScreenAuthRejection(remote, reason string) {
@@ -287,13 +287,13 @@ func (s *Server) recordScreenPacketRejection(remote string) {
 	s.logScreenRejection("input", "invalid_packet", remote)
 }
 
-func (s *Server) logScreenRejection(stage, reason, remote string) {
+func (s *Server) logScreenRejection(stage, reason, _ string) {
 	key := "screen_rejection|" + stage + "|" + reason
 	suppressed, ok := s.takeCapacityLogSlot(key)
 	if !ok {
 		return
 	}
-	slog.Warn("screen message rejected", "stage", stage, "reason", reason, "remote", remote, "suppressed", suppressed)
+	slog.Warn("screen message rejected", "stage", stage, "reason", reason, "suppressed", suppressed)
 }
 
 func (s *Server) takeCapacityLogSlot(key string) (int64, bool) {
@@ -319,7 +319,7 @@ func (s *Server) takeCapacityLogSlot(key string) (int64, bool) {
 // per interval for each bounded kind/plane/reason tuple. Metrics still count
 // every rejection, so an attacker cannot amplify logs by repeatedly hitting a
 // limit.
-func (s *Server) logCapacityLimit(kind, plane, reason, remote string, current, limit int) {
+func (s *Server) logCapacityLimit(kind, plane, reason, _ string, current, limit int) {
 	key := fmt.Sprintf("%s|%s|%s", kind, plane, reason)
 	suppressed, ok := s.takeCapacityLogSlot(key)
 	if !ok {
@@ -328,7 +328,6 @@ func (s *Server) logCapacityLimit(kind, plane, reason, remote string, current, l
 	attrs := []any{
 		"kind", kind,
 		"reason", reason,
-		"remote", remote,
 		"current", current,
 		"limit", limit,
 		"suppressed", suppressed,

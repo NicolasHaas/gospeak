@@ -1141,103 +1141,28 @@ func TestScopedUserPersonalTokenPreservesChannelScope(t *testing.T) {
 	}
 }
 
-func TestCreateBan(t *testing.T) {
+func TestCreateUserBan(t *testing.T) {
 	t.Parallel()
-
-	type tcase struct {
-		userID    int64
-		ip        string
-		reason    string
-		bannedBy  int64
-		expiredAt time.Time
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
 	}
-
-	tests := map[string]tcase{
-		"minimum_required_fields": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(time.Hour),
-		},
-		"expired_ban": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(-time.Hour),
-		},
-		"ban_self": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  1,
-			expiredAt: time.Now().Add(time.Hour),
-		},
-		"reason_empty": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(time.Hour),
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			store, err := NewTestSqlConn(t)
-			if err != nil {
-				t.Fatalf("failed to open test connection: %v", err)
-			}
-
-			if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
-				t.Fatalf("CreateBan: unexpected error: %v", err)
-			}
-		})
+	if err := store.NonTx().CreateUserBan(1, 2, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateUserBan: unexpected error: %v", err)
 	}
 }
 
 func TestIsUserBanned(t *testing.T) {
 	t.Parallel()
 
-	type tcase struct {
-		userID    int64
-		ip        string
-		reason    string
-		bannedBy  int64
-		expiredAt time.Time
+	tests := map[string]struct {
+		expiresAt time.Time
 		expectBan bool
 		multiBan  bool
-	}
-
-	tests := map[string]tcase{
-		"user_has_valid_ban": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(time.Hour),
-			expectBan: true,
-			multiBan:  false,
-		},
-		"user_ban_expired": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(-time.Hour),
-			expectBan: false,
-			multiBan:  false,
-		},
-		"user_multi_ban": {
-			userID:    1,
-			ip:        "192.0.0.1",
-			reason:    "Bad behavior",
-			bannedBy:  2,
-			expiredAt: time.Now().Add(-time.Hour),
-			expectBan: true,
-			multiBan:  true,
-		},
+	}{
+		"user_has_valid_ban": {expiresAt: time.Now().Add(time.Hour), expectBan: true},
+		"user_ban_expired":   {expiresAt: time.Now().Add(-time.Hour), expectBan: false},
+		"user_multi_ban":     {expiresAt: time.Now().Add(-time.Hour), expectBan: true, multiBan: true},
 	}
 
 	for name, tc := range tests {
@@ -1246,19 +1171,15 @@ func TestIsUserBanned(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
-
-			if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, tc.expiredAt); err != nil {
-				t.Fatalf("CreateBan: unexpected error: %v", err)
+			if err := store.NonTx().CreateUserBan(1, 2, tc.expiresAt); err != nil {
+				t.Fatalf("CreateUserBan: unexpected error: %v", err)
 			}
-			// For the multi ban express the user has one valid and one invalid ban
-			// asserting that the newer valid ban will still cause a positive ban
 			if tc.multiBan {
-				if err := store.NonTx().CreateBan(tc.userID, tc.ip, tc.reason, tc.bannedBy, time.Now().Add(time.Hour)); err != nil {
-					t.Fatalf("CreateBan_Multi: unexpected error: %v", err)
+				if err := store.NonTx().CreateUserBan(1, 2, time.Now().Add(time.Hour)); err != nil {
+					t.Fatalf("CreateUserBan multi: unexpected error: %v", err)
 				}
 			}
-
-			isBanned, err := store.NonTx().IsUserBanned(tc.userID)
+			isBanned, err := store.NonTx().IsUserBanned(1)
 			if err != nil {
 				t.Fatalf("IsUserBanned: unexpected error: %v", err)
 			}

@@ -79,7 +79,7 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			case <-s.ctx.Done():
 				return
 			default:
-				slog.Error("voice read error", "err", err)
+				slog.Error("voice read error")
 				continue
 			}
 		}
@@ -139,7 +139,7 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 
 			_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
 			if err != nil {
-				slog.Debug("voice forward error", "target", memberSID, "err", err)
+				slog.Debug("voice forward error", "target", memberSID)
 			} else {
 				s.metrics.VoicePacketsOut.Add(1)
 				s.metrics.VoiceBytesOut.Add(int64(n))

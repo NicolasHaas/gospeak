@@ -32,6 +32,10 @@ message ControlMessage {
     CreateTokenResponse   create_token_response   = 33;
     KickUserRequest       kick_user_request       = 34;
     BanUserRequest        ban_user_request        = 35;
+    ListBansRequest       list_bans_request       = 53;
+    ListBansResponse      list_bans_response      = 54;
+    UnbanRequest          unban_request           = 55;
+    UnbanResponse         unban_response          = 56;
     ChatMessage           chat_message            = 36;
     ChatMessage           chat_event              = 37;
     ScreenShareStartRequest        screen_share_start_request         = 38;
@@ -87,11 +91,12 @@ message ChannelInfo {
 }
 
 message UserInfo {
-  int64  id       = 1;
+  int64 id = 1;
   string username = 2;
-  string role     = 3;
-  bool   muted    = 4;
-  bool   deafened = 5;
+  string role = 3;
+  bool muted = 4;
+  bool deafened = 5;
+  uint32 session_id = 6;
 }
 
 message ChannelListRequest {}
@@ -163,8 +168,32 @@ message KickUserRequest {
 message BanUserRequest {
   int64  user_id    = 1;
   string reason     = 2;
-  int64  duration_seconds = 3; // 0 = permanent
+  int64  duration_seconds = 3; // 0 = permanent; positive values are capped by the server
+  uint32 ip_ban_session_id = 4; // optional exact control connection to IP-ban
 }
+
+message ListBansRequest {
+  int64 after_id = 1;
+  int32 limit = 2;
+}
+
+message BanInfo {
+  int64 id = 1;
+  int64 user_id = 2;
+  string ip = 3;
+  int64 banned_by = 4;
+  int64 expires_at = 5;
+  int64 created_at = 6;
+}
+
+message ListBansResponse {
+  repeated BanInfo bans = 1;
+  bool has_more = 2;
+}
+
+message UnbanRequest { int64 ban_id = 1; }
+
+message UnbanResponse { bool success = 1; }
 
 message ChatMessage {
   int64 channel_id = 1;

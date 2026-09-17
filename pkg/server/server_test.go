@@ -186,14 +186,22 @@ func TestHandleUserState(t *testing.T) {
 }
 
 func TestHandleKickUserClosesEverySession(t *testing.T) {
-	srv, _, handler := newTestServer(t)
-	admin := mustCreateSession(t, srv.sessions, 1, "admin", model.RoleAdmin)
-	targetOne := mustCreateSession(t, srv.sessions, 2, "target", model.RoleUser)
-	targetTwo := mustCreateSession(t, srv.sessions, 2, "target", model.RoleUser)
+	srv, st, handler := newTestServer(t)
+	adminUser, err := st.NonTx().CreateUser("admin", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser(admin): %v", err)
+	}
+	targetUser, err := st.NonTx().CreateUser("target", model.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	targetOne := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
+	targetTwo := mustCreateSession(t, srv.sessions, targetUser.ID, targetUser.Username, targetUser.Role)
 	connOne := registerTestConn(handler, targetOne.ID)
 	connTwo := registerTestConn(handler, targetTwo.ID)
 
-	srv.handleKickUser(handler, admin.ID, &pb.KickUserRequest{UserID: 2, Reason: "test"}, &nopConn{})
+	srv.handleKickUser(handler, admin.ID, &pb.KickUserRequest{UserID: targetUser.ID, Reason: "test"}, st, &nopConn{})
 
 	requireClosed(t, connOne)
 	requireClosed(t, connTwo)
