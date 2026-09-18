@@ -1528,29 +1528,53 @@ func (a *App) showUserContextMenu(user pb.UserInfo) {
 	}
 
 	if role == "admin" {
-		banBtn := widget.NewButton("Ban User (1h)", func() {
+		banBtn := widget.NewButton("Ban User…", func() {
+			durationEntry := widget.NewEntry()
+			durationEntry.SetText("1h")
+			durationEntry.SetPlaceHolder("Examples: 30m, 1h, 24h")
+			maximumDuration := widget.NewCheck("Use 10 years (maximum)", func(checked bool) {
+				if checked {
+					durationEntry.Disable()
+					return
+				}
+				durationEntry.Enable()
+			})
 			ipBan := widget.NewCheck("Also ban this session's exact IP address", nil)
 			warning := widget.NewLabel("IP bans may also disconnect unrelated people sharing a NAT or VPN. The address is stored only when this option is selected.")
 			warning.Wrapping = fyne.TextWrapWord
 			content := container.NewVBox(
-				widget.NewLabel(fmt.Sprintf("Ban %s for 1 hour?", user.Username)),
+				widget.NewLabel(fmt.Sprintf("Ban %s", user.Username)),
+				container.NewBorder(nil, nil, widget.NewLabel("Duration:"), nil, durationEntry),
+				widget.NewLabel("Use Go-style durations such as 30m, 1h, or 24h."),
+				maximumDuration,
 				ipBan,
 				warning,
 			)
-			dialog.NewCustomConfirm("Ban User", "Ban", "Cancel", content, func(ok bool) {
-				if !ok {
+			var banDialog *dialog.CustomDialog
+			banButton := widget.NewButtonWithIcon("Ban", theme.ConfirmIcon(), func() {
+				durationSeconds, err := banDurationSeconds(durationEntry.Text, maximumDuration.Checked)
+				if err != nil {
+					dialog.ShowError(err, a.window)
 					return
 				}
-				var err error
 				if ipBan.Checked {
-					err = a.engine.BanUserWithIP(user.ID, user.SessionID, "banned by "+a.engine.GetUsername(), 3600)
+					err = a.engine.BanUserWithIP(user.ID, user.SessionID, "banned by "+a.engine.GetUsername(), durationSeconds)
 				} else {
-					err = a.engine.BanUser(user.ID, "banned by "+a.engine.GetUsername(), 3600)
+					err = a.engine.BanUser(user.ID, "banned by "+a.engine.GetUsername(), durationSeconds)
 				}
 				if err != nil {
 					dialog.ShowError(err, a.window)
+					return
 				}
-			}, a.window).Show()
+				banDialog.Hide()
+			})
+			banButton.Importance = widget.DangerImportance
+			cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+				banDialog.Hide()
+			})
+			banDialog = dialog.NewCustomWithoutButtons("Ban User", content, a.window)
+			banDialog.SetButtons([]fyne.CanvasObject{cancelButton, banButton})
+			banDialog.Show()
 		})
 		buttons = append(buttons, banBtn)
 	}
