@@ -1771,6 +1771,7 @@ func (s *Server) handleListBans(sessionID uint32, req *pb.ListBansRequest, st da
 		info := pb.BanInfo{
 			ID:        ban.ID,
 			UserID:    ban.UserID,
+			Username:  ban.Username,
 			IP:        ban.IP,
 			BannedBy:  ban.BannedBy,
 			CreatedAt: ban.CreatedAt.Unix(),

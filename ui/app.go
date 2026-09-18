@@ -1466,21 +1466,13 @@ func (a *App) showBanListDialog(bans []pb.BanInfo, hasMore bool) {
 	}
 	for _, current := range bans {
 		ban := current
-		target := fmt.Sprintf("Account #%d", ban.UserID)
-		if ban.IP != "" {
-			target = "Exact IP: " + ban.IP
-		}
-		expiry := "permanent"
-		if ban.ExpiresAt > 0 {
-			expiry = time.Unix(ban.ExpiresAt, 0).Format("2006-01-02 15:04")
-		}
 		removeBtn := widget.NewButton("Remove", func() {
 			if err := a.engine.Unban(ban.ID); err != nil {
 				dialog.ShowError(err, a.window)
 			}
 		})
 		rows = append(rows, container.NewBorder(nil, nil, nil, removeBtn,
-			widget.NewLabel(fmt.Sprintf("%s — %s", target, expiry))))
+			widget.NewLabel(banListEntryText(ban))))
 	}
 	if hasMore && len(bans) > 0 {
 		afterID := bans[len(bans)-1].ID

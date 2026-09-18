@@ -10,7 +10,8 @@ import (
 type Ban struct {
 	ID        int64     `json:"id"`
 	UserID    int64     `json:"user_id"` // positive for account bans
-	IP        string    `json:"ip"`      // canonical exact address for IP bans
+	Username  string    `json:"username,omitempty"`
+	IP        string    `json:"ip"` // canonical exact address for IP bans
 	BannedBy  int64     `json:"banned_by"`
 	ExpiresAt time.Time `json:"expires_at"` // zero = permanent
 	CreatedAt time.Time `json:"created_at"`

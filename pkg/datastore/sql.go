@@ -1247,10 +1247,11 @@ func (s *baseProvider) ListActiveBans(afterID int64, limit int) ([]model.Ban, bo
 		return nil, false, fmt.Errorf("datastore: invalid ban page")
 	}
 	rows, err := s.QueryContext(context.Background(), `
-		SELECT id, user_id, ip, banned_by, expires_at, created_at
-		FROM bans
-		WHERE id > ? AND (expires_at IS NULL OR expires_at > datetime('now'))
-		ORDER BY id
+		SELECT b.id, b.user_id, COALESCE(u.username, ''), b.ip, b.banned_by, b.expires_at, b.created_at
+		FROM bans b
+		LEFT JOIN users u ON u.id = b.user_id
+		WHERE b.id > ? AND (b.expires_at IS NULL OR b.expires_at > datetime('now'))
+		ORDER BY b.id
 		LIMIT ?
 	`, afterID, limit+1)
 	if err != nil {
@@ -1263,7 +1264,7 @@ func (s *baseProvider) ListActiveBans(afterID int64, limit int) ([]model.Ban, bo
 		var ban model.Ban
 		var expiresAt *string
 		var createdAt string
-		if err := rows.Scan(&ban.ID, &ban.UserID, &ban.IP, &ban.BannedBy, &expiresAt, &createdAt); err != nil {
+		if err := rows.Scan(&ban.ID, &ban.UserID, &ban.Username, &ban.IP, &ban.BannedBy, &expiresAt, &createdAt); err != nil {
 			return nil, false, fmt.Errorf("datastore: scan active ban: %w", err)
 		}
 		ban.CreatedAt, err = parseDBTime(createdAt)

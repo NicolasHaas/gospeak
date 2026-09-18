@@ -176,6 +176,7 @@ type ListBansRequest struct {
 type BanInfo struct {
 	ID        int64  `json:"id"`
 	UserID    int64  `json:"user_id,omitempty"`
+	Username  string `json:"username,omitempty"`
 	IP        string `json:"ip,omitempty"`
 	BannedBy  int64  `json:"banned_by"`
 	ExpiresAt int64  `json:"expires_at,omitempty"`

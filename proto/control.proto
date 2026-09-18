@@ -184,6 +184,7 @@ message BanInfo {
   int64 banned_by = 4;
   int64 expires_at = 5;
   int64 created_at = 6;
+  string username = 7;
 }
 
 message ListBansResponse {

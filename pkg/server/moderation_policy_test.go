@@ -188,6 +188,13 @@ func TestBanManagementResponsesUseSerializedWriter(t *testing.T) {
 		t.Fatalf("CreateUser(admin): %v", err)
 	}
 	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
+	targetUser, err := st.NonTx().CreateUser("serialized-ban-target", model.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+	if err := st.NonTx().CreateUserBan(targetUser.ID, adminUser.ID, time.Time{}); err != nil {
+		t.Fatalf("CreateUserBan: %v", err)
+	}
 	if err := st.NonTx().CreateIPBan("192.0.2.200", adminUser.ID, time.Time{}); err != nil {
 		t.Fatalf("CreateIPBan: %v", err)
 	}
@@ -195,7 +202,7 @@ func TestBanManagementResponsesUseSerializedWriter(t *testing.T) {
 		t.Fatalf("CreateIPBan: %v", err)
 	}
 	bans, _, err := st.NonTx().ListActiveBans(0, datastore.MaxBanPageSize)
-	if err != nil || len(bans) != 2 {
+	if err != nil || len(bans) != 3 {
 		t.Fatalf("ListActiveBans = %#v, %v", bans, err)
 	}
 
@@ -208,6 +215,9 @@ func TestBanManagementResponsesUseSerializedWriter(t *testing.T) {
 	listItem := <-listClient.sendQueue
 	if listItem.message.ListBansResp == nil || len(listItem.message.ListBansResp.Bans) != 1 || !listItem.message.ListBansResp.HasMore {
 		t.Fatalf("queued list response = %#v", listItem.message)
+	}
+	if got := listItem.message.ListBansResp.Bans[0].Username; got != targetUser.Username {
+		t.Fatalf("listed username = %q, want %q", got, targetUser.Username)
 	}
 
 	unbanWire := &bufferConn{}

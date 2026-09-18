@@ -80,10 +80,18 @@ func TestListAndDeleteActiveBansByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTestSqlConn: %v", err)
 	}
-	if err := store.NonTx().CreateUserBan(42, 1, time.Now().Add(time.Hour)); err != nil {
+	admin, err := store.NonTx().CreateUser("ban-list-admin", model.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser(admin): %v", err)
+	}
+	target, err := store.NonTx().CreateUser("named-banned-user", model.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+	if err := store.NonTx().CreateUserBan(target.ID, admin.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateUserBan(active): %v", err)
 	}
-	if err := store.NonTx().CreateIPBan("2001:db8::1", 1, time.Now().Add(-time.Hour)); err != nil {
+	if err := store.NonTx().CreateIPBan("2001:db8::1", admin.ID, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("CreateIPBan(expired): %v", err)
 	}
 
@@ -91,8 +99,8 @@ func TestListAndDeleteActiveBansByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActiveBans: %v", err)
 	}
-	if len(bans) != 1 || bans[0].UserID != 42 || bans[0].IP != "" {
-		t.Fatalf("active bans = %#v, want one account ban", bans)
+	if len(bans) != 1 || bans[0].UserID != target.ID || bans[0].Username != target.Username || bans[0].IP != "" {
+		t.Fatalf("active bans = %#v, want named account ban", bans)
 	}
 	deleted, err := store.NonTx().DeleteBan(bans[0].ID)
 	if err != nil {

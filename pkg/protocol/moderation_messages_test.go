@@ -33,9 +33,9 @@ func TestModerationMessagesRoundTrip(t *testing.T) {
 		},
 		{
 			name: "list bans response",
-			msg:  &pb.ControlMessage{ListBansResp: &pb.ListBansResponse{Bans: []pb.BanInfo{{ID: 3, IP: "192.0.2.1", BannedBy: 1}}, HasMore: true}},
+			msg:  &pb.ControlMessage{ListBansResp: &pb.ListBansResponse{Bans: []pb.BanInfo{{ID: 3, UserID: 7, Username: "banned-user", BannedBy: 1}}, HasMore: true}},
 			check: func(t *testing.T, got *pb.ControlMessage) {
-				if got.ListBansResp == nil || len(got.ListBansResp.Bans) != 1 || got.ListBansResp.Bans[0].IP != "192.0.2.1" || !got.ListBansResp.HasMore {
+				if got.ListBansResp == nil || len(got.ListBansResp.Bans) != 1 || got.ListBansResp.Bans[0].Username != "banned-user" || !got.ListBansResp.HasMore {
 					t.Fatalf("round trip = %#v", got)
 				}
 			},
