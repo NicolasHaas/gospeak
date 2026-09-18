@@ -126,6 +126,8 @@ func controlMessageCost(message *pb.ControlMessage) (string, int) {
 		message.CreateTokenReq != nil,
 		message.KickUserReq != nil,
 		message.BanUserReq != nil,
+		message.ListBansReq != nil,
+		message.UnbanReq != nil,
 		message.SetUserRoleReq != nil,
 		message.ExportDataReq != nil,
 		message.ImportChannelsReq != nil,

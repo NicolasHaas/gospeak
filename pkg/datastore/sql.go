@@ -346,10 +346,10 @@ func (s *ProviderFactory) migrate() error {
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id    INTEGER NOT NULL DEFAULT 0,
 		ip         TEXT    NOT NULL DEFAULT '',
-		reason     TEXT    NOT NULL DEFAULT '',
 		banned_by  INTEGER NOT NULL DEFAULT 0,
 		expires_at TEXT,
-		created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+		created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+		CHECK ((user_id > 0 AND ip = '') OR (user_id = 0 AND ip <> ''))
 	);
 
 	CREATE TABLE IF NOT EXISTS messages (
@@ -451,6 +451,34 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: "ALTER TABLE users ADD COLUMN personal_token_created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'", table: "users", column: "personal_token_created_at"},
 				{statement: "UPDATE users SET personal_token_created_at = datetime('now') WHERE personal_token_created_at = '1970-01-01 00:00:00'"},
 				{statement: "CREATE INDEX IF NOT EXISTS idx_users_personal_token_hash ON users(personal_token_hash)"},
+			},
+		},
+		{
+			version: 10,
+			steps: []migrationStep{
+				{statement: `CREATE TABLE IF NOT EXISTS bans (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					user_id INTEGER NOT NULL DEFAULT 0,
+					ip TEXT NOT NULL DEFAULT '',
+					banned_by INTEGER NOT NULL DEFAULT 0,
+					expires_at TEXT,
+					created_at TEXT NOT NULL DEFAULT (datetime('now'))
+				)`},
+				{statement: `CREATE TABLE bans_v10 (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					user_id INTEGER NOT NULL DEFAULT 0,
+					ip TEXT NOT NULL DEFAULT '',
+					banned_by INTEGER NOT NULL DEFAULT 0,
+					expires_at TEXT,
+					created_at TEXT NOT NULL DEFAULT (datetime('now')),
+					CHECK ((user_id > 0 AND ip = '') OR (user_id = 0 AND ip <> ''))
+				)`},
+				{statement: `INSERT INTO bans_v10 (id, user_id, ip, banned_by, expires_at, created_at)
+					SELECT id, user_id, '', banned_by, expires_at, created_at FROM bans WHERE user_id > 0`},
+				{statement: "DROP TABLE bans"},
+				{statement: "ALTER TABLE bans_v10 RENAME TO bans"},
+				{statement: "CREATE INDEX idx_bans_ip ON bans(ip) WHERE user_id = 0"},
+				{statement: "CREATE INDEX idx_bans_user_id ON bans(user_id) WHERE user_id > 0"},
 			},
 		},
 	}
@@ -733,6 +761,37 @@ func (s *baseProvider) ListUsers() ([]model.User, error) {
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+// IsBootstrapUser reports whether userID owns the durable bootstrap marker.
+func (s *baseProvider) IsBootstrapUser(userID int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	var exists int
+	if err := s.QueryRowContext(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM tokens WHERE created_by = ? AND kind = ? AND use_count = 1)",
+		userID, tokenKindBootstrap,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("datastore: inspect bootstrap user: %w", err)
+	}
+	return exists != 0, nil
+}
+
+// BootstrapUserID returns the durable bootstrap owner after first use.
+func (s *baseProvider) BootstrapUserID() (int64, bool, error) {
+	var userID int64
+	err := s.QueryRowContext(context.Background(),
+		"SELECT created_by FROM tokens WHERE kind = ? AND created_by > 0 AND use_count = 1 LIMIT 1",
+		tokenKindBootstrap,
+	).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("datastore: read bootstrap user: %w", err)
+	}
+	return userID, true, nil
 }
 
 // ---- Channels ----
@@ -1121,16 +1180,32 @@ func (s *txProvider) ProvisionBootstrapUser(hash, username, personalTokenHash st
 
 // ---- Bans ----
 
-// CreateBan adds a ban record.
-func (s *baseProvider) CreateBan(userID int64, ip, reason string, bannedBy int64, expiresAt time.Time) error {
+// CreateUserBan adds an account-only ban record.
+func (s *baseProvider) CreateUserBan(userID, bannedBy int64, expiresAt time.Time) error {
+	if userID <= 0 {
+		return fmt.Errorf("datastore: create user ban: invalid user ID")
+	}
+	return s.createBan(userID, "", bannedBy, expiresAt)
+}
+
+// CreateIPBan adds one canonical exact-address ban record.
+func (s *baseProvider) CreateIPBan(ip string, bannedBy int64, expiresAt time.Time) error {
+	canonical, err := model.CanonicalIPAddress(ip)
+	if err != nil {
+		return fmt.Errorf("datastore: create IP ban: %w", err)
+	}
+	return s.createBan(0, canonical, bannedBy, expiresAt)
+}
+
+func (s *baseProvider) createBan(userID int64, ip string, bannedBy int64, expiresAt time.Time) error {
 	var expStr *string
 	if !expiresAt.IsZero() {
 		es := formatDBTime(expiresAt)
 		expStr = &es
 	}
 	_, err := s.ExecContext(context.Background(),
-		"INSERT INTO bans (user_id, ip, reason, banned_by, expires_at) VALUES (?, ?, ?, ?, ?)",
-		userID, ip, reason, bannedBy, expStr)
+		"INSERT INTO bans (user_id, ip, banned_by, expires_at) VALUES (?, ?, ?, ?)",
+		userID, ip, bannedBy, expStr)
 	if err != nil {
 		return fmt.Errorf("datastore: create ban: %w", err)
 	}
@@ -1150,7 +1225,87 @@ func (s *baseProvider) IsUserBanned(userID int64) (bool, error) {
 	return count > 0, nil
 }
 
-// ---- Bans ----
+// IsIPBanned checks one exact canonical address against active bans.
+func (s *baseProvider) IsIPBanned(ip string) (bool, error) {
+	canonical, err := model.CanonicalIPAddress(ip)
+	if err != nil {
+		return false, fmt.Errorf("datastore: check IP ban: %w", err)
+	}
+	var count int
+	if err := s.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM bans WHERE user_id = 0 AND ip = ? AND (expires_at IS NULL OR expires_at > datetime('now'))",
+		canonical,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("datastore: check IP ban: %w", err)
+	}
+	return count > 0, nil
+}
+
+// ListActiveBans returns one bounded page without user-controlled reason text.
+func (s *baseProvider) ListActiveBans(afterID int64, limit int) ([]model.Ban, bool, error) {
+	if afterID < 0 || limit <= 0 || limit > MaxBanPageSize {
+		return nil, false, fmt.Errorf("datastore: invalid ban page")
+	}
+	rows, err := s.QueryContext(context.Background(), `
+		SELECT b.id, b.user_id, COALESCE(u.username, ''), b.ip, b.banned_by, b.expires_at, b.created_at
+		FROM bans b
+		LEFT JOIN users u ON u.id = b.user_id
+		WHERE b.id > ? AND (b.expires_at IS NULL OR b.expires_at > datetime('now'))
+		ORDER BY b.id
+		LIMIT ?
+	`, afterID, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("datastore: list active bans: %w", err)
+	}
+	defer rows.Close()
+
+	bans := make([]model.Ban, 0)
+	for rows.Next() {
+		var ban model.Ban
+		var expiresAt *string
+		var createdAt string
+		if err := rows.Scan(&ban.ID, &ban.UserID, &ban.Username, &ban.IP, &ban.BannedBy, &expiresAt, &createdAt); err != nil {
+			return nil, false, fmt.Errorf("datastore: scan active ban: %w", err)
+		}
+		ban.CreatedAt, err = parseDBTime(createdAt)
+		if err != nil {
+			return nil, false, fmt.Errorf("datastore: parse ban creation time: %w", err)
+		}
+		if expiresAt != nil {
+			ban.ExpiresAt, err = parseDBTime(*expiresAt)
+			if err != nil {
+				return nil, false, fmt.Errorf("datastore: parse ban expiration: %w", err)
+			}
+		}
+		bans = append(bans, ban)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("datastore: iterate active bans: %w", err)
+	}
+	hasMore := len(bans) > limit
+	if hasMore {
+		bans = bans[:limit]
+	}
+	return bans, hasMore, nil
+}
+
+// DeleteBan removes one immutable ban record by ID.
+func (s *baseProvider) DeleteBan(id int64) (bool, error) {
+	if id <= 0 {
+		return false, nil
+	}
+	result, err := s.ExecContext(context.Background(), "DELETE FROM bans WHERE id = ?", id)
+	if err != nil {
+		return false, fmt.Errorf("datastore: delete ban: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("datastore: delete ban rows affected: %w", err)
+	}
+	return rows == 1, nil
+}
+
+// ---- Messages ----
 
 func (s *baseProvider) CreateMessage(message *model.Message) error {
 	if err := message.Validate(); err != nil {

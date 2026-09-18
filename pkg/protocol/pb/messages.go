@@ -22,6 +22,10 @@ type ControlMessage struct {
 	CreateTokenResp     *CreateTokenResponse           `json:"create_token_response,omitempty"`
 	KickUserReq         *KickUserRequest               `json:"kick_user_request,omitempty"`
 	BanUserReq          *BanUserRequest                `json:"ban_user_request,omitempty"`
+	ListBansReq         *ListBansRequest               `json:"list_bans_request,omitempty"`
+	ListBansResp        *ListBansResponse              `json:"list_bans_response,omitempty"`
+	UnbanReq            *UnbanRequest                  `json:"unban_request,omitempty"`
+	UnbanResp           *UnbanResponse                 `json:"unban_response,omitempty"`
 	ChatMsg             *ChatMessage                   `json:"chat_message,omitempty"`
 	ChatEvent           *ChatMessage                   `json:"chat_event,omitempty"`
 	ScreenShareStartReq *ScreenShareStartRequest       `json:"screen_share_start_request,omitempty"`
@@ -77,11 +81,12 @@ type ChannelInfo struct {
 }
 
 type UserInfo struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	Muted    bool   `json:"muted"`
-	Deafened bool   `json:"deafened"`
+	SessionID uint32 `json:"session_id,omitempty"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Role      string `json:"role"`
+	Muted     bool   `json:"muted"`
+	Deafened  bool   `json:"deafened"`
 }
 
 type ChannelListRequest struct{}
@@ -160,6 +165,35 @@ type BanUserRequest struct {
 	UserID          int64  `json:"user_id"`
 	Reason          string `json:"reason"`
 	DurationSeconds int64  `json:"duration_seconds"`
+	IPBanSessionID  uint32 `json:"ip_ban_session_id,omitempty"`
+}
+
+type ListBansRequest struct {
+	AfterID int64 `json:"after_id,omitempty"`
+	Limit   int   `json:"limit,omitempty"`
+}
+
+type BanInfo struct {
+	ID        int64  `json:"id"`
+	UserID    int64  `json:"user_id,omitempty"`
+	Username  string `json:"username,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	BannedBy  int64  `json:"banned_by"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+type ListBansResponse struct {
+	Bans    []BanInfo `json:"bans"`
+	HasMore bool      `json:"has_more,omitempty"`
+}
+
+type UnbanRequest struct {
+	BanID int64 `json:"ban_id"`
+}
+
+type UnbanResponse struct {
+	Success bool `json:"success"`
 }
 
 // ----- Generic -----

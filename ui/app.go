@@ -559,6 +559,22 @@ func (a *App) bindEvents() {
 		})
 	}
 
+	a.engine.OnBanList = func(bans []pb.BanInfo, hasMore bool) {
+		fyne.Do(func() { a.showBanListDialog(bans, hasMore) })
+	}
+
+	a.engine.OnUnban = func(success bool) {
+		fyne.Do(func() {
+			if !success {
+				dialog.ShowInformation("Remove Ban", "The ban no longer exists.", a.window)
+				return
+			}
+			if err := a.engine.ListBans(); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+		})
+	}
+
 	a.engine.OnAutoToken = func(token string) {
 		a.connectToken = token
 		fyne.Do(func() {
@@ -1100,6 +1116,20 @@ func (a *App) showServerSettings() {
 		)
 	}
 
+	// --- Ban management (admin) ---
+	if role == "admin" {
+		manageBansBtn := widget.NewButton("Manage Bans", func() {
+			if err := a.engine.ListBans(); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+		})
+		sections = append(sections,
+			widget.NewLabelWithStyle("Moderation", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			manageBansBtn,
+			widget.NewSeparator(),
+		)
+	}
+
 	// --- Export / Import (admin) ---
 	if role == "admin" {
 		exportChBtn := widget.NewButton("Export Channels (YAML)", func() {
@@ -1429,6 +1459,36 @@ func (a *App) joinSelectedChannel() {
 	a.updateJoinChannelButton()
 }
 
+func (a *App) showBanListDialog(bans []pb.BanInfo, hasMore bool) {
+	rows := make([]fyne.CanvasObject, 0, len(bans)+1)
+	if len(bans) == 0 {
+		rows = append(rows, widget.NewLabel("No active bans."))
+	}
+	for _, current := range bans {
+		ban := current
+		removeBtn := widget.NewButton("Remove", func() {
+			if err := a.engine.Unban(ban.ID); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+		})
+		rows = append(rows, container.NewBorder(nil, nil, nil, removeBtn,
+			widget.NewLabel(banListEntryText(ban))))
+	}
+	if hasMore && len(bans) > 0 {
+		afterID := bans[len(bans)-1].ID
+		rows = append(rows, widget.NewButton("Next page", func() {
+			if err := a.engine.ListBansAfter(afterID); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+		}))
+	}
+	scroll := container.NewVScroll(container.NewVBox(rows...))
+	scroll.SetMinSize(fyne.NewSize(430, 300))
+	d := dialog.NewCustom("Active Bans", "Close", scroll, a.window)
+	d.Resize(fyne.NewSize(470, 360))
+	d.Show()
+}
+
 func (a *App) showUserContextMenu(user pb.UserInfo) {
 	role := a.engine.GetRole()
 	var buttons []fyne.CanvasObject
@@ -1446,11 +1506,13 @@ func (a *App) showUserContextMenu(user pb.UserInfo) {
 		)
 	}
 
-	if role == "admin" || role == "moderator" {
+	if role == "admin" || (role == "moderator" && user.Role == "user") {
 		kickBtn := widget.NewButton("Kick User", func() {
 			dialog.ShowConfirm("Kick User", fmt.Sprintf("Kick %s?", user.Username), func(ok bool) {
 				if ok {
-					_ = a.engine.KickUser(user.ID, "kicked by "+a.engine.GetUsername())
+					if err := a.engine.KickUser(user.ID, "kicked by "+a.engine.GetUsername()); err != nil {
+						dialog.ShowError(err, a.window)
+					}
 				}
 			}, a.window)
 		})
@@ -1458,12 +1520,53 @@ func (a *App) showUserContextMenu(user pb.UserInfo) {
 	}
 
 	if role == "admin" {
-		banBtn := widget.NewButton("Ban User (1h)", func() {
-			dialog.ShowConfirm("Ban User", fmt.Sprintf("Ban %s for 1 hour?", user.Username), func(ok bool) {
-				if ok {
-					_ = a.engine.BanUser(user.ID, "banned by "+a.engine.GetUsername(), 3600)
+		banBtn := widget.NewButton("Ban User…", func() {
+			durationEntry := widget.NewEntry()
+			durationEntry.SetText("1h")
+			durationEntry.SetPlaceHolder("Examples: 30m, 1h, 24h")
+			maximumDuration := widget.NewCheck("Use 10 years (maximum)", func(checked bool) {
+				if checked {
+					durationEntry.Disable()
+					return
 				}
-			}, a.window)
+				durationEntry.Enable()
+			})
+			ipBan := widget.NewCheck("Also ban this session's exact IP address", nil)
+			warning := widget.NewLabel("IP bans may also disconnect unrelated people sharing a NAT or VPN. The address is stored only when this option is selected.")
+			warning.Wrapping = fyne.TextWrapWord
+			content := container.NewVBox(
+				widget.NewLabel(fmt.Sprintf("Ban %s", user.Username)),
+				container.NewBorder(nil, nil, widget.NewLabel("Duration:"), nil, durationEntry),
+				widget.NewLabel("Use Go-style durations such as 30m, 1h, or 24h."),
+				maximumDuration,
+				ipBan,
+				warning,
+			)
+			var banDialog *dialog.CustomDialog
+			banButton := widget.NewButtonWithIcon("Ban", theme.ConfirmIcon(), func() {
+				durationSeconds, err := banDurationSeconds(durationEntry.Text, maximumDuration.Checked)
+				if err != nil {
+					dialog.ShowError(err, a.window)
+					return
+				}
+				if ipBan.Checked {
+					err = a.engine.BanUserWithIP(user.ID, user.SessionID, "banned by "+a.engine.GetUsername(), durationSeconds)
+				} else {
+					err = a.engine.BanUser(user.ID, "banned by "+a.engine.GetUsername(), durationSeconds)
+				}
+				if err != nil {
+					dialog.ShowError(err, a.window)
+					return
+				}
+				banDialog.Hide()
+			})
+			banButton.Importance = widget.DangerImportance
+			cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+				banDialog.Hide()
+			})
+			banDialog = dialog.NewCustomWithoutButtons("Ban User", content, a.window)
+			banDialog.SetButtons([]fyne.CanvasObject{cancelButton, banButton})
+			banDialog.Show()
 		})
 		buttons = append(buttons, banBtn)
 	}

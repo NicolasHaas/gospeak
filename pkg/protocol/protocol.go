@@ -45,6 +45,8 @@ var controlMessageFields = map[string]struct{}{
 	"create_channel_request": {}, "delete_channel_request": {},
 	"create_token_request": {}, "create_token_response": {},
 	"kick_user_request": {}, "ban_user_request": {},
+	"list_bans_request": {}, "list_bans_response": {},
+	"unban_request": {}, "unban_response": {},
 	"chat_message": {}, "chat_event": {},
 	"screen_share_start_request": {}, "screen_share_stop_request": {},
 	"screen_share_subscribe_request": {}, "screen_share_share_request": {},

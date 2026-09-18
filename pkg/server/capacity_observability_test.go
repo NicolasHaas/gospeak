@@ -277,6 +277,45 @@ func TestBoundedLimiterRejectionReasonsAreCounted(t *testing.T) {
 	})
 }
 
+type endpointErrorConn struct {
+	nopConn
+	failDeadline bool
+}
+
+func (c *endpointErrorConn) SetWriteDeadline(time.Time) error {
+	if c.failDeadline {
+		return fmt.Errorf("write tcp 192.0.2.10:9603->203.0.113.77:4000: blocked")
+	}
+	return nil
+}
+
+func (c *endpointErrorConn) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("write tcp 192.0.2.10:9603->203.0.113.77:4000: blocked")
+}
+
+func TestScreenTransportErrorsDoNotExposeEndpoints(t *testing.T) {
+	for _, failDeadline := range []bool{true, false} {
+		t.Run(fmt.Sprintf("deadline_%t", failDeadline), func(t *testing.T) {
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(previousLogger)
+
+			srv := New(DefaultConfig(), Dependencies{})
+			client := &screenClientConn{
+				conn:     &endpointErrorConn{failDeadline: failDeadline},
+				outbound: make(chan []byte, 1),
+				done:     make(chan struct{}),
+			}
+			client.outbound <- []byte("frame")
+			srv.writeScreenPackets(7, client)
+			if strings.Contains(logs.String(), "192.0.2.10") || strings.Contains(logs.String(), "203.0.113.77") {
+				t.Fatalf("screen transport log leaked endpoint: %q", logs.String())
+			}
+		})
+	}
+}
+
 func TestControlReadFailureLoggingIsThrottled(t *testing.T) {
 	srv := New(DefaultConfig(), Dependencies{})
 	now := time.Unix(1_700_000_000, 0)
@@ -294,6 +333,9 @@ func TestControlReadFailureLoggingIsThrottled(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "alice") || strings.Contains(logs.String(), "bob") {
 		t.Fatalf("control read log included attacker-controlled identity: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "192.0.2.") {
+		t.Fatalf("control read log exposed peer address: %s", logs.String())
 	}
 	if got := srv.metrics.ControlInvalidMessages.Load(); got != 2 {
 		t.Fatalf("invalid control message count = %d, want 2", got)
@@ -323,6 +365,9 @@ func TestAuthenticationFailureLoggingIsThrottledWithoutErrorDetails(t *testing.T
 	}
 	if strings.Contains(logs.String(), "invalid token") || strings.Contains(logs.String(), "username already taken") {
 		t.Fatalf("authentication log exposed failure details: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "192.0.2.") {
+		t.Fatalf("authentication log exposed peer address: %s", logs.String())
 	}
 
 	now = now.Add(capacityLogInterval)
@@ -358,6 +403,9 @@ func TestScreenFailureLoggingIsThrottledAndCounted(t *testing.T) {
 	}
 	if got := srv.metrics.ScreenInvalidPackets.Load(); got != 2 {
 		t.Fatalf("invalid screen packets = %d, want 2", got)
+	}
+	if strings.Contains(logs.String(), "192.0.2.") {
+		t.Fatalf("screen rejection log exposed peer address: %s", logs.String())
 	}
 
 	now = now.Add(capacityLogInterval)

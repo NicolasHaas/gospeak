@@ -8,6 +8,8 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/model"
 )
 
+const MaxBanPageSize = 100
+
 type DataProviderFactory interface {
 	NonTx() DataStore
 	Tx(context.Context) (DataStoreTx, error)
@@ -68,6 +70,8 @@ type UserReadProvider interface {
 	GetUserByID(id int64) (*model.User, error)
 	GetUserByPersonalTokenHash(hash string) (*model.User, error)
 	ListUsers() ([]model.User, error)
+	IsBootstrapUser(userID int64) (bool, error)
+	BootstrapUserID() (int64, bool, error)
 }
 
 type UserWriteProvider interface {
@@ -107,10 +111,14 @@ type TokenTransactionProvider interface {
 
 type BanReadProvider interface {
 	IsUserBanned(userID int64) (bool, error)
+	IsIPBanned(ip string) (bool, error)
+	ListActiveBans(afterID int64, limit int) ([]model.Ban, bool, error)
 }
 
 type BanWriteProvider interface {
-	CreateBan(userID int64, ip, reason string, bannedBy int64, expiresAt time.Time) error
+	CreateUserBan(userID, bannedBy int64, expiresAt time.Time) error
+	CreateIPBan(ip string, bannedBy int64, expiresAt time.Time) error
+	DeleteBan(id int64) (bool, error)
 }
 
 type MessageReadProvider interface {

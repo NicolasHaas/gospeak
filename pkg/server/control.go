@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	maxChatMessageRunes      = 2000
-	maxModerationReasonRunes = 256
+	maxChatMessageRunes   = 2000
+	maxBanDurationSeconds = int64(10 * 365 * 24 * 60 * 60)
 )
 
 func (s *Server) beginSessionBanCheck(userID int64) {
@@ -51,10 +51,44 @@ func (s *Server) finishSessionBanCheckLocked(userID int64) {
 	s.sessionBanChecks[userID]--
 }
 
+func (s *Server) beginIPBanCheck(ip string) {
+	if ip == "" {
+		return
+	}
+	s.sessionBanMu.Lock()
+	s.ipBanChecks[ip]++
+	s.sessionBanMu.Unlock()
+}
+
+func (s *Server) cancelIPBanCheck(ip string) {
+	if ip == "" {
+		return
+	}
+	s.sessionBanMu.Lock()
+	s.finishIPBanCheckLocked(ip)
+	s.sessionBanMu.Unlock()
+}
+
+func (s *Server) finishIPBanCheckLocked(ip string) {
+	if ip == "" {
+		return
+	}
+	if s.ipBanChecks[ip] <= 1 {
+		delete(s.ipBanChecks, ip)
+		delete(s.ipBanPending, ip)
+		return
+	}
+	s.ipBanChecks[ip]--
+}
+
 func (s *Server) activateAfterBanCheck(userID int64, reservation *SessionReservation, persistedBan bool, register func(*model.Session)) (*model.Session, bool) {
+	return s.activateAfterBanChecks(userID, "", reservation, persistedBan, false, false, register)
+}
+
+func (s *Server) activateAfterBanChecks(userID int64, ip string, reservation *SessionReservation, persistedUserBan, persistedIPBan, bypassIPBan bool, register func(*model.Session)) (*model.Session, bool) {
 	s.sessionBanMu.Lock()
 	defer s.sessionBanMu.Unlock()
-	banned := persistedBan || s.sessionBanPending[userID]
+	banned := persistedUserBan || s.sessionBanPending[userID] || (!bypassIPBan && (persistedIPBan || s.ipBanPending[ip]))
 	var session *model.Session
 	if !banned {
 		session = reservation.Activate()
@@ -63,6 +97,7 @@ func (s *Server) activateAfterBanCheck(userID int64, reservation *SessionReserva
 		}
 	}
 	s.finishSessionBanCheckLocked(userID)
+	s.finishIPBanCheckLocked(ip)
 	return session, banned
 }
 
@@ -100,6 +135,7 @@ type queuedControlMessage struct {
 type controlClient struct {
 	net.Conn
 	sessionID uint32
+	peerIP    string
 	sendQueue chan queuedControlMessage
 	done      chan struct{}
 	mu        sync.Mutex
@@ -107,12 +143,28 @@ type controlClient struct {
 }
 
 func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
+	peerIP, _ := canonicalControlPeerIP(conn.RemoteAddr())
 	return &controlClient{
 		Conn:      conn,
 		sessionID: sessionID,
+		peerIP:    peerIP,
 		sendQueue: make(chan queuedControlMessage, controlSendQueueSize),
 		done:      make(chan struct{}),
 	}
+}
+
+func canonicalControlPeerIP(addr net.Addr) (string, error) {
+	if addr == nil {
+		return "", fmt.Errorf("missing peer address")
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return model.CanonicalIPAddress(tcpAddr.IP.String())
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", fmt.Errorf("parse peer address: %w", err)
+	}
+	return model.CanonicalIPAddress(host)
 }
 
 func (c *controlClient) send(msg *pb.ControlMessage) error {
@@ -162,7 +214,7 @@ func (c *controlClient) writeLoop() {
 				item.result <- err
 			}
 			if err != nil {
-				slog.Error("control write failed", "session", c.sessionID, "err", err)
+				slog.Error("control write failed", "session", c.sessionID)
 				_ = c.Close()
 				return
 			}
@@ -442,16 +494,41 @@ func (ch *ControlHandler) sendToSession(sessionID uint32, msg *pb.ControlMessage
 	return true
 }
 
-func (ch *ControlHandler) sendAndCloseSessions(sessions []SessionSnapshot, msg *pb.ControlMessage) {
-	clients := make([]*controlClient, 0, len(sessions))
+func (ch *ControlHandler) clientsForSessions(sessions []SessionSnapshot) map[uint32]*controlClient {
+	clients := make(map[uint32]*controlClient, len(sessions))
 	ch.mu.RLock()
 	for _, session := range sessions {
 		if client, ok := ch.connMap[session.ID]; ok {
-			clients = append(clients, client)
+			clients[session.ID] = client
 		}
 	}
 	ch.mu.RUnlock()
+	return clients
+}
 
+func (ch *ControlHandler) peerIPForSession(sessionID uint32) (string, bool) {
+	ch.mu.RLock()
+	client, ok := ch.connMap[sessionID]
+	ch.mu.RUnlock()
+	if !ok || client.peerIP == "" {
+		return "", false
+	}
+	return client.peerIP, true
+}
+
+func (ch *ControlHandler) clientsForIP(ip string) map[uint32]*controlClient {
+	clients := make(map[uint32]*controlClient)
+	ch.mu.RLock()
+	for sessionID, client := range ch.connMap {
+		if client.peerIP == ip {
+			clients[sessionID] = client
+		}
+	}
+	ch.mu.RUnlock()
+	return clients
+}
+
+func sendAndCloseClients(clients map[uint32]*controlClient, msg *pb.ControlMessage) {
 	for _, client := range clients {
 		client.sendAndClose(msg)
 	}
@@ -599,7 +676,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	s.metrics.TotalConnections.Add(1)
 	s.metrics.ActiveConnections.Add(1)
 	defer s.metrics.ActiveConnections.Add(-1)
-	slog.Debug("new control connection", "remote", remoteAddr)
+	slog.Debug("new control connection")
 
 	// Rate limit failed authentication attempts per remote IP.
 	authAllowed, authReason, authUsage, authLimit := s.allowAuthWithObservability(rateLimitKey)
@@ -666,6 +743,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	authReq := msg.AuthRequest
+	peerIP, _ := canonicalControlPeerIP(conn.RemoteAddr())
+	var persistedIPBan bool
+	if peerIP != "" {
+		s.beginIPBanCheck(peerIP)
+		defer func() { s.cancelIPBanCheck(peerIP) }()
+		persistedIPBan, err = st.NonTx().IsIPBanned(peerIP)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
 	var tokenHash string
 	if authReq.Token != "" {
 		tokenHash = crypto.HashToken(authReq.Token)
@@ -704,6 +792,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	defer func() { s.cancelSessionBanCheck(banCheckUserID) }()
 	errProvisionedUserBanned := errors.New("server: provisioned user is banned")
 	bootstrapProvisioned := false
+	bypassIPBan := false
 	if user != nil {
 		sessionRole = user.Role
 		channelScope = user.ChannelScope
@@ -794,9 +883,15 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				autoToken = bootstrapToken
 				channelScope = user.ChannelScope
 				bootstrapProvisioned = true
+				bypassIPBan = true
 			}
 		}
 
+		if !bootstrapProvisioned && persistedIPBan {
+			markCredentialsValid()
+			sendError(conn, 4, "you are banned from this server")
+			return
+		}
 		if !bootstrapProvisioned {
 			provisionReserved, provisionReason, provisionUsage, provisionLimit := s.reserveAccountWithObservability(rateLimitKey)
 			if !provisionReserved {
@@ -900,6 +995,13 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	markCredentialsValid()
+	if !bypassIPBan {
+		bypassIPBan, err = st.NonTx().IsBootstrapUser(user.ID)
+		if err != nil {
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
 
 	if sessionReservation == nil {
 		sessionReservation, err = s.sessions.Reserve(user.ID)
@@ -930,10 +1032,11 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 	}
-	session, banned := s.activateAfterBanCheck(user.ID, sessionReservation, persistedBan, func(session *model.Session) {
+	session, banned := s.activateAfterBanChecks(user.ID, peerIP, sessionReservation, persistedBan, persistedIPBan, bypassIPBan, func(session *model.Session) {
 		conn = handler.setConn(session.ID, conn)
 	})
 	banCheckUserID = 0
+	peerIP = ""
 	if banned {
 		sendError(conn, 4, "you are banned from this server")
 		return
@@ -1007,7 +1110,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		},
 	}
 	if err := writeControlMessage(conn, authResp); err != nil {
-		slog.Error("auth response write failed", "err", err)
+		slog.Error("auth response write failed")
 		return
 	}
 	s.finishPreAuth(preAuthConn)
@@ -1106,10 +1209,16 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 		s.handleCreateToken(sessionID, msg.CreateTokenReq, st, conn)
 
 	case msg.KickUserReq != nil:
-		s.handleKickUser(handler, sessionID, msg.KickUserReq, conn)
+		s.handleKickUser(handler, sessionID, msg.KickUserReq, st, conn)
 
 	case msg.BanUserReq != nil:
 		s.handleBanUser(handler, sessionID, msg.BanUserReq, st, conn)
+
+	case msg.ListBansReq != nil:
+		s.handleListBans(sessionID, msg.ListBansReq, st, conn)
+
+	case msg.UnbanReq != nil:
+		s.handleUnban(sessionID, msg.UnbanReq, st, conn)
 
 	case msg.ChatMsg != nil:
 		s.handleChatMessage(handler, sessionID, msg.ChatMsg)
@@ -1212,11 +1321,12 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		ChannelJoinedEvent: &pb.ChannelJoinedEvent{
 			ChannelID: ch.ID,
 			User: pb.UserInfo{
-				ID:       session.UserID,
-				Username: session.Username,
-				Role:     session.Role.String(),
-				Muted:    session.Muted,
-				Deafened: session.Deafened,
+				SessionID: session.ID,
+				ID:        session.UserID,
+				Username:  session.Username,
+				Role:      session.Role.String(),
+				Muted:     session.Muted,
+				Deafened:  session.Deafened,
 			},
 		},
 	}, session.ID)
@@ -1426,7 +1536,7 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	})
 }
 
-func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *pb.KickUserRequest, conn net.Conn) {
+func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *pb.KickUserRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
 		sendError(conn, 3, "session not found")
@@ -1436,22 +1546,50 @@ func (s *Server) handleKickUser(handler *ControlHandler, sessionID uint32, req *
 		sendError(conn, 30, errMsg)
 		return
 	}
+	if req.UserID == session.UserID {
+		sendError(conn, 31, "cannot kick yourself")
+		return
+	}
 
-	reason := sanitizeText(strings.TrimSpace(req.Reason))
-	reason = truncateRunes(reason, maxModerationReasonRunes)
-
+	s.remoteModerationMu.Lock()
+	session, ok = s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermKickUser); errMsg != "" {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, errMsg)
+		return
+	}
+	targetUser, err := st.NonTx().GetUserByID(req.UserID)
+	if err != nil || targetUser == nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 32, "user not found")
+		return
+	}
+	if session.Role == model.RoleModerator && targetUser.Role != model.RoleUser {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, "moderators may only kick ordinary users")
+		return
+	}
 	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
 	if len(targets) == 0 {
+		s.remoteModerationMu.Unlock()
 		sendError(conn, 32, "user not online")
 		return
 	}
 
-	// Close every connection for the user (each handleControlConn cleans up its session).
-	handler.sendAndCloseSessions(targets, &pb.ControlMessage{
-		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been kicked: " + reason},
+	// Capturing the exact clients is the kick's policy linearization point. A
+	// later role change does not retarget this already-authorized action.
+	clients := handler.clientsForSessions(targets)
+	s.remoteModerationMu.Unlock()
+	sendAndCloseClients(clients, &pb.ControlMessage{
+		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been kicked"},
 	})
 
-	slog.Info("user kicked", "target", targets[0].Username, "sessions", len(targets), "by", session.Username, "reason", reason)
+	slog.Info("user kicked", "target_user_id", req.UserID, "sessions", len(targets), "by_user_id", session.UserID)
 	s.metrics.KickCount.Add(1)
 }
 
@@ -1465,34 +1603,207 @@ func (s *Server) handleBanUser(handler *ControlHandler, sessionID uint32, req *p
 		sendError(conn, 30, errMsg)
 		return
 	}
-
-	reason := sanitizeText(strings.TrimSpace(req.Reason))
-	reason = truncateRunes(reason, maxModerationReasonRunes)
+	if req.UserID == session.UserID {
+		sendError(conn, 31, "cannot ban yourself")
+		return
+	}
+	if req.DurationSeconds < 0 || req.DurationSeconds > maxBanDurationSeconds {
+		sendError(conn, 31, "invalid ban duration")
+		return
+	}
 
 	var expiresAt time.Time
 	if req.DurationSeconds > 0 {
 		expiresAt = time.Now().Add(time.Duration(req.DurationSeconds) * time.Second)
 	}
 
-	if err := st.NonTx().CreateBan(req.UserID, "", reason, session.UserID, expiresAt); err != nil {
-		sendError(conn, 31, "failed to create ban")
+	s.remoteModerationMu.Lock()
+	session, ok = s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermBanUser); errMsg != "" {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, errMsg)
+		return
+	}
+	targetUser, err := st.NonTx().GetUserByID(req.UserID)
+	if err != nil || targetUser == nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 32, "user not found")
+		return
+	}
+	protected, err := st.NonTx().IsBootstrapUser(req.UserID)
+	if err != nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to inspect protected account")
+		return
+	}
+	if protected {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, "bootstrap administrator cannot be banned remotely")
 		return
 	}
 
-	// Serialize the pending-ban marker and active-session snapshot with activation.
+	var bannedIP string
+	if req.IPBanSessionID != 0 {
+		selected, selectedOK := s.sessions.GetSnapshot(req.IPBanSessionID)
+		if !selectedOK || selected.UserID != req.UserID {
+			s.remoteModerationMu.Unlock()
+			sendError(conn, 31, "IP ban requires a current target session")
+			return
+		}
+		bannedIP, selectedOK = handler.peerIPForSession(req.IPBanSessionID)
+		if !selectedOK {
+			s.remoteModerationMu.Unlock()
+			sendError(conn, 31, "target session has no usable IP address")
+			return
+		}
+	}
+	var bootstrapUserID int64
+	var hasBootstrapUser bool
+	bootstrapLocked := bannedIP != ""
+	if bootstrapLocked {
+		// Use the same lock as first-owner provisioning so the protected identity
+		// cannot appear between this lookup and the IP-collateral client snapshot.
+		s.bootstrapMu.Lock()
+		bootstrapUserID, hasBootstrapUser, err = st.NonTx().BootstrapUserID()
+		if err != nil {
+			s.bootstrapMu.Unlock()
+			s.remoteModerationMu.Unlock()
+			sendError(conn, 31, "failed to inspect protected account")
+			return
+		}
+	}
+
+	tx, err := st.Tx(context.Background())
+	if err != nil {
+		if bootstrapLocked {
+			s.bootstrapMu.Unlock()
+		}
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to create ban")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	err = tx.CreateUserBan(req.UserID, session.UserID, expiresAt)
+	if err == nil && bannedIP != "" {
+		err = tx.CreateIPBan(bannedIP, session.UserID, expiresAt)
+	}
+	if err != nil {
+		if bootstrapLocked {
+			s.bootstrapMu.Unlock()
+		}
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to create ban")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		if bootstrapLocked {
+			s.bootstrapMu.Unlock()
+		}
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to create ban")
+		return
+	}
+	committed = true
+	s.remoteModerationMu.Unlock()
+
+	// Serialize pending markers and the client snapshot with authentication activation.
 	s.sessionBanMu.Lock()
-	defer s.sessionBanMu.Unlock()
 	if s.sessionBanChecks[req.UserID] > 0 {
 		s.sessionBanPending[req.UserID] = true
 	}
-	// Also kick every active session for the banned user.
+	if bannedIP != "" && s.ipBanChecks[bannedIP] > 0 {
+		s.ipBanPending[bannedIP] = true
+	}
 	targets := s.sessions.GetAllByUserIDSnapshots(req.UserID)
-	handler.sendAndCloseSessions(targets, &pb.ControlMessage{
-		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been banned: " + reason},
+	clients := handler.clientsForSessions(targets)
+	if bannedIP != "" {
+		for candidateSessionID, client := range handler.clientsForIP(bannedIP) {
+			candidate, exists := s.sessions.GetSnapshot(candidateSessionID)
+			if exists && (!hasBootstrapUser || candidate.UserID != bootstrapUserID) {
+				clients[candidateSessionID] = client
+			}
+		}
+	}
+	s.sessionBanMu.Unlock()
+	if bootstrapLocked {
+		s.bootstrapMu.Unlock()
+	}
+
+	sendAndCloseClients(clients, &pb.ControlMessage{
+		ErrorResponse: &pb.ErrorResponse{Code: 99, Message: "you have been banned"},
 	})
 
-	slog.Info("user banned", "user_id", req.UserID, "by", session.Username)
+	slog.Info("user banned", "user_id", req.UserID, "ip_ban", bannedIP != "", "by_user_id", session.UserID)
 	s.metrics.BanCount.Add(1)
+}
+
+func (s *Server) handleListBans(sessionID uint32, req *pb.ListBansRequest, st datastore.DataProviderFactory, conn net.Conn) {
+	session, ok := s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermBanUser); errMsg != "" {
+		sendError(conn, 30, errMsg)
+		return
+	}
+	limit := req.Limit
+	if limit == 0 {
+		limit = datastore.MaxBanPageSize
+	}
+	bans, hasMore, err := st.NonTx().ListActiveBans(req.AfterID, limit)
+	if err != nil {
+		sendError(conn, 31, "failed to list bans")
+		return
+	}
+	response := make([]pb.BanInfo, 0, len(bans))
+	for _, ban := range bans {
+		info := pb.BanInfo{
+			ID:        ban.ID,
+			UserID:    ban.UserID,
+			Username:  ban.Username,
+			IP:        ban.IP,
+			BannedBy:  ban.BannedBy,
+			CreatedAt: ban.CreatedAt.Unix(),
+		}
+		if !ban.ExpiresAt.IsZero() {
+			info.ExpiresAt = ban.ExpiresAt.Unix()
+		}
+		response = append(response, info)
+	}
+	if err := writeControlMessage(conn, &pb.ControlMessage{ListBansResp: &pb.ListBansResponse{Bans: response, HasMore: hasMore}}); err != nil {
+		_ = conn.Close()
+	}
+}
+
+func (s *Server) handleUnban(sessionID uint32, req *pb.UnbanRequest, st datastore.DataProviderFactory, conn net.Conn) {
+	session, ok := s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermBanUser); errMsg != "" {
+		sendError(conn, 30, errMsg)
+		return
+	}
+	deleted, err := st.NonTx().DeleteBan(req.BanID)
+	if err != nil {
+		sendError(conn, 31, "failed to remove ban")
+		return
+	}
+	if err := writeControlMessage(conn, &pb.ControlMessage{UnbanResp: &pb.UnbanResponse{Success: deleted}}); err != nil {
+		_ = conn.Close()
+	}
 }
 
 // channelUsers returns UserInfo for all sessions in a channel.
@@ -1503,11 +1814,12 @@ func (s *Server) channelUsers(channelID int64) []pb.UserInfo {
 		sess, ok := s.sessions.GetSnapshot(sid)
 		if ok {
 			users = append(users, pb.UserInfo{
-				ID:       sess.UserID,
-				Username: sess.Username,
-				Role:     sess.Role.String(),
-				Muted:    sess.Muted,
-				Deafened: sess.Deafened,
+				SessionID: sess.ID,
+				ID:        sess.UserID,
+				Username:  sess.Username,
+				Role:      sess.Role.String(),
+				Muted:     sess.Muted,
+				Deafened:  sess.Deafened,
 			})
 		}
 	}
@@ -1564,18 +1876,52 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 
 	newRole := model.ParseRole(req.NewRole)
 
+	// Serialize remote target policy checks with kicks and other role changes.
+	s.remoteModerationMu.Lock()
+	session, ok = s.sessions.GetSnapshot(sessionID)
+	if !ok {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 3, "session not found")
+		return
+	}
+	if errMsg := rbac.RequirePermission(session.Role, rbac.PermManageRoles); errMsg != "" {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, errMsg)
+		return
+	}
+	targetUser, err := st.NonTx().GetUserByID(req.TargetUserID)
+	if err != nil || targetUser == nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to inspect target user")
+		return
+	}
+	protected, err := st.NonTx().IsBootstrapUser(req.TargetUserID)
+	if err != nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to inspect protected account")
+		return
+	}
+	if protected && newRole != model.RoleAdmin {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 30, "bootstrap administrator cannot be demoted remotely")
+		return
+	}
+
 	// Prevent escalation: cannot grant a role higher than your own
 	if newRole > session.Role {
+		s.remoteModerationMu.Unlock()
 		sendError(conn, 31, "cannot grant a role higher than your own")
 		return
 	}
 	if err := st.NonTx().UpdateUserRole(req.TargetUserID, newRole); err != nil {
-		sendError(conn, 31, "failed to update role: "+err.Error())
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 31, "failed to update role")
 		return
 	}
 
 	// Apply revocation immediately to every active session for the user.
 	s.sessions.UpdateRoleByUserID(req.TargetUserID, newRole)
+	s.remoteModerationMu.Unlock()
 
 	slog.Info("user role changed", "target_user", req.TargetUserID, "new_role", newRole, "by", session.Username)
 

@@ -82,7 +82,7 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 	}
 	defer s.forgetAcceptedConn(conn)
 	if err := conn.SetDeadline(time.Now().Add(s.cfg.PreAuthTimeout)); err != nil {
-		slog.Error("set screen auth deadline", "err", err)
+		slog.Error("set screen auth deadline")
 		return
 	}
 
@@ -92,7 +92,7 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 		return
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		slog.Error("clear screen auth deadline", "session", auth.SessionID, "err", err)
+		slog.Error("clear screen auth deadline", "session", auth.SessionID)
 		return
 	}
 	client, ok := s.bindScreenConn(auth.SessionID, auth.Token, conn)
