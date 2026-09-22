@@ -115,6 +115,19 @@ func TestReadControlMessageRejectsInvalidEnvelope(t *testing.T) {
 	}
 }
 
+func TestReadControlMessageRejectsRetiredScreenShareFrame(t *testing.T) {
+	payload := []byte(`{"screen_share_frame":{"session_id":1,"data":"AA=="}}`)
+	frame := make([]byte, 4+len(payload))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(payload))) //nolint:gosec // fixed test payload is far below uint32
+	copy(frame[4:], payload)
+
+	if _, err := ReadControlMessage(bytes.NewReader(frame)); err == nil {
+		t.Fatal("ReadControlMessage accepted retired screen_share_frame control message")
+	} else if !strings.Contains(err.Error(), `unknown field "screen_share_frame"`) {
+		t.Fatalf("ReadControlMessage rejection = %q, want unknown-field error", err)
+	}
+}
+
 func TestControlEnvelopeFieldListMatchesMessageTags(t *testing.T) {
 	typ := reflect.TypeOf(pb.ControlMessage{})
 	if typ.NumField() != len(controlMessageFields) {
