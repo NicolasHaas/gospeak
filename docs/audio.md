@@ -2,7 +2,7 @@
 
 GoSpeak uses PortAudio for hardware I/O and Opus for codec, with a Voice Activity Detection (VAD) system to suppress silence.
 
-The audio subsystem follows an **interface-based (onion) architecture**,  this allows swapping audio backends for different platforms (e.g., Android Oboe, iOS AVAudioEngine) without changing the client logic.
+The audio subsystem follows an **interface-based (onion) architecture**. This allows swapping audio backends for different platforms (e.g., Android Oboe, iOS AVAudioEngine) without changing the client logic.
 
 ## Audio Interfaces
 
@@ -14,11 +14,14 @@ All audio interfaces are defined in [`pkg/audio/interface.go`](../pkg/audio/inte
 | `Player` | `Start()`, `WriteFrame()`, `Stop()` | `PlaybackDevice` (PortAudio) |
 | `AudioEncoder` | `Encode(pcm) → bytes` | `Encoder` (Opus) |
 | `AudioDecoder` | `Decode(bytes) → pcm`, `DecodePLC()` | `Decoder` (Opus) |
-| `DecoderFactory` | `NewDecoder() → AudioDecoder` | `defaultDecoderFactory` |
+| `DecoderFactory` | `NewDecoder() → AudioDecoder` | `pkg/client.defaultDecoderFactory` adapter |
 | `VoiceDetector` | `Process()`, `IsActive()`, `PreBufferedFrames()`, `SetThreshold()` | `VAD` (energy-based) |
-| `DeviceLister` | `ListInputDevices()`, `ListOutputDevices()` | Functions in `devices.go` |
+| `DeviceLister` | `ListInputDevices()`, `ListOutputDevices()` | No concrete default type; `devices.go` exposes package functions |
 
-Compile-time checks (`var _ Interface = (*Impl)(nil)`) ensure the default implementations satisfy their interfaces.
+Compile-time checks (`var _ Interface = (*Impl)(nil)`) cover `CaptureDevice`,
+`PlaybackDevice`, `Encoder`, `Decoder`, and `VAD`. `DecoderFactory` is adapted in
+`pkg/client`, while device enumeration is exposed through package functions rather
+than a `DeviceLister` implementation.
 
 ## Audio Stack
 
@@ -34,7 +37,7 @@ graph TB
 
     subgraph "Implementations (pkg/audio)"
         PA[PortAudio 19<br/>Cross-platform audio I/O]
-        OPUS[Opus 1.5<br/>Low-latency speech codec]
+        OPUS[Opus<br/>Low-latency speech codec]
     end
 
     subgraph "Concrete Types"
@@ -72,7 +75,7 @@ graph TB
 | Frame Duration | 20 ms |
 | Frame Size | 960 samples |
 | Opus Application | VoIP mode |
-| Opus Bitrate | Auto |
+| Opus Bitrate | 64 kbps target |
 
 ## Capture → Transmit Pipeline
 
@@ -171,7 +174,7 @@ forever; the next talk spurt starts a fresh jitter window.
 
 ## PortAudio Initialization
 
-PortAudio initialization is slow (~1-2 seconds, especially on Windows). GoSpeak uses **async pre-initialization** to avoid blocking the GUI:
+PortAudio initialization can be slow, especially on Windows. GoSpeak uses **async pre-initialization** to avoid blocking the GUI:
 
 ```mermaid
 sequenceDiagram
@@ -186,7 +189,7 @@ sequenceDiagram
     Pre->>Pre: Enumerate devices
     Pre->>Pre: Signal ready (sync.Once)
     User->>GUI: Click "Connect"
-    GUI->>Pre: WaitPreInit() — blocks until ready
+    GUI->>Pre: WaitPreInit() blocks until ready
     Note over GUI: Proceeds once PortAudio is initialized
 ```
 

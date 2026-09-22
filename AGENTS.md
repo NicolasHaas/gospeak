@@ -20,7 +20,7 @@ Dependencies flow inward — inner packages never import outer ones.
 - `pkg/crypto/` — no deps on other gospeak packages
 - `pkg/model/` — pure data structs + validation
 - `pkg/rbac/` — permission checks (depends on `model`)
-- `pkg/protocol/` — wire format, encoding/decoding (depends on `model`, `protocol/pb`)
+- `pkg/protocol/`: wire format, encoding/decoding (depends on `protocol/pb`)
 - `pkg/datastore/` — SQLite persistence, `DataProviderFactory` interface (depends on `model`)
 - `pkg/audio/`, `pkg/screenshare/` — capture, encode, platform backends
 - `pkg/server/` — listeners, sessions, control/voice/screen handlers (depends on `crypto`, `model`, `protocol`, `datastore`, `rbac`)
@@ -30,15 +30,15 @@ Dependencies flow inward — inner packages never import outer ones.
 ### Network Planes
 - **Control** (TCP 9600) — TLS 1.3 signalling, JSON messages framed with 4-byte length prefix
 - **Voice** (UDP 9601) — AES-128-GCM encrypted Opus audio relay
-- **Screen** (TCP 9603) — AES-128-GCM encrypted screen-share relay
-- **Metrics** (TCP 9602) — Prometheus `/metrics` HTTP endpoint
+- **Screen** (TCP 9603 by default): optional AES-128-GCM encrypted screen-share relay
+- **Metrics** (operator-selected TCP address): optional Prometheus `/metrics` and `/healthz` HTTP endpoint, disabled by default
 
 ## Testing
 - **Package tests**: `go test -tags nolibopusfile -count=1 ./...`
 - **Server tests**: use `datastore.NewProviderFactory(cfg.DBPath)` + `server.Dependencies{Store: st}` + `nopConn` (satisfies `net.Conn`) in `newTestServer(t)` helper
 - **Model tests**: direct struct construction in `pkg/model/` (no DB needed)
 - **RBAC tests**: unit tests over `HasPermission`/`RequirePermission` in `pkg/rbac/`
-- No in-memory store — tests write to `gospeak.db`
+- There is no in-memory store. Datastore tests use isolated temporary SQLite database files.
 
 ### Model Validation Pattern
 - Factory constructors (`NewChannel()`) return structs with defaults
