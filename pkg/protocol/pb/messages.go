@@ -34,7 +34,6 @@ type ControlMessage struct {
 	ScreenShareShareReq *ScreenShareShareRequest       `json:"screen_share_share_request,omitempty"`
 	ScreenShareUnsubReq *ScreenShareUnsubscribeRequest `json:"screen_share_unsubscribe_request,omitempty"`
 	ScreenShareEvent    *ScreenShareEvent              `json:"screen_share_event,omitempty"`
-	ScreenShareFrame    *ScreenShareFrame              `json:"screen_share_frame,omitempty"`
 	SetUserRoleReq      *SetUserRoleRequest            `json:"set_user_role_request,omitempty"`
 	SetUserRoleResp     *SetUserRoleResponse           `json:"set_user_role_response,omitempty"`
 	ExportDataReq       *ExportDataRequest             `json:"export_data_request,omitempty"`
@@ -249,16 +248,6 @@ type ScreenShareEvent struct {
 	Height        int32  `json:"height,omitempty"`
 	Viewers       int32  `json:"viewers,omitempty"`
 	EncryptionKey []byte `json:"encryption_key,omitempty"`
-}
-
-type ScreenShareFrame struct {
-	ChannelID int64  `json:"channel_id"`
-	SessionID uint32 `json:"session_id"`
-	Width     int32  `json:"width"`
-	Height    int32  `json:"height"`
-	Format    string `json:"format"`
-	Data      []byte `json:"data"`
-	Timestamp int64  `json:"timestamp"`
 }
 
 // ----- Role Management -----

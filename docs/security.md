@@ -4,7 +4,7 @@ GoSpeak encrypts the control, voice, and screen planes. The optional metrics and
 health endpoint is plaintext, unauthenticated HTTP, so it is disabled by default
 and must be restricted separately when enabled.
 
-> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server _could_ theoretically decrypt media. This is a known trade-off for simplicity.
+> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server can decrypt media. This is a known trade-off for simplicity.
 
 ## Threat Model
 
@@ -12,12 +12,13 @@ and must be restricted separately when enabled.
 |--------|-----------|
 | Network eavesdropping | TLS 1.3 for control and screen planes, AES-128-GCM for voice and screen media |
 | Active network MITM | System-PKI hostname verification or an explicitly confirmed TOFU public-key pin, shared by control and screen connections |
-| Server compromise (media) | Server holds the generated media keys and _could_ decrypt — see note above. Mitigated by running your own trusted server |
-| GCM nonce reuse | Session IDs are never reissued while a voice key is active, and clients fail closed before sequence-number wrap |
+| Server compromise (media) | The server holds the generated media keys and can decrypt them; see the note above. Run your own trusted server to reduce this risk. |
+| GCM nonce reuse | Session IDs are never reissued while a voice key is active; voice and screen senders fail closed before sequence-number wrap |
+| Media replay | Voice uses an authenticated 64-packet sliding window per control session; screen uses a strict authenticated sequence on its ordered stream |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
 | UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
-| Password attacks | Argon2id with hardened parameters (64MB memory, 4 iterations) |
+| Password attacks | Password authentication is not implemented; a dormant Argon2id helper uses Time=1, Memory=64 MiB, and Threads=4 |
 | Privilege escalation | Server-side RBAC checks on every admin operation |
 
 ## Encryption Overview
@@ -134,9 +135,10 @@ For each voice packet:
 |----------|------------------|
 | **Confidentiality** | AES-128-GCM encryption of Opus frames |
 | **Integrity** | GCM authentication tag (16 bytes) |
-| **Authenticity** | The complete 20-byte voice header is authenticated as additional data |
+| **Header integrity** | The complete 20-byte voice header is authenticated as additional data; the server checks the claimed sender against the registered endpoint, but the server-wide key is not cryptographic proof of one client to another |
 | **Nonce uniqueness** | Session IDs are not reissued under the same key, and sequence wrap fails closed |
-| **Forward secrecy** | New key generated on each server restart |
+| **Replay rejection** | The server authenticates first, then records the sequence in a 64-packet sliding window bound to the control session |
+| **Key rotation** | A new shared voice key is generated on server restart; this is lifecycle separation, not forward secrecy |
 
 ## Screen Share Encryption (AES-128-GCM)
 
@@ -144,9 +146,9 @@ For each voice packet:
 - The key is delivered over the TLS control plane to the sharer and to users already in the channel when the share starts.
 - If additional users join later, the sharer can share the active key with the current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
-- The server forwards opaque encrypted packets to subscribed viewers without decoding frame contents.
+- The server transiently authenticates and opens each packet, then forwards the original authenticated ciphertext to subscribed viewers without parsing, decoding, logging, or retaining frame plaintext.
 
-Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that increases for the lifetime of the screen-share key. Repeated announcements of the same key do not reset the sequence; a new key starts a new sequence, and sharing stops before the sequence can wrap.
+Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that continues across key changes within one authenticated control connection. A new key creates fresh replay state on the server and viewers, but does not reset the sender's counter. The counter resets only for a new control-connection generation, and sharing stops before it can wrap. The ordered relay authenticates a frame before committing its strictly increasing sequence, so duplicate and out-of-order frames are rejected without letting forged high sequences poison the state.
 
 ## Authentication & Token System
 
@@ -230,7 +232,8 @@ Every admin operation is checked server-side via `rbac.HasPermission()` before e
 
 ## Password Hashing
 
-Used internally for potential future password-based auth:
+This helper is not called by the current token-based authentication flow. It is
+available for possible future password authentication:
 
 - **Algorithm**: Argon2id (winner of the Password Hashing Competition)
 - **Parameters**: Time=1, Memory=64MB, Threads=4, Output=32 bytes
@@ -241,5 +244,5 @@ Used internally for potential future password-based auth:
 1. **Use proper TLS certificates** (e.g., Let's Encrypt) instead of self-signed
 2. **Restart the server** periodically to generate fresh voice encryption keys (a new key is generated on every startup)
 3. **Use strong tokens** (the default 256-bit random is good)
-4. **Restrict network access** — only expose ports 9600/tcp, 9601/udp, and 9603/tcp when screen sharing is enabled
-5. **Protect bootstrap credentials** — read `bootstrap-admin.token` only through the server administrator account and retain the returned personal token
+4. **Restrict network access**. Only expose ports 9600/tcp, 9601/udp, and 9603/tcp when screen sharing is enabled.
+5. **Protect bootstrap credentials**. Read `bootstrap-admin.token` only through the server administrator account and retain the returned personal token.

@@ -1,11 +1,14 @@
 # Building GoSpeak
 
-GoSpeak uses multi-stage container builds to compile all binaries. This ensures reproducible builds with all native dependencies (PortAudio, Opus, OpenGL) handled inside the container.
+GoSpeak uses multi-stage container builds to compile all binaries and provide a
+consistent build environment for native dependencies such as PortAudio, Opus,
+and OpenGL. The current images and package inputs are not fully pinned, so these
+builds are not bit-for-bit reproducible.
 
 ## Prerequisites
 
-- **Podman** (or Docker) — for container builds
-- **Go 1.24+** — only needed for local development without containers
+- **Podman** (or Docker) is used for container builds.
+- **Go 1.24.4 or newer** is only needed for local development without containers.
 
 ## Quick Build
 
@@ -85,10 +88,10 @@ graph TB
 
 The Containerfile is optimized for caching:
 
-1. **System deps** (Stage 1) — cached until apt packages change
-2. **Windows libs** (Stage 2) — cached until CMake config changes
-3. **Go modules** (Stage 3, first step) — cached until go.mod/go.sum change
-4. **Source compilation** (Stage 3, last step) — only this reruns on code changes
+1. **System deps** (Stage 1) stay cached until the apt packages change.
+2. **Windows libs** (Stage 2) stay cached until the CMake config changes.
+3. **Go modules** (the first step in Stage 3) stay cached until `go.mod` or `go.sum` changes.
+4. **Source compilation** (the last step in Stage 3) is the only stage rerun for code changes.
 
 ## Server Container
 
@@ -108,7 +111,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-control` | `:9600` | TCP/TLS control plane bind address |
 | `-voice` | `:9601` | UDP voice bind address |
 | `-db` | `gospeak.db` | SQLite database path |
-| `-data` | `.` | Directory for auto-generated TLS certs |
+| `-data` | `.` | Directory for automatic TLS and bootstrap credential files; `-db` controls the database separately |
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; requires `-key` |
 | `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
 | `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
@@ -132,7 +135,8 @@ For local development, you need the native dependencies installed:
 ### Linux (Debian/Ubuntu)
 
 ```bash
-sudo apt install portaudio19-dev libopus-dev libgl1-mesa-dev \
+sudo apt install build-essential pkg-config \
+  portaudio19-dev libopus-dev libgl1-mesa-dev \
   libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
   libxi-dev libxxf86vm-dev
 
@@ -142,16 +146,26 @@ go build -tags nolibopusfile ./cmd/client/
 
 ### Windows
 
-Use the container build to cross-compile, or install PortAudio and Opus via MSYS2:
+Use the container build to cross-compile, or open an MSYS2 MinGW 64-bit shell,
+put Go on `PATH`, and install PortAudio and Opus:
 
 ```bash
-pacman -S mingw-w64-x86_64-portaudio mingw-w64-x86_64-opus
+pacman -S --needed mingw-w64-x86_64-toolchain mingw-w64-x86_64-pkgconf \
+  mingw-w64-x86_64-portaudio mingw-w64-x86_64-opus
+
+export CGO_ENABLED=1
+export CC=gcc
+export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+go build -tags nolibopusfile ./cmd/server/
+go build -tags nolibopusfile ./cmd/client/
 ```
 
 ### macOS
 
+Install the Xcode Command Line Tools first so a C compiler is available, then:
+
 ```bash
-brew install portaudio opus
+brew install pkg-config portaudio opus
 go build -tags nolibopusfile ./cmd/server/
 go build -tags nolibopusfile ./cmd/client/
 ```

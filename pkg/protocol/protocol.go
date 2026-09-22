@@ -51,7 +51,6 @@ var controlMessageFields = map[string]struct{}{
 	"screen_share_start_request": {}, "screen_share_stop_request": {},
 	"screen_share_subscribe_request": {}, "screen_share_share_request": {},
 	"screen_share_unsubscribe_request": {}, "screen_share_event": {},
-	"screen_share_frame":    {},
 	"set_user_role_request": {}, "set_user_role_response": {},
 	"export_data_request": {}, "export_data_response": {},
 	"import_channels_request": {}, "import_channels_response": {},

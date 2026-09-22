@@ -2,8 +2,13 @@
 
 This folder contains a Rocky Linux 10 cloud-init example for common cloud providers.
 
-Files
+## Files
+
 - `deploy/cloud-init.yaml`: cloud-init user-data for Rocky Linux 10
+- `deploy/compose.yaml`: standalone Compose deployment
+- `deploy/prometheus.yml`: Prometheus scrape configuration
+- `deploy/grafana-datasources.yml`: Grafana datasource provisioning
+- `deploy/grafana-dashboards.yml`: Grafana dashboard provisioning
 
 ## Quickstart (Rocky 10)
 
@@ -75,7 +80,7 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-db` | `gospeak.db` | SQLite database file path |
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; must be used with `-key` |
 | `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, a self-signed pair is loaded or generated in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
-| `-data` | `.` | Data directory for generated files (certs, DB, etc.) |
+| `-data` | `.` | Data directory for generated TLS and bootstrap files; database location is controlled separately by `-db` |
 | `-open` | `false` | Allow users to join without a token |
 | `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
@@ -92,11 +97,11 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `-log-format` | `text` | Log format: `text` or `json` |
 
-Channel files use a single `channels:` YAML document; nested channels use the same `channels:` key. The parser rejects the older `children:` example, unknown fields, aliases, merges, oversized files, and duplicate sibling names. An upgrade also stops if the existing database already has two channels with the same name under one parent; back up the database and resolve those conflicts rather than deleting an arbitrary row.
+Channel files use a single `channels:` YAML document; nested channels use the same `channels:` key. The parser rejects unknown fields, aliases, merges, oversized files, and duplicate sibling names. An upgrade also stops if the existing database already has two channels with the same name under one parent; back up the database and resolve those conflicts rather than deleting an arbitrary row.
 
 ## Ports
 
 - `9600/tcp`: TLS control plane
 - `9601/udp`: encrypted voice
 - `9603/tcp`: encrypted screen-share relay (required when `-screen-share` is enabled)
-- `9602/tcp`: optional plaintext metrics and health HTTP. It is disabled and not published by default; if enabled, bind it to a trusted interface or protect it with a firewall or reverse proxy.
+- `9602/tcp`: optional plaintext metrics and health HTTP. It is disabled and not published by default. If enabled, bind it to a trusted interface or require explicit controls such as IP allowlisting, authenticated proxy access, and TLS.

@@ -6,8 +6,8 @@ GoSpeak uses three transport layers: a **TCP/TLS 1.3 control plane** for signall
 
 - **Port**: 9600 (default)
 - **Transport**: TCP with TLS 1.3 (self-signed certificates auto-generated on first run)
-- **Framing**: Length-prefixed JSON — each message is preceded by a 4-byte big-endian uint32 length header
-- **Serialization**: JSON with `omitempty` — only the populated field in `ControlMessage` is serialized
+- **Framing**: Length-prefixed JSON. Each message is preceded by a 4-byte big-endian uint32 length header.
+- **Serialization**: JSON with `omitempty`. Only the populated field in `ControlMessage` is serialized.
 
 ### Message Envelope
 Every control message is a `ControlMessage` struct with exactly one field set. Writers reject empty envelopes, envelopes with multiple populated fields, and `null` message values. Readers additionally reject repeated top-level fields (including escaped equivalents), unknown top-level fields, and malformed or trailing JSON. Unknown fields are rejected deliberately: peers using a protocol version newer than the reader's must not send message types the reader does not know.
@@ -29,6 +29,10 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `CreateTokenResponse`
 - `KickUserRequest`
 - `BanUserRequest`
+- `ListBansRequest`
+- `ListBansResponse`
+- `UnbanRequest`
+- `UnbanResponse`
 - `ChatMessage`
 - `ChatEvent`
 - `ScreenShareStartRequest`
@@ -37,7 +41,6 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `ScreenShareShareRequest`
 - `ScreenShareUnsubscribeRequest`
 - `ScreenShareEvent`
-- `ScreenShareFrame`
 - `SetUserRoleRequest`
 - `SetUserRoleResponse`
 - `ExportDataRequest`
@@ -157,6 +160,10 @@ The control plane carries screen-share lifecycle messages only:
 | `CreateTokenResponse` | Server → Client | Returns raw token string |
 | `KickUserRequest` | Client → Server | Kick user by ID with reason |
 | `BanUserRequest` | Client → Server | Ban user with optional duration |
+| `ListBansRequest` | Client → Server | Read a bounded page of active account and exact-address bans |
+| `ListBansResponse` | Server → Client | Ban page and continuation indicator |
+| `UnbanRequest` | Client → Server | Remove one ban by ID |
+| `UnbanResponse` | Server → Client | Confirms whether the ban was removed |
 | `SetUserRoleRequest` | Client → Server | Promote/demote user (admin only) |
 | `SetUserRoleResponse` | Server → Client | Success/failure message |
 | `ExportDataRequest` | Client → Server | Export channels or users as YAML |
@@ -236,13 +243,14 @@ graph LR
 
 ### SFU Relay Logic
 
-The server does **not** decode voice packets. It:
+The server does **not** decode Opus audio. It:
 
 1. Receives a UDP packet from a client
-2. Reads the 8-byte header to identify the sender's `SessionID`
-3. Looks up which channel the sender is in
-4. Forwards the packet **as-is** to all other members of that channel
-5. Skips the sender (no echo) and any deafened users
+2. Parses the 20-byte plaintext header and verifies the registered source endpoint and current channel
+3. Opens the AES-GCM payload transiently to authenticate the ciphertext and complete header; it does not decode, log, or retain the Opus plaintext
+4. Applies a per-session 64-packet replay window after authentication
+5. Forwards the original ciphertext **as-is** to all other members of that channel
+6. Skips the sender (no echo) and any deafened users
 
 ### Nonce Construction
 
@@ -255,6 +263,14 @@ Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 - `SessionID` is allocated from a random starting point and is never issued again during the server lifecycle, even after its session disconnects
 - the shared voice key is generated for that same server lifecycle, so historical sessions cannot repeat a nonce under the same key
 - `SeqNum` starts at one and increases monotonically per sender; the client refuses to send after `uint32` exhaustion and requires a reconnect instead of wrapping to zero
+
+Nonce uniqueness and replay rejection are separate properties. After GCM
+authentication, the server accepts each positive sequence number once within a
+64-packet sliding window. An unseen authenticated packet up to 63 positions behind
+the high-water mark is accepted once to tolerate UDP reordering. Duplicates,
+sequence zero, wrapped sequences, and packets at least 64 positions behind the
+high-water mark are rejected. Replay state lives until the control session ends,
+so jitter-buffer cleanup does not reopen the window.
 
 ---
 
@@ -291,4 +307,14 @@ Each screen packet is length-prefixed on the TCP stream:
 [Length:4B][SessionID:4B][SeqNum:4B][Ciphertext+AuthTag]
 ```
 
-The AES-GCM additional data is the 8-byte packet header `[SessionID|SeqNum]`. The encrypted payload contains timestamp, frame dimensions, frame format, and frame bytes.
+The AES-GCM additional data is the 8-byte packet header `[SessionID|SeqNum]`.
+The encrypted payload contains timestamp, frame dimensions, frame format, and
+frame bytes. The relay checks active-sharer authorization and pacing from the
+fixed header before allocating the bounded frame body, then authenticates GCM
+before committing a strictly increasing sequence. Replays and out-of-order
+screen packets are rejected because this plane uses an ordered TCP stream.
+`SeqNum` starts at one and continues across screen-share key changes within the
+same authenticated control connection. A new key creates fresh replay state on
+the server and viewers without resetting the sender's counter. The counter resets
+only for a new control-connection generation, and the sender stops sharing before
+it can wrap.
