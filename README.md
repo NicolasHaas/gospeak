@@ -52,8 +52,8 @@ metric semantics, dashboard thresholds, authenticated-session limits,
 control-message budget costs, rejection labels, and throttled-log behavior.
 
 On first run, GoSpeak writes an admin bootstrap credential to
-`bootstrap-admin.token` in the data directory. For this Compose setup, read it
-inside the container with `docker compose exec server cat /data/bootstrap-admin.token`.
+`bootstrap-admin.token` in the data directory. For this bind-mounted Compose
+setup, read it on the host with `cat ./data/bootstrap-admin.token`.
 Use it for the first admin login and
 save the personal token returned by the server. Interrupted first logins can be
 retried for the same administrator. The server removes the bootstrap file once

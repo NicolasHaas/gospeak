@@ -31,6 +31,8 @@ This configuration is designed to be hands-off after first boot while staying se
 - Firewall allows only SSH, the control port, the voice port, and the screen-share port.
 - OS updates are applied automatically via `dnf-automatic` with a reboot when needed.
 - The GoSpeak container auto-updates via Podman auto-update and a systemd timer.
+- The supplied container services drop all capabilities and use
+  `no-new-privileges`.
 
 ## Open server mode
 
@@ -49,7 +51,12 @@ administrator. GoSpeak removes the bootstrap file after the personal token is
 used and logs only the file path, never the credential itself.
 
 With `deploy/compose.yaml`, the same file is in the named data volume. Read it
-with `docker compose exec gospeak cat /data/bootstrap-admin.token`.
+without requiring a shell in the server image:
+
+```bash
+docker compose cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
+cat ./bootstrap-admin.token
+```
 
 ## Bandwidth example (budget VPS)
 

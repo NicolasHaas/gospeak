@@ -38,6 +38,8 @@ func (s *Server) startMetricsHTTP() error {
 		Addr:              addr,
 		Handler:           s.trackHTTPHandler(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	var listenConfig net.ListenConfig
 	ln, err := listenConfig.Listen(s.ctx, "tcp", addr)

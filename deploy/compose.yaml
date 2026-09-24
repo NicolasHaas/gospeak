@@ -2,7 +2,7 @@
 # Usage: docker compose up -d
 #
 # On first run, read the admin bootstrap credential from the data volume:
-#   docker compose exec gospeak cat /data/bootstrap-admin.token
+#   docker compose cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
 
 services:
   gospeak:
@@ -14,6 +14,10 @@ services:
       - "9603:9603"       # TCP/TLS screen-share plane (used when -screen-share is enabled)
     volumes:
       - gospeak-data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     command: ["-open", "-screen-share"]
 
