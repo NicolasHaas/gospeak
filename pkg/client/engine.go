@@ -1582,7 +1582,7 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 
 	if err := ctrl.Send(&pb.ControlMessage{
 		ScreenShareStartReq: &pb.ScreenShareStartRequest{
-			DisplayIndex: int32(displayIndex),
+			DisplayIndex: int32(displayIndex), //nolint:gosec // checked against [0, math.MaxInt32] above
 			Width:        width,
 			Height:       height,
 		},
