@@ -179,6 +179,12 @@ func TestShutdownClosesMetricsListenerAndIsIdempotent(t *testing.T) {
 	}
 	srv.metricsMu.Lock()
 	addr := srv.metricsConn.Addr().String()
+	if srv.metricsHTTP.WriteTimeout != 30*time.Second {
+		t.Errorf("metrics HTTP write timeout = %v, want 30s", srv.metricsHTTP.WriteTimeout)
+	}
+	if srv.metricsHTTP.IdleTimeout != 60*time.Second {
+		t.Errorf("metrics HTTP idle timeout = %v, want 60s", srv.metricsHTTP.IdleTimeout)
+	}
 	srv.metricsMu.Unlock()
 
 	conn, err := dialTCP(addr, time.Second)
