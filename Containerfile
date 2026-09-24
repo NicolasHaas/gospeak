@@ -5,7 +5,7 @@
 # ============================================================
 # Stage 1: Builder base — install ALL system deps (cached layer)
 # ============================================================
-FROM golang:1.24-bookworm AS builder-base
+FROM golang:1.24.4-bookworm@sha256:10f549dc8489597aa7ed2b62008199bb96717f52a8e8434ea035d5b44368f8a6 AS builder-base
 
 # Install ALL system dependencies in one layer:
 # - Linux audio/GL for native client
@@ -39,6 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ============================================================
 FROM builder-base AS win-deps
 
+ARG PORTAUDIO_COMMIT=147dd722548358763a8b649b3e4b41dfffbcfbb6
+ARG OPUS_COMMIT=ddbe48383984d56acd9e1ab6a090c54ca6b735a6
+
 # Create cmake toolchain file for mingw64
 RUN printf '\
 set(CMAKE_SYSTEM_NAME Windows)\n\
@@ -55,7 +58,10 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n\
 # Build PortAudio + Opus for Windows (slow — but cached)
 RUN mkdir -p /win-deps/include /win-deps/lib && \
     # PortAudio
-    git clone --depth 1 https://github.com/PortAudio/portaudio.git /tmp/portaudio-src && \
+    git init /tmp/portaudio-src && \
+    git -C /tmp/portaudio-src remote add origin https://github.com/PortAudio/portaudio.git && \
+    git -C /tmp/portaudio-src fetch --depth 1 origin "$PORTAUDIO_COMMIT" && \
+    git -C /tmp/portaudio-src checkout --detach FETCH_HEAD && \
     cd /tmp/portaudio-src && mkdir build && cd build && \
     cmake .. -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
         -DCMAKE_INSTALL_PREFIX=/win-deps \
@@ -68,7 +74,10 @@ RUN mkdir -p /win-deps/include /win-deps/lib && \
         -DBUILD_SHARED_LIBS=OFF && \
     make -j$(nproc) && make install && \
     # Opus
-    git clone --depth 1 --branch v1.5.2 https://github.com/xiph/opus.git /tmp/opus-src && \
+    git init /tmp/opus-src && \
+    git -C /tmp/opus-src remote add origin https://github.com/xiph/opus.git && \
+    git -C /tmp/opus-src fetch --depth 1 origin "$OPUS_COMMIT" && \
+    git -C /tmp/opus-src checkout --detach FETCH_HEAD && \
     cd /tmp/opus-src && mkdir build && cd build && \
     cmake .. -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
         -DCMAKE_INSTALL_PREFIX=/win-deps \
@@ -87,6 +96,10 @@ RUN mkdir -p /win-deps/include /win-deps/lib && \
 # ============================================================
 FROM builder-base AS builder
 
+ARG VERSION_TAG
+ARG VERSION_COMMIT=unknown
+ARG VERSION_DATE=unknown
+
 WORKDIR /build
 
 # Cache Go module download (only reruns when go.mod/go.sum change)
@@ -100,15 +113,13 @@ COPY --from=win-deps /tmp/mingw-toolchain.cmake /tmp/mingw-toolchain.cmake
 # Copy source code (this is the layer that changes most often)
 COPY . .
 
-# Compute version from git (tag > short-sha > dev)
+# Release workflows pass immutable source metadata. Local builds keep explicit
+# unknown defaults instead of depending on whether the build context contains .git.
 RUN VERSION_PKG="github.com/NicolasHaas/gospeak/pkg/version" && \
-    TAG=$(git describe --tags --exact-match 2>/dev/null || true) && \
-    COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) && \
-    DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    echo "-X ${VERSION_PKG}.tag=${TAG} -X ${VERSION_PKG}.commit=${COMMIT} -X ${VERSION_PKG}.date=${DATE}" > /tmp/version-ldflags
+    echo "-X ${VERSION_PKG}.tag=${VERSION_TAG} -X ${VERSION_PKG}.commit=${VERSION_COMMIT} -X ${VERSION_PKG}.date=${VERSION_DATE}" > /tmp/version-ldflags
 
-# Build server (Linux)
-RUN CGO_ENABLED=1 go build -o /out/gospeak-server \
+# Build the pure-Go server as a static binary.
+RUN CGO_ENABLED=0 go build -o /out/gospeak-server \
     -ldflags="-s -w $(cat /tmp/version-ldflags)" \
     ./cmd/server/
 
@@ -155,17 +166,13 @@ COPY --from=builder /out/gospeak-server /out/
 COPY --from=builder /out/gospeak-client-lin /out/
 
 # ============================================================
-# Stage 4: Server runtime — minimal Debian with glibc for CGO SQLite
+# Stage 4: Server runtime — the server has no C or OS package dependencies
 # ============================================================
-FROM debian:bookworm-slim AS server
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+FROM scratch AS server
 
 COPY --from=builder /out/gospeak-server /gospeak-server
 
-EXPOSE 9600/tcp 9601/udp
+EXPOSE 9600/tcp 9601/udp 9603/tcp
 
 VOLUME ["/data"]
 
@@ -176,7 +183,7 @@ ENTRYPOINT ["/gospeak-server", "-data", "/data", "-db", "/data/gospeak.db"]
 # Scans the server image for CVEs.
 # Usage: docker build --target trivy-scan -f Containerfile .
 # ============================================================
-FROM aquasec/trivy:latest AS trivy-scan
+FROM aquasec/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 AS trivy-scan
 
 COPY --from=server / /scan-root
 

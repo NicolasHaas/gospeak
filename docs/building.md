@@ -2,8 +2,10 @@
 
 GoSpeak uses multi-stage container builds to compile all binaries and provide a
 consistent build environment for native dependencies such as PortAudio, Opus,
-and OpenGL. The current images and package inputs are not fully pinned, so these
-builds are not bit-for-bit reproducible.
+and OpenGL. Container base images, Windows PortAudio and Opus sources, GitHub
+Actions, Go, and golangci-lint are pinned. Debian, Homebrew, and runner package
+indexes remain external mutable inputs, so builds are not bit-for-bit
+reproducible.
 
 ## Prerequisites
 
@@ -38,17 +40,30 @@ docker compose --profile dev run --build lint
 
 | Binary | OS | Description |
 |--------|----|-------------|
-| `gospeak-server` | Linux | Server binary (CGO, uses SQLite via modernc.org) |
+| `gospeak-server` | Linux | Statically linked pure-Go server |
 | `gospeak-server-win.exe` | Windows | Server binary (pure Go, CGO_ENABLED=0) |
 | `gospeak-client-lin` | Linux | Client with Fyne GUI, PortAudio, Opus |
 | `gospeak-client-win.exe` | Windows | Client cross-compiled with MinGW |
+
+Release CI inspects Linux dependencies with `ldd`, Windows imports with
+`objdump`, and macOS dependencies with `otool -L`. The Windows PortAudio and
+Opus libraries are linked statically. Linux users need the runtime PortAudio,
+Opus, OpenGL, and X11 libraries supplied by their distribution. On Debian or
+Ubuntu, install `libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2
+libxinerama1 libxi6 libxxf86vm1`. macOS users need `portaudio` and `opus` from
+Homebrew until GoSpeak ships an application bundle.
+
+Release tags must use SemVer without build metadata. Push one release tag at a
+time and wait for its workflow to finish: GitHub Actions keeps only one pending
+run in a concurrency group. Stable releases also update the `latest` container
+tag; prereleases publish only their versioned tag.
 
 ## Container Build Stages
 
 ```mermaid
 graph TB
     subgraph "Stage 1: builder-base"
-        S1[golang:1.24-bookworm]
+        S1[golang:1.24.4-bookworm]
         S1 --> DEPS[Install system deps:<br/>PortAudio, Opus, OpenGL,<br/>MinGW cross-compiler]
     end
 
@@ -59,7 +74,7 @@ graph TB
     subgraph "Stage 3: builder"
         CMAKE --> GOMOD[go mod download<br/>cached layer]
         GOMOD --> COPY[Copy source]
-        COPY --> SRV_LIN[Build gospeak-server<br/>Linux, CGO=1]
+        COPY --> SRV_LIN[Build gospeak-server<br/>Linux, CGO=0]
         COPY --> SRV_WIN[Build gospeak-server-win.exe<br/>Windows, CGO=0]
         COPY --> CLI_LIN[Build gospeak-client-lin<br/>Linux, CGO=1]
         COPY --> CLI_WIN[Build gospeak-client-win.exe<br/>Windows, MinGW cross-compile]
@@ -76,7 +91,7 @@ graph TB
     end
 
     subgraph "Stage 4: server"
-        SRV_LIN --> RT1[debian:bookworm-slim<br/>+ ca-certificates]
+        SRV_LIN --> RT1[scratch runtime image]
     end
 
     subgraph "Stage 5: trivy-scan"
@@ -94,6 +109,15 @@ The Containerfile is optimized for caching:
 4. **Source compilation** (the last step in Stage 3) is the only stage rerun for code changes.
 
 ## Server Container
+
+The supplied Compose files drop all Linux capabilities and set
+`no-new-privileges`. The image still runs as root so existing named volumes,
+bind mounts, and cloud-init auto-updates remain compatible. Moving to a fixed
+unprivileged UID requires a tested ownership migration for existing database,
+certificate, and bootstrap files rather than silently stranding those files.
+The runtime image contains only the statically linked server. It has no shell,
+package manager, C runtime, or CA bundle because the server accepts inbound TLS
+connections but does not make outbound TLS requests.
 
 ```bash
 # Run standalone server

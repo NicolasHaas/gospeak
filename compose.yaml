@@ -29,6 +29,10 @@ services:
     command: ["-metrics", "${GOSPEAK_METRICS_ADDR:-}"]
     volumes:
       - ./data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # One-shot service to extract ALL cross-compiled binaries.
