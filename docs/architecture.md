@@ -23,12 +23,12 @@ graph TB
     C2 <-->|JSON over TLS| CTRL
     C3 <-->|JSON over TLS| CTRL
 
-    C1 <-->|AES-128-GCM<br/>Opus packets| SFU
-    C2 <-->|AES-128-GCM<br/>Opus packets| SFU
-    C3 <-->|AES-128-GCM<br/>Opus packets| SFU
+    C1 <-->|Selected AEAD<br/>Opus packets| SFU
+    C2 <-->|Selected AEAD<br/>Opus packets| SFU
+    C3 <-->|Selected AEAD<br/>Opus packets| SFU
 
-    C1 <-->|when enabled:<br/>AES-128-GCM screen packets| SCR
-    C2 <-->|when enabled:<br/>AES-128-GCM screen packets| SCR
+    C1 <-->|when enabled:<br/>selected AEAD screen packets| SCR
+    C2 <-->|when enabled:<br/>selected AEAD screen packets| SCR
 
     CTRL --- DB
 ```
@@ -92,7 +92,7 @@ graph LR
 | `pkg/protocol` | Framing and packet formats for control, voice, and screen-share transports |
 | `pkg/protocol/pb` | All control message type definitions (structs with JSON tags) |
 | `pkg/audio` | Audio interfaces (`Capturer`, `Player`, `AudioEncoder`, `AudioDecoder`, `VoiceDetector`, `DecoderFactory`, `DeviceLister`) + PortAudio/Opus default implementations |
-| `pkg/crypto` | AES-128-GCM voice encryption, key generation, token hashing (SHA-256), password hashing (Argon2id) |
+| `pkg/crypto` | AES-GCM and ChaCha20-Poly1305 media encryption, key generation, token hashing (SHA-256), password hashing (Argon2id) |
 | `pkg/screenshare` | Platform-specific screen capture and JPEG encoding helpers |
 | `pkg/model` | Core domain types: User, Channel, Token, Ban, Session, Role, Permission |
 | `pkg/rbac` | Role-based access control and the User/Moderator/Admin permission matrix |
@@ -120,7 +120,7 @@ sequenceDiagram
     Main->>Store: Open database
     Main->>Srv: New(config, deps)
     Main->>Srv: Run()
-    Srv->>Srv: GenerateKey() → shared AES-128 voice key
+    Srv->>Srv: GenerateMediaKey(selected suite) → shared voice key
     Srv->>Store: Ensure "Lobby" channel exists
     Srv->>Store: Load channels from YAML (if configured)
     Srv->>Srv: Securely publish bootstrap-admin.token (first run only)
@@ -158,8 +158,8 @@ sequenceDiagram
     UI->>Eng: Connect(host, token?, username)
     Eng->>TLS: Dial using system PKI or an explicitly confirmed TOFU pin
     TLS->>Srv: TLS 1.3 Handshake
-    Eng->>Srv: AuthRequest{token?, username}
-    Srv->>Eng: AuthResponse{sessionID, role, channelScope, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken?}
+    Eng->>Srv: AuthRequest{token?, username, mediaCiphers}
+    Srv->>Eng: AuthResponse{sessionID, role, channelScope, mediaCipher, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken?}
     Eng->>UDP: Dial UDP to server:9601
     Eng->>Eng: Create outbound VoiceCipher from encryptionKey
     Eng->>Srv: Authenticated voice-registration datagram
@@ -186,7 +186,7 @@ sequenceDiagram
 
     loop Voice Loop
         Eng->>Eng: Capture PCM → VAD check → Opus encode
-        Eng->>Srv: AES-128-GCM encrypted UDP packet
+        Eng->>Srv: Selected AEAD encrypted UDP packet
         Srv->>Eng: Relayed packets from others
         Eng->>Eng: Decrypt → Jitter buffer → Opus decode → Playback
     end

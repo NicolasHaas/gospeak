@@ -26,7 +26,7 @@ func authenticateControl(t *testing.T, srv *Server, st datastore.DataProviderFac
 	}()
 
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: username, Token: token},
+		AuthRequest: &pb.AuthRequest{Username: username, Token: token, MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("write AuthRequest: %v", err)
 	}

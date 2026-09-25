@@ -301,7 +301,7 @@ func (sm *SessionManager) releaseReservationLocked(reservation *SessionReservati
 
 // nextIDLocked allocates each usable uint32 exactly once for this manager's
 // lifetime. The server voice key is scoped to the same server lifecycle, so a
-// reused (session ID, sequence number) GCM nonce is impossible.
+// reused (session ID, sequence number) AEAD nonce is impossible.
 func (sm *SessionManager) nextIDLocked() (uint32, error) {
 	if sm.issuedSessionIDs >= usableSessionIDs {
 		return 0, ErrSessionIDExhausted

@@ -36,7 +36,7 @@ func TestControlDisconnectClosesOwnedScreenConnection(t *testing.T) {
 		close(controlDone)
 	}()
 	if err := protocol.WriteControlMessage(controlClient, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "screen-owner"},
+		AuthRequest: &pb.AuthRequest{Username: "screen-owner", MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("write control auth: %v", err)
 	}

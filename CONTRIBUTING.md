@@ -77,7 +77,7 @@ cmd/
 pkg/
   audio/           Audio interfaces + PortAudio/Opus implementations
   client/          Client engine, networking, settings
-  crypto/          AES-128-GCM, key generation, hashing
+  crypto/          AES-GCM and ChaCha20-Poly1305, key generation, hashing
   model/           Core domain types + validation
   protocol/        Wire protocol (length-prefixed JSON)
   protocol/pb/     Message type definitions

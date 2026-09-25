@@ -366,7 +366,7 @@ func TestAuthResponseGatesScreenCredentials(t *testing.T) {
 				close(done)
 			}()
 			if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-				AuthRequest: &pb.AuthRequest{Username: "screen-gating-" + tc.name},
+				AuthRequest: &pb.AuthRequest{Username: "screen-gating-" + tc.name, MediaCiphers: []string{"aes128"}},
 			}); err != nil {
 				t.Fatalf("Write AuthRequest: %v", err)
 			}
@@ -429,7 +429,7 @@ func TestAuthenticatedControlConnectionBalancesMetrics(t *testing.T) {
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "lifecycle-user"},
+		AuthRequest: &pb.AuthRequest{Username: "lifecycle-user", MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("Write AuthRequest: %v", err)
 	}

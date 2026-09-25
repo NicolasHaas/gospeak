@@ -56,7 +56,7 @@ func authenticateBootstrap(t *testing.T, srv *Server, st datastore.DataProviderF
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: username, Token: token},
+		AuthRequest: &pb.AuthRequest{Username: username, Token: token, MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		_ = clientConn.Close()
 		t.Fatalf("WriteControlMessage() error = %v", err)
@@ -141,7 +141,7 @@ func TestBootstrapProvisioningRetriesAfterAuthResponseWriteFailure(t *testing.T)
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "bootstrap-admin", Token: rawToken},
+		AuthRequest: &pb.AuthRequest{Username: "bootstrap-admin", Token: rawToken, MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("WriteControlMessage() error = %v", err)
 	}
@@ -524,7 +524,7 @@ func TestBootstrapProvisioningRetrySurvivesRestart(t *testing.T) {
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "bootstrap-admin", Token: rawToken},
+		AuthRequest: &pb.AuthRequest{Username: "bootstrap-admin", Token: rawToken, MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("WriteControlMessage() error = %v", err)
 	}
@@ -572,7 +572,7 @@ func TestOrdinarySingleUseInviteRemainsConsumedAfterResponseFailure(t *testing.T
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "first-invite-user", Token: rawToken},
+		AuthRequest: &pb.AuthRequest{Username: "first-invite-user", Token: rawToken, MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("WriteControlMessage() error = %v", err)
 	}

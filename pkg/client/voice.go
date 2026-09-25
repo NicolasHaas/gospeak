@@ -32,7 +32,11 @@ type VoiceClient struct {
 }
 
 // NewVoiceClient creates a new UDP voice client.
-func NewVoiceClient(serverAddr string, sessionID uint32, encKey, registrationKey []byte) (*VoiceClient, error) {
+func NewVoiceClient(serverAddr string, sessionID uint32, encKey, registrationKey []byte, suite string) (*VoiceClient, error) {
+	cipher, err := gospeakCrypto.NewMediaCipher(suite, encKey)
+	if err != nil {
+		return nil, fmt.Errorf("client: voice cipher: %w", err)
+	}
 	addr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("client: resolve voice addr: %w", err)
@@ -41,12 +45,6 @@ func NewVoiceClient(serverAddr string, sessionID uint32, encKey, registrationKey
 	conn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial voice: %w", err)
-	}
-
-	cipher, err := gospeakCrypto.NewVoiceCipher(encKey)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("client: voice cipher: %w", err)
 	}
 
 	// Increase buffer sizes

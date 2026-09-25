@@ -215,7 +215,7 @@ func TestIPBanRejectsAuthenticationBeforeSessionPublication(t *testing.T) {
 		srv.handleControlConn(handler, wrapped, st)
 		close(done)
 	}()
-	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: "blocked-ip-user"}}); err != nil {
+	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: "blocked-ip-user", MediaCiphers: []string{"aes128"}}}); err != nil {
 		t.Fatalf("WriteControlMessage: %v", err)
 	}
 	response, err := protocol.ReadControlMessage(clientConn)

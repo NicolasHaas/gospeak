@@ -148,7 +148,7 @@ func TestSessionCapacityPreventsIrreversibleOpenAccountProvisioning(t *testing.T
 		close(done)
 	}()
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "must-not-persist"},
+		AuthRequest: &pb.AuthRequest{Username: "must-not-persist", MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("write auth request: %v", err)
 	}

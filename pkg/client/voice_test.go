@@ -20,7 +20,7 @@ func TestSendVoiceRefusesSequenceWrap(t *testing.T) {
 
 	registrationKey := bytes.Repeat([]byte{0x42}, protocol.VoiceRegistrationKeySize)
 	voiceKey := bytes.Repeat([]byte{0x24}, 16)
-	client, err := NewVoiceClient(listener.LocalAddr().String(), 1234, voiceKey, registrationKey)
+	client, err := NewVoiceClient(listener.LocalAddr().String(), 1234, voiceKey, registrationKey, "aes128")
 	if err != nil {
 		t.Fatalf("NewVoiceClient: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestNewVoiceClientRegistersEndpointImmediately(t *testing.T) {
 
 	registrationKey := bytes.Repeat([]byte{0x42}, protocol.VoiceRegistrationKeySize)
 	voiceKey := bytes.Repeat([]byte{0x24}, 16)
-	client, err := NewVoiceClient(listener.LocalAddr().String(), 1234, voiceKey, registrationKey)
+	client, err := NewVoiceClient(listener.LocalAddr().String(), 1234, voiceKey, registrationKey, "aes128")
 	if err != nil {
 		t.Fatalf("NewVoiceClient: %v", err)
 	}

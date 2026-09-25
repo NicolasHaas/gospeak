@@ -94,7 +94,7 @@ func TestControlMessageBudgetDisconnectsFloodingSession(t *testing.T) {
 	}()
 
 	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: "budget-user"},
+		AuthRequest: &pb.AuthRequest{Username: "budget-user", MediaCiphers: []string{"aes128"}},
 	}); err != nil {
 		t.Fatalf("write auth request: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestGlobalControlBudgetDisconnectsAcrossDistinctUsers(t *testing.T) {
 			srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
 			close(done)
 		}()
-		if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: username}}); err != nil {
+		if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: username, MediaCiphers: []string{"aes128"}}}); err != nil {
 			t.Fatalf("write %s auth: %v", username, err)
 		}
 		response, err := protocol.ReadControlMessage(clientConn)
@@ -416,8 +416,9 @@ func TestControlUserBudgetCannotBeResetByReauthentication(t *testing.T) {
 			close(done)
 		}()
 		if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{
-			Username: "reconnect-budget-user",
-			Token:    token,
+			Username:     "reconnect-budget-user",
+			Token:        token,
+			MediaCiphers: []string{"aes128"},
 		}}); err != nil {
 			t.Fatalf("write auth request: %v", err)
 		}

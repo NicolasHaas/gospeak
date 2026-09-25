@@ -192,13 +192,14 @@ type Engine struct {
 	latestCallbacks      map[latestCallbackKey]func()
 	latestCallbackQueued map[latestCallbackKey]bool
 
-	state     State
-	sessionID uint32
-	username  string
-	role      string
-	channelID int64
-	muted     bool
-	deafened  bool
+	state       State
+	sessionID   uint32
+	username    string
+	role        string
+	mediaCipher string
+	channelID   int64
+	muted       bool
+	deafened    bool
 
 	generation    *connectionGeneration
 	disconnecting *connectionGeneration
@@ -377,7 +378,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 
 	slog.Info("authenticated", "session", authResp.SessionID, "user", authResp.Username, "role", authResp.Role)
 
-	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey, authResp.VoiceRegistrationKey)
+	voice, err := NewVoiceClient(voiceAddr, authResp.SessionID, authResp.EncryptionKey, authResp.VoiceRegistrationKey, authResp.MediaCipher)
 	if err != nil {
 		return fail(err)
 	}
@@ -396,7 +397,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 		return fail(fmt.Errorf("connection canceled"))
 	}
 
-	cipher, err := gospeakCrypto.NewVoiceCipher(authResp.EncryptionKey)
+	cipher, err := gospeakCrypto.NewMediaCipher(authResp.MediaCipher, authResp.EncryptionKey)
 	if err != nil {
 		return fail(err)
 	}
@@ -548,6 +549,7 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 	e.role = authResp.Role
 	e.channels = authResp.Channels
 	e.screenShareEnabled = authResp.ScreenShareEnabled
+	e.mediaCipher = authResp.MediaCipher
 	e.state = StateConnected
 	e.mu.Unlock()
 
@@ -1922,6 +1924,15 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 		e.clearScreenShareStateGenerationLocked(g)
 		return
 	}
+	if event.Active {
+		e.mu.RLock()
+		suite := e.mediaCipher
+		e.mu.RUnlock()
+		if event.MediaCipher != suite || suite == "" {
+			e.requestDisconnect(g, "screen media cipher mismatch")
+			return
+		}
+	}
 
 	e.mu.RLock()
 	mySessionID := e.sessionID
@@ -1957,11 +1968,12 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 	} else if len(event.EncryptionKey) > 0 {
 		sameKey := previous != nil && previous.SessionID == event.SessionID && bytes.Equal(e.screenKey, event.EncryptionKey)
 		if !sameKey {
-			cipher, err := gospeakCrypto.NewVoiceCipher(event.EncryptionKey)
+			cipher, err := gospeakCrypto.NewMediaCipher(event.MediaCipher, event.EncryptionKey)
 			if err != nil {
 				e.screenMu.Unlock()
 				e.screenSendMu.Unlock()
 				slog.Error("screen cipher init failed", "err", err)
+				e.requestDisconnect(g, "invalid screen media key")
 				return
 			}
 			e.screenCipher = cipher

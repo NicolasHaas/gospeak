@@ -12,6 +12,7 @@ import (
 )
 
 type ScreenShareManager struct {
+	mediaCipher             string
 	mu                      sync.RWMutex
 	activeByChannel         map[int64]*pb.ScreenShareEvent
 	channelBySession        map[uint32]int64
@@ -27,8 +28,13 @@ type ScreenShareManager struct {
 	beforeFrameReplayCommit func()
 }
 
-func NewScreenShareManager() *ScreenShareManager {
+func NewScreenShareManager(suite ...string) *ScreenShareManager {
+	selected := "aes128"
+	if len(suite) != 0 {
+		selected = suite[0]
+	}
 	return &ScreenShareManager{
+		mediaCipher:        selected,
 		activeByChannel:    make(map[int64]*pb.ScreenShareEvent),
 		channelBySession:   make(map[uint32]int64),
 		authorizedByShare:  make(map[uint32]map[uint32]bool),
@@ -50,11 +56,11 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	if active, ok := m.activeByChannel[channelID]; ok && active.Active && active.SessionID != sessionID {
 		return nil, fmt.Errorf("channel already has an active screen share")
 	}
-	key, err := gospeakCrypto.GenerateKey()
+	key, err := gospeakCrypto.GenerateMediaKey(m.mediaCipher)
 	if err != nil {
 		return nil, fmt.Errorf("generate screen share key: %w", err)
 	}
-	cipher, err := gospeakCrypto.NewVoiceCipher(key)
+	cipher, err := gospeakCrypto.NewMediaCipher(m.mediaCipher, key)
 	if err != nil {
 		return nil, fmt.Errorf("initialize screen share cipher: %w", err)
 	}
@@ -71,6 +77,7 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 		Width:         width,
 		Height:        height,
 		EncryptionKey: append([]byte(nil), key...),
+		MediaCipher:   m.mediaCipher,
 	}
 	m.activeByChannel[channelID] = event
 	m.channelBySession[sessionID] = channelID
