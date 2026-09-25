@@ -236,13 +236,13 @@ func (a *App) buildUI() {
 		}()
 	})
 	a.shareBtn.Disable()
-	a.shareChannelBtn = widget.NewButton("Share With Channel", func() {
+	a.shareChannelBtn = widget.NewButton("Share Screen With Voice Channel", func() {
 		if err := a.engine.ShareScreenShareWithChannel(); err != nil {
 			dialog.ShowError(err, a.window)
 		}
 	})
 	a.shareChannelBtn.Hide()
-	a.joinChannelBtn = widget.NewButton("Join Channel", func() {
+	a.joinChannelBtn = widget.NewButton("Join Voice", func() {
 		a.joinSelectedChannel()
 	})
 	a.joinChannelBtn.Disable()
@@ -323,6 +323,10 @@ func (a *App) buildUI() {
 		if text == "" {
 			return
 		}
+		if a.selectedChannelID != a.engine.GetChannelID() {
+			dialog.ShowInformation("Chat", "Select your voice channel to send a message.", a.window)
+			return
+		}
 		if err := a.engine.SendChat(text); err != nil {
 			dialog.ShowError(err, a.window)
 			return
@@ -330,7 +334,8 @@ func (a *App) buildUI() {
 		a.chatEntry.SetText("")
 	}
 
-	a.chatHeader = widget.NewLabelWithStyle("Chat", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	a.chatHeader = widget.NewLabelWithStyle("Join voice to chat", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	a.chatHeader.Wrapping = fyne.TextWrapBreak
 	a.watchBtn = widget.NewButton("Watch", func() {
 		if a.activeScreenShare == nil || !a.activeScreenShare.Active {
 			return
@@ -354,7 +359,7 @@ func (a *App) buildUI() {
 		a.showChatPanel()
 	})
 	a.backBtn.Hide()
-	chatHeaderBar := container.NewHBox(a.chatHeader, layout.NewSpacer(), a.watchBtn, a.backBtn)
+	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
 	a.chatStack = container.NewStack(a.chatScroll, a.screenBox)
 	chatPanel := container.NewBorder(chatHeaderBar, a.chatEntry, nil, nil, a.chatStack)
 
@@ -399,8 +404,11 @@ func (a *App) bindEvents() {
 				a.updateMuteButtons()
 				a.serverBtn.Hide()
 				a.chatEntry.Disable()
+				a.chatBox.Objects = nil
+				a.chatBox.Refresh()
 				a.channels = nil
 				a.selectedChannelID = 0
+				a.updateChatContext(0)
 				a.activeScreenShare = nil
 				a.watchingScreenFeed = false
 				a.updateJoinChannelButton()
@@ -427,7 +435,7 @@ func (a *App) bindEvents() {
 				a.updateJoinChannelButton()
 				a.updateShareButton()
 				a.updateShareChannelButton()
-				a.chatEntry.Enable()
+				a.updateChatContext(a.engine.GetChannelID())
 				role := a.engine.GetRole()
 				if role == "admin" || role == "moderator" {
 					a.serverBtn.Show()
@@ -441,6 +449,7 @@ func (a *App) bindEvents() {
 			a.channels = channels
 			a.channelList.Refresh()
 			a.syncSelectedChannel()
+			a.updateChatContext(a.engine.GetChannelID())
 			a.updateShareButton()
 		})
 	}
@@ -471,6 +480,7 @@ func (a *App) bindEvents() {
 		fyne.Do(func() {
 			a.chatBox.Objects = nil
 			a.chatBox.Refresh()
+			a.updateChatContext(channelID)
 			a.updateJoinChannelButton()
 		})
 	}
@@ -485,6 +495,9 @@ func (a *App) bindEvents() {
 
 	a.engine.OnChatMessage = func(channelID int64, sender, text string, ts int64) {
 		fyne.Do(func() {
+			if channelID != a.engine.GetChannelID() || a.engine.GetState() != client.StateConnected {
+				return
+			}
 			t := time.Unix(ts, 0)
 			lbl := widget.NewLabel(fmt.Sprintf("[%s] %s: %s", t.Format("15:04"), sender, text))
 			lbl.Wrapping = fyne.TextWrapWord
@@ -672,6 +685,29 @@ func (a *App) updateJoinChannelButton() {
 		return
 	}
 	a.joinChannelBtn.Enable()
+}
+
+func (a *App) updateChatContext(voiceID int64) {
+	if voiceID == 0 {
+		a.chatHeader.SetText("Join voice to chat")
+		a.chatEntry.Disable()
+		return
+	}
+	name := fmt.Sprintf("channel #%d", voiceID)
+	for _, channel := range a.channels {
+		if channel.ID == voiceID {
+			name = channel.Name
+			break
+		}
+	}
+	a.chatHeader.SetText(fmt.Sprintf("Chat: %s (voice)", name))
+	if a.selectedChannelID != voiceID {
+		a.chatEntry.SetPlaceHolder("Select your voice channel to chat")
+		a.chatEntry.Disable()
+		return
+	}
+	a.chatEntry.SetPlaceHolder("Type a message... (Enter to send)")
+	a.chatEntry.Enable()
 }
 
 func (a *App) syncSelectedChannel() {
@@ -1439,6 +1475,7 @@ func (a *App) onChannelListSelect(id widget.ListItemID) {
 	if item.isChannel {
 		a.selectedChannelID = item.channelID
 		a.updateJoinChannelButton()
+		a.updateChatContext(a.engine.GetChannelID())
 		if a.engine.GetState() != client.StateConnected {
 			return
 		}

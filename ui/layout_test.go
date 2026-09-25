@@ -4,6 +4,7 @@ import (
 	"errors"
 	"image/png"
 	"os"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -11,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/NicolasHaas/gospeak/pkg/client"
+	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
 func TestMainWindowFitsDefaultWidth(t *testing.T) {
@@ -84,6 +86,12 @@ func TestChatDraftSurvivesSendErrorAndJoinRequest(t *testing.T) {
 	if len(a.chatBox.Objects) != 0 {
 		t.Fatal("accepted join did not clear old channel chat")
 	}
+	a.chatBox.Add(widget.NewLabel("server A message"))
+	a.engine.OnStateChange(client.StateDisconnected)
+	fyne.DoAndWait(func() {})
+	if len(a.chatBox.Objects) != 0 {
+		t.Fatal("disconnect left old server chat visible")
+	}
 }
 
 func TestAudioFailureIsVisibleAndResetsOnDisconnect(t *testing.T) {
@@ -103,5 +111,33 @@ func TestAudioFailureIsVisibleAndResetsOnDisconnect(t *testing.T) {
 	fyne.DoAndWait(func() {})
 	if got := a.vadIndicator.Text; got != "Voice idle" {
 		t.Fatalf("audio status after disconnect = %q, want reset", got)
+	}
+}
+
+func TestChatFollowsVoiceUntilIndependentChatExists(t *testing.T) {
+	fyneApp := test.NewApp()
+	defer fyneApp.Quit()
+	a := &App{fyneApp: fyneApp, window: fyneApp.NewWindow("GoSpeak"), engine: client.NewEngine()}
+	a.buildUI()
+	a.channels = []pb.ChannelInfo{{ID: 1, Name: "Lobby"}, {ID: 2, Name: "Games"}}
+	a.selectedChannelID = 2
+	a.updateChatContext(1)
+	if a.chatHeader.Text != "Chat: Lobby (voice)" || !a.chatEntry.Disabled() {
+		t.Fatal("selecting Games must not make Lobby chat look like Games chat")
+	}
+	a.selectedChannelID = 1
+	a.updateChatContext(1)
+	if a.chatEntry.Disabled() {
+		t.Fatal("chat must be available when the selected channel matches voice")
+	}
+	a.updateChatContext(0)
+	if a.chatHeader.Text != "Join voice to chat" || !a.chatEntry.Disabled() {
+		t.Fatal("chat must be unavailable outside voice")
+	}
+	a.channels[0].Name = strings.Repeat("W", 64)
+	a.selectedChannelID = 1
+	a.updateChatContext(1)
+	if width := a.window.Content().MinSize().Width; width > 800 {
+		t.Fatalf("long channel name makes window %.0f px wide", width)
 	}
 }
