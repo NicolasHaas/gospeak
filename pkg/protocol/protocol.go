@@ -60,10 +60,10 @@ var controlMessageFields = map[string]struct{}{
 // VoicePacket represents a voice data packet sent over UDP.
 type VoicePacket struct {
 	SessionID uint32 // 4 bytes: identifies the sender session
-	SeqNum    uint32 // 4 bytes: sequence number for ordering (prevents AES-GCM nonce reuse)
+	SeqNum    uint32 // 4 bytes: sequence number for ordering (prevents AEAD nonce reuse)
 	Timestamp uint32 // 4 bytes: RTP-style timestamp
 	ChannelID uint64 // 8 bytes: target channel
-	Payload   []byte // encrypted Opus frame + GCM auth tag
+	Payload   []byte // encrypted Opus frame + AEAD auth tag
 }
 
 // MarshalHeader marshals only the header portion (20 bytes).

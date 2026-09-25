@@ -25,6 +25,7 @@ type Config struct {
 	DataDir                     string        // directory for generated certs and data
 	AllowNoToken                bool          // allow users to join without a token (open server)
 	EnableScreenShare           bool          // enable per-channel screen sharing support
+	MediaCipher                 string        // aes128, aes256, or chacha20 for both media planes
 	ChannelsFile                string        // YAML file defining channels to create on startup
 	MetricsAddr                 string        // HTTP bind address for /metrics endpoint (empty = disabled)
 	PreAuthTimeout              time.Duration // maximum TLS handshake and authentication time
@@ -56,6 +57,7 @@ func DefaultConfig() Config {
 		MetricsAddr:                 "",
 		DBPath:                      "gospeak.db",
 		DataDir:                     ".",
+		MediaCipher:                 "aes128",
 		PreAuthTimeout:              10 * time.Second,
 		MaxPreAuthConnections:       64,
 		MaxSessions:                 1024,
@@ -91,7 +93,7 @@ type Server struct {
 	stopping                bool
 	screenMu                sync.RWMutex
 	screenConns             map[uint32]*screenClientConn
-	voiceKey                []byte // shared AES-128 key for all voice encryption
+	voiceKey                []byte // shared key for all voice encryption
 	voiceCipher             *gospeakCrypto.VoiceCipher
 	voiceReplayHook         func()
 	authLimiter             *authRateLimiter
@@ -167,7 +169,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		cfg:                     cfg,
 		sessions:                NewSessionManagerWithLimits(cfg.MaxSessions, cfg.MaxSessionsPerUser),
 		channels:                NewChannelManager(),
-		screenShare:             NewScreenShareManager(),
+		screenShare:             NewScreenShareManager(cfg.MediaCipher),
 		metrics:                 metrics,
 		screenConns:             make(map[uint32]*screenClientConn),
 		voiceStats:              make(map[uint32]*perSessionVoiceStat),

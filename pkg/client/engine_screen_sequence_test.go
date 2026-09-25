@@ -63,6 +63,7 @@ func TestScreenClientSendBoundsWrite(t *testing.T) {
 
 func TestSendScreenShareFrameRejectsExhaustedSequence(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	conn := &recordingConn{}
 	g.screen = &ScreenClient{conn: conn}
@@ -99,6 +100,7 @@ func TestSendScreenShareFrameRejectsExhaustedSequence(t *testing.T) {
 
 func TestSendScreenShareFrameDiscardsStaleCaptureAfterKeyRotation(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	conn := &recordingConn{}
 	g.screen = &ScreenClient{conn: conn}
@@ -106,7 +108,7 @@ func TestSendScreenShareFrameDiscardsStaleCaptureAfterKeyRotation(t *testing.T) 
 	e.state = StateConnected
 	e.sessionID = 10
 	e.channelID = 1
-	oldEvent := &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: bytes.Repeat([]byte{1}, 16)}
+	oldEvent := &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: bytes.Repeat([]byte{1}, 16)}
 	e.handleScreenShareEvent(g, oldEvent)
 	e.captureScreenFn = func(int) (image.Image, error) {
 		return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil
@@ -124,7 +126,7 @@ func TestSendScreenShareFrameDiscardsStaleCaptureAfterKeyRotation(t *testing.T) 
 	result := make(chan error, 1)
 	go func() { result <- e.sendScreenShareFrame(context.Background(), g, 0) }()
 	waitForSignal(t, publishReached, "screen sender did not reach key-rotation publication boundary")
-	newEvent := &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: bytes.Repeat([]byte{2}, 16)}
+	newEvent := &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: bytes.Repeat([]byte{2}, 16)}
 	e.handleScreenShareEvent(g, newEvent)
 	close(releasePublish)
 
@@ -138,6 +140,7 @@ func TestSendScreenShareFrameDiscardsStaleCaptureAfterKeyRotation(t *testing.T) 
 
 func TestSendScreenShareFrameDiscardsCaptureAfterStop(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	conn := &recordingConn{}
 	g.screen = &ScreenClient{conn: conn}
@@ -178,6 +181,7 @@ func TestSendScreenShareFrameDiscardsCaptureAfterStop(t *testing.T) {
 
 func TestRetiredScreenLoopCannotCancelReplacement(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	replacementCtx, replacementCancel := context.WithCancel(context.Background())
 	defer replacementCancel()
 	e.screenShareLoopID = 2
@@ -198,6 +202,7 @@ func TestRetiredScreenLoopCannotCancelReplacement(t *testing.T) {
 
 func TestScreenSequenceResetsOnlyAtConnectionGenerationBoundary(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	g.screen = &ScreenClient{conn: &recordingConn{}}
 	e.generation = g
@@ -224,6 +229,7 @@ func TestScreenSequenceResetsOnlyAtConnectionGenerationBoundary(t *testing.T) {
 
 func TestRetiredScreenKeyResumesSequenceAfterRotation(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	g.screen = &ScreenClient{conn: &recordingConn{}}
 	e.generation = g
@@ -238,12 +244,12 @@ func TestRetiredScreenKeyResumesSequenceAfterRotation(t *testing.T) {
 	}
 	key1 := bytes.Repeat([]byte{1}, 16)
 	key2 := bytes.Repeat([]byte{2}, 16)
-	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key1})
+	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key1})
 	if err := e.sendScreenShareFrame(context.Background(), g, 0); err != nil {
 		t.Fatal(err)
 	}
-	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key2})
-	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key1})
+	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key2})
+	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key1})
 	if e.screenSeqNum != 1 {
 		t.Fatalf("restored screen sequence = %d, want 1", e.screenSeqNum)
 	}
@@ -257,6 +263,7 @@ func TestRetiredScreenKeyResumesSequenceAfterRotation(t *testing.T) {
 
 func TestRetiredScreenKeyResumesSequenceAfterInactiveEvent(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	g.screen = &ScreenClient{conn: &recordingConn{}}
 	e.generation = g
@@ -270,12 +277,12 @@ func TestRetiredScreenKeyResumesSequenceAfterInactiveEvent(t *testing.T) {
 		return []byte("frame"), 1, 1, nil
 	}
 	key := bytes.Repeat([]byte{1}, 16)
-	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key})
+	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key})
 	if err := e.sendScreenShareFrame(context.Background(), g, 0); err != nil {
 		t.Fatal(err)
 	}
 	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: false, SessionID: 10, ChannelID: 1})
-	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key})
+	e.handleScreenShareEvent(g, &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key})
 	if e.screenSeqNum != 1 {
 		t.Fatalf("restored screen sequence = %d, want 1", e.screenSeqNum)
 	}
@@ -289,6 +296,7 @@ func TestRetiredScreenKeyResumesSequenceAfterInactiveEvent(t *testing.T) {
 
 func TestRepeatedScreenShareKeyDoesNotResetSequence(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	e.generation = g
 	e.state = StateConnected
@@ -296,6 +304,7 @@ func TestRepeatedScreenShareKeyDoesNotResetSequence(t *testing.T) {
 	e.channelID = 1
 	event := &pb.ScreenShareEvent{
 		Active:        true,
+		MediaCipher:   "aes128",
 		SessionID:     10,
 		ChannelID:     1,
 		EncryptionKey: bytes.Repeat([]byte{1}, 16),
@@ -318,6 +327,7 @@ func TestRepeatedScreenShareKeyDoesNotResetSequence(t *testing.T) {
 
 func TestDecryptScreenPacketRejectsReplayAndPreservesSameKeyState(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	e.generation = g
 	e.state = StateConnected
@@ -326,7 +336,7 @@ func TestDecryptScreenPacketRejectsReplayAndPreservesSameKeyState(t *testing.T) 
 	key1 := bytes.Repeat([]byte{1}, 16)
 	key2 := bytes.Repeat([]byte{2}, 16)
 	event := func(key []byte) *pb.ScreenShareEvent {
-		return &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, EncryptionKey: key}
+		return &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: key}
 	}
 	packet := func(key []byte, sequence uint32) *protocol.ScreenPacket {
 		cipher, err := gospeakCrypto.NewVoiceCipher(key)
@@ -371,6 +381,7 @@ func TestDecryptScreenPacketRejectsReplayAndPreservesSameKeyState(t *testing.T) 
 
 func TestScreenShareLoopStopsAndReportsSequenceExhaustion(t *testing.T) {
 	e := NewEngine()
+	e.mediaCipher = "aes128"
 	g := newConnectionGeneration()
 	screenConn := &recordingConn{}
 	controlConn := &recordingConn{}

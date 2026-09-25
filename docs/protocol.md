@@ -67,19 +67,19 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    C->>S: AuthRequest{token?, username}
+    C->>S: AuthRequest{token?, username, mediaCiphers}
     alt New user (invite or open server)
         S->>S: Validate invite token or allow open join
         S->>S: Create user + personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken}
+        S->>C: AuthResponse{sessionID, role, mediaCipher, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken}
         Note over C: Store personal token for reconnect
     else Existing user
         S->>S: Require personal token
         S->>S: Check bans
         S->>S: Generate session
-        S->>C: AuthResponse{sessionID, role, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels}
+        S->>C: AuthResponse{sessionID, role, mediaCipher, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels}
     else Invalid token / banned
         S->>C: ErrorResponse{code, message}
         S->>S: Close connection
@@ -150,7 +150,7 @@ The control plane carries screen-share lifecycle messages only:
 - `ScreenShareUnsubscribeRequest`
 - `ScreenShareEvent`
 
-`ScreenShareEvent` is broadcast to channel members for presence updates. A targeted copy with an `encryption_key` is sent to the active sharer, to users already in the channel when sharing starts, and to current channel members if the sharer later shares the active key with the channel again.
+`ScreenShareEvent` is broadcast to channel members for presence updates. Active events carry `media_cipher`. A targeted copy with an `encryption_key` is sent to the active sharer, to users already in the channel when sharing starts, and to current channel members if the sharer later shares the active key with the channel again. The client disconnects if the active event's suite differs from the authenticated choice.
 
 ### Admin Operations
 
@@ -177,7 +177,7 @@ The control plane carries screen-share lifecycle messages only:
 
 - **Port**: 9601 (default)
 - **Transport**: Raw UDP
-- **Encryption**: AES-128-GCM (shared key distributed in `AuthResponse`)
+- **Encryption**: AES-128-GCM (default), AES-256-GCM, or ChaCha20-Poly1305 (shared key and explicit suite distributed in `AuthResponse` over TLS)
 - **Codec**: Opus at 48 kHz mono, 20ms frames (960 samples)
 
 ### Authenticated Endpoint Registration
@@ -201,7 +201,7 @@ This field is required: clients and servers from before authenticated UDP regist
 │  │SessionID (4B) │SeqNum (4B)  │Timestamp (4B)│Chan(8B)│ │
 │  └───────────────┴─────────────┴──────────────┴────────┘ │
 ├─────────────────────────────────────────────────────────┤
-│  Payload: AES-128-GCM(opus_frame)                       │
+│  Payload: selected AEAD(opus_frame)                     │
 │  ┌──────────────────────────────────────────────┐       │
 │  │ Ciphertext (variable) + Auth Tag (16 bytes)  │       │
 │  └──────────────────────────────────────────────┘       │
@@ -209,7 +209,7 @@ This field is required: clients and servers from before authenticated UDP regist
 ```
 
 The 64-bit unsigned channel field carries positive SQLite channel IDs without
-truncation. The 20-byte header is authenticated as AES-GCM additional data.
+truncation. The 20-byte header is authenticated as AEAD additional data.
 Clients and servers using the former 14-byte voice header are not wire-compatible.
 
 ### Voice Pipeline
@@ -221,7 +221,7 @@ graph LR
         PCM --> VAD{VAD<br/>Check}
         VAD -->|Active| ENC[Opus<br/>Encoder]
         VAD -->|Silent| DROP[Drop]
-        ENC --> ENCRYPT[AES-128-GCM<br/>Encrypt]
+        ENC --> ENCRYPT[Selected AEAD<br/>Encrypt]
         ENCRYPT --> UDP_OUT[UDP Send]
     end
 
@@ -234,7 +234,7 @@ graph LR
     SFU --> UDP_IN
 
     subgraph "Client B (Receiver)"
-        UDP_IN[UDP Recv] --> DECRYPT[AES-128-GCM<br/>Decrypt]
+        UDP_IN[UDP Recv] --> DECRYPT[Selected AEAD<br/>Decrypt]
         DECRYPT --> JITTER[Jitter<br/>Buffer]
         JITTER --> DEC[Opus<br/>Decoder]
         DEC --> SPK[Speaker<br/>PortAudio]
@@ -247,14 +247,14 @@ The server does **not** decode Opus audio. It:
 
 1. Receives a UDP packet from a client
 2. Parses the 20-byte plaintext header and verifies the registered source endpoint and current channel
-3. Opens the AES-GCM payload transiently to authenticate the ciphertext and complete header; it does not decode, log, or retain the Opus plaintext
+3. Opens the selected AEAD payload transiently to authenticate the ciphertext and complete header; it does not decode, log, or retain the Opus plaintext
 4. Applies a per-session 64-packet replay window after authentication
 5. Forwards the original ciphertext **as-is** to all other members of that channel
 6. Skips the sender (no echo) and any deafened users
 
 ### Nonce Construction
 
-The AES-128-GCM nonce (12 bytes) is deterministic and never reused while a voice key is active:
+The selected AEAD nonce (12 bytes) is deterministic and never reused while a voice key is active:
 
 ```
 Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
@@ -264,7 +264,7 @@ Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 - the shared voice key is generated for that same server lifecycle, so historical sessions cannot repeat a nonce under the same key
 - `SeqNum` starts at one and increases monotonically per sender; the client refuses to send after `uint32` exhaustion and requires a reconnect instead of wrapping to zero
 
-Nonce uniqueness and replay rejection are separate properties. After GCM
+Nonce uniqueness and replay rejection are separate properties. After AEAD
 authentication, the server accepts each positive sequence number once within a
 64-packet sliding window. An unseen authenticated packet up to 63 positions behind
 the high-water mark is accepted once to tolerate UDP reordering. Duplicates,
@@ -279,7 +279,7 @@ so jitter-buffer cleanup does not reopen the window.
 - **Port**: 9603 (default)
 - **Transport**: Dedicated TCP/TLS connection per authenticated session
 - **Authentication**: Ephemeral `screen_auth_token` issued in `AuthResponse`
-- **Encryption**: AES-128-GCM with one key per active screen share
+- **Encryption**: The selected media AEAD with one key per active screen share
 - **Usage**: Low-rate JPEG frames, forwarded only to subscribed viewers
 
 ### Connection Flow
@@ -307,10 +307,10 @@ Each screen packet is length-prefixed on the TCP stream:
 [Length:4B][SessionID:4B][SeqNum:4B][Ciphertext+AuthTag]
 ```
 
-The AES-GCM additional data is the 8-byte packet header `[SessionID|SeqNum]`.
+The selected AEAD authenticates the 8-byte packet header `[SessionID|SeqNum]` as additional data.
 The encrypted payload contains timestamp, frame dimensions, frame format, and
 frame bytes. The relay checks active-sharer authorization and pacing from the
-fixed header before allocating the bounded frame body, then authenticates GCM
+fixed header before allocating the bounded frame body, then authenticates the AEAD tag
 before committing a strictly increasing sequence. Replays and out-of-order
 screen packets are rejected because this plane uses an ordered TCP stream.
 `SeqNum` starts at one and continues across screen-share key changes within the

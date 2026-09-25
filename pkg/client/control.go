@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
@@ -90,8 +91,9 @@ func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthR
 
 	if err := protocol.WriteControlMessage(c.conn, &pb.ControlMessage{
 		AuthRequest: &pb.AuthRequest{
-			Token:    token,
-			Username: username,
+			Token:        token,
+			Username:     username,
+			MediaCiphers: []string{"aes128", "aes256", "chacha20"},
 		},
 	}); err != nil {
 		return nil, fmt.Errorf("client: send auth: %w", err)
@@ -108,6 +110,9 @@ func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthR
 
 	if msg.AuthResponse == nil {
 		return nil, fmt.Errorf("client: unexpected response type")
+	}
+	if _, err := gospeakCrypto.NewMediaCipher(msg.AuthResponse.MediaCipher, msg.AuthResponse.EncryptionKey); err != nil {
+		return nil, fmt.Errorf("client: invalid server media cipher: %w", err)
 	}
 
 	return msg.AuthResponse, nil

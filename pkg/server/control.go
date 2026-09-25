@@ -743,6 +743,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	authReq := msg.AuthRequest
+	compatible := false
+	for _, suite := range authReq.MediaCiphers {
+		if suite == s.cfg.MediaCipher {
+			compatible = true
+			break
+		}
+	}
+	if !compatible {
+		sendError(conn, 1, "unsupported media cipher")
+		return
+	}
 	peerIP, _ := canonicalControlPeerIP(conn.RemoteAddr())
 	var persistedIPBan bool
 	if peerIP != "" {
@@ -1101,6 +1112,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			Role:                 sessionRole.String(),
 			ChannelScope:         channelScope,
 			EncryptionKey:        s.voiceKey,
+			MediaCipher:          s.cfg.MediaCipher,
 			VoiceRegistrationKey: append([]byte(nil), session.VoiceRegistrationKey...),
 			Channels:             channelInfos,
 			ScreenAddr:           screenAddr,

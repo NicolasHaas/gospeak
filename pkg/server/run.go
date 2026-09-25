@@ -23,11 +23,11 @@ func (s *Server) Run() error {
 	st := s.store
 
 	// Generate shared voice encryption key
-	voiceKey, err := crypto.GenerateKey()
+	voiceKey, err := crypto.GenerateMediaKey(s.cfg.MediaCipher)
 	if err != nil {
 		return fmt.Errorf("server: generate voice key: %w", err)
 	}
-	voiceCipher, err := crypto.NewVoiceCipher(voiceKey)
+	voiceCipher, err := crypto.NewMediaCipher(s.cfg.MediaCipher, voiceKey)
 	if err != nil {
 		return fmt.Errorf("server: initialize voice cipher: %w", err)
 	}

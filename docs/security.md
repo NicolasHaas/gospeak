@@ -4,16 +4,16 @@ GoSpeak encrypts the control, voice, and screen planes. The optional metrics and
 health endpoint is plaintext, unauthenticated HTTP, so it is disabled by default
 and must be restricted separately when enabled.
 
-> **Note on the shared key model:** Voice uses a single server-wide AES-128 key distributed to all clients. Screen sharing uses a separate AES-128 key per active share, distributed to the sharer and to channel members who have been included in that share. In both cases the server generates the key material, so a compromised server can decrypt media. This is a known trade-off for simplicity.
+> **Note on the shared key model:** Voice uses one server-wide media key distributed to all clients. Screen sharing uses a separate key per active share, distributed to the sharer and authorized channel members. The server generates both keys and can decrypt media if compromised.
 
 ## Threat Model
 
 | Threat | Mitigation |
 |--------|-----------|
-| Network eavesdropping | TLS 1.3 for control and screen planes, AES-128-GCM for voice and screen media |
+| Network eavesdropping | TLS 1.3 for control and screen planes; AES-128-GCM, AES-256-GCM, or ChaCha20-Poly1305 for voice and screen media |
 | Active network MITM | System-PKI hostname verification or an explicitly confirmed TOFU public-key pin, shared by control and screen connections |
 | Server compromise (media) | The server holds the generated media keys and can decrypt them; see the note above. Run your own trusted server to reduce this risk. |
-| GCM nonce reuse | Session IDs are never reissued while a voice key is active; voice and screen senders fail closed before sequence-number wrap |
+| AEAD nonce reuse | Session IDs are never reissued while a voice key is active; voice and screen senders fail closed before sequence-number wrap |
 | Media replay | Voice uses an authenticated 64-packet sliding window per control session; screen uses a strict authenticated sequence on its ordered stream |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
 | UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
@@ -26,8 +26,8 @@ and must be restricted separately when enabled.
 ```mermaid
 graph TB
     subgraph "Key Distribution"
-        SRV[Server] -->|AuthResponse over TLS 1.3| VKEY[Voice AES-128 Key]
-        SRV -->|ScreenShareEvent over TLS 1.3| SKEY[Per-share AES-128 Key]
+        SRV[Server] -->|AuthResponse over TLS 1.3| VKEY[Shared voice key]
+        SRV -->|ScreenShareEvent over TLS 1.3| SKEY[Per-share screen key]
         VKEY --> CA[Client A]
         VKEY --> CB[Client B]
         VKEY --> CC[Client C]
@@ -79,7 +79,7 @@ The client uses `VerifyConnection` as the mandatory verification path. Public ce
 
 Existing bookmarks load without a pin and therefore prompt on their first connection after upgrading. Compare the displayed fingerprint with a value obtained directly from the server operator before accepting it. If a server certificate or key is intentionally replaced, the next connection fails with an identity-change warning. Verify the new fingerprint independently before using the explicit re-trust action. Do not re-trust an unexpected change merely to restore connectivity.
 
-## Voice Encryption (AES-128-GCM)
+## Voice encryption
 
 ### Key Generation
 
@@ -89,17 +89,18 @@ sequenceDiagram
     participant C as Client
 
     Note over S: Server startup
-    S->>S: crypto.GenerateKey()<br/>16 bytes from crypto/rand
+    S->>S: GenerateMediaKey(selected suite)<br/>16 or 32 bytes from crypto/rand
 
     Note over S,C: Client connects
-    C->>S: AuthRequest (over TLS)
-    S->>C: AuthResponse{encryptionKey: [16 bytes]}<br/>(transmitted inside TLS tunnel)
-    C->>C: NewVoiceCipher(key) → AES-128-GCM AEAD
+    C->>S: AuthRequest{mediaCiphers} (over TLS)
+    S->>C: AuthResponse{mediaCipher, encryptionKey} (over TLS)
+    C->>C: NewMediaCipher(mediaCipher, key)
 ```
 
-- One shared key per server session (generated at server startup)
+- One shared voice key per server process (generated at startup)
 - Key is distributed to each client during authentication, inside the encrypted TLS tunnel
 - All clients in the server share the same voice key
+- The server selects `-media-cipher aes128|aes256|chacha20` (`aes128` by default). It rejects clients that do not advertise the selected suite. The client checks the TLS-authenticated response's explicit suite and key length before opening media connections. Missing or unknown suites fail closed; older clients and servers must upgrade together.
 
 ### UDP Endpoint Registration
 
@@ -119,7 +120,7 @@ For each voice packet:
    Session IDs are allocated without reuse for the lifetime of the shared voice key, including after disconnect. Sequence numbers start at one and may not wrap; an exhausted sender must reconnect before sending more voice data.
 
 2. **Authenticated encryption**:
-   - **Algorithm**: AES-128-GCM
+   - **Algorithm**: AES-128-GCM, AES-256-GCM, or ChaCha20-Poly1305, as selected by the server
    - **Plaintext**: Opus-encoded audio frame
    - **Additional Data (AD)**: 20-byte packet header (SessionID + SeqNum + Timestamp + ChannelID)
    - **Output**: Ciphertext + 16-byte authentication tag
@@ -133,16 +134,16 @@ For each voice packet:
 
 | Property | How it's achieved |
 |----------|------------------|
-| **Confidentiality** | AES-128-GCM encryption of Opus frames |
-| **Integrity** | GCM authentication tag (16 bytes) |
+| **Confidentiality** | Selected AEAD encrypts Opus frames |
+| **Integrity** | 16-byte AEAD authentication tag |
 | **Header integrity** | The complete 20-byte voice header is authenticated as additional data; the server checks the claimed sender against the registered endpoint, but the server-wide key is not cryptographic proof of one client to another |
 | **Nonce uniqueness** | Session IDs are not reissued under the same key, and sequence wrap fails closed |
 | **Replay rejection** | The server authenticates first, then records the sequence in a 64-packet sliding window bound to the control session |
 | **Key rotation** | A new shared voice key is generated on server restart; this is lifecycle separation, not forward secrecy |
 
-## Screen Share Encryption (AES-128-GCM)
+## Screen share encryption
 
-- One AES-128 key is generated for each active screen share.
+- One key for the selected media cipher is generated for each active screen share. Active events carry the suite; clients disconnect on a missing or mismatched choice or invalid key.
 - The key is delivered over the TLS control plane to the sharer and to users already in the channel when the share starts.
 - If additional users join later, the sharer can share the active key with the current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
@@ -170,7 +171,7 @@ graph TB
 - Tokens are 256-bit random values (64 hex characters)
 - Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
 - Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). When legacy bookmark or settings files are found beside the executable, the client asks before migrating them. Choosing No keeps those files as the active persistence destinations. After confirmation, each original is removed only after its exact bytes are validated and published successfully; conflicting or concurrently changed files are preserved for manual resolution. Protect the user account and its config directory accordingly.
-- Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide. Older clients remain wire-compatible but must be upgraded to select the scoped channel automatically.
+- Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide.
 - Redeeming an invite, creating its user, and storing the new personal-token hash happen in one database transaction. A failed user creation therefore does not consume an invite use. Credential failures use the same external error response, while detailed causes remain in server logs.
 - New non-bootstrap accounts are limited to 120 successful provisions per source IP per hour. Failed attempts release their provisioning reservation but remain subject to the separate authentication-failure limit. This bound also applies in open-server mode and does not disable tokenless first login.
 - On first server run, an admin bootstrap credential is written atomically to

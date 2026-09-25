@@ -69,13 +69,14 @@ message AuthRequest {
   // only when the server explicitly enables tokenless open mode.
   string token    = 1;
   string username = 2; // desired display name
+  repeated string media_ciphers = 3; // explicitly supported AEAD suites
 }
 
 message AuthResponse {
   uint32 session_id     = 1;
   string username       = 2;
   string role           = 3; // "admin", "moderator", "user"
-  bytes  encryption_key = 4; // AES-128 key for voice UDP
+  bytes  encryption_key = 4; // key for the selected voice media cipher
   repeated ChannelInfo channels = 5; // initial channel list
   string screen_addr = 6;
   string screen_auth_token = 7;
@@ -83,6 +84,7 @@ message AuthResponse {
   string auto_token = 9;
   int64 channel_scope = 10;
   bytes voice_registration_key = 11;
+  string media_cipher = 12; // authenticated choice, no implicit fallback
 }
 
 // ----- Channels -----
@@ -244,6 +246,7 @@ message ScreenShareEvent {
   int32 height = 7;
   int32 viewers = 8;
   bytes encryption_key = 9;
+  string media_cipher = 10;
 }
 
 message SetUserRoleRequest {

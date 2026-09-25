@@ -48,8 +48,9 @@ type ControlMessage struct {
 // ----- Auth -----
 
 type AuthRequest struct {
-	Token    string `json:"token"` // empty = token-less join (if server allows)
-	Username string `json:"username"`
+	Token        string   `json:"token"` // empty = token-less join (if server allows)
+	Username     string   `json:"username"`
+	MediaCiphers []string `json:"media_ciphers"`
 }
 
 type AuthResponse struct {
@@ -58,6 +59,7 @@ type AuthResponse struct {
 	Role                 string        `json:"role"`
 	ChannelScope         int64         `json:"channel_scope,omitempty"`
 	EncryptionKey        []byte        `json:"encryption_key"`
+	MediaCipher          string        `json:"media_cipher"`
 	VoiceRegistrationKey []byte        `json:"voice_registration_key"`
 	Channels             []ChannelInfo `json:"channels"`
 	ScreenAddr           string        `json:"screen_addr,omitempty"`
@@ -248,6 +250,7 @@ type ScreenShareEvent struct {
 	Height        int32  `json:"height,omitempty"`
 	Viewers       int32  `json:"viewers,omitempty"`
 	EncryptionKey []byte `json:"encryption_key,omitempty"`
+	MediaCipher   string `json:"media_cipher,omitempty"`
 }
 
 // ----- Role Management -----

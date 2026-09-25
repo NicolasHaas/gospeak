@@ -103,7 +103,7 @@ sequenceDiagram
         alt VAD active
             VAD->>ENC: PCM frame
             ENC->>CRY: Opus bytes
-            CRY->>NET: AES-128-GCM encrypted packet
+            CRY->>NET: Selected AEAD encrypted packet
         end
     end
 ```

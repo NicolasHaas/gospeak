@@ -24,6 +24,7 @@ func main() {
 	flag.StringVar(&cfg.DataDir, "data", ".", "Data directory for generated files")
 	flag.BoolVar(&cfg.AllowNoToken, "open", false, "Allow users to join without a token (open server)")
 	flag.BoolVar(&cfg.EnableScreenShare, "screen-share", false, "Enable basic per-channel screen sharing")
+	flag.StringVar(&cfg.MediaCipher, "media-cipher", cfg.MediaCipher, "Voice and screen AEAD: aes128, aes256, or chacha20")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for plaintext /metrics and /healthz (empty to disable)")
 	flag.IntVar(&cfg.MaxSessions, "max-sessions", cfg.MaxSessions, "Maximum concurrent authenticated sessions")

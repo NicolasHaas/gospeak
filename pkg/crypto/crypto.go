@@ -12,6 +12,7 @@ import (
 	"io"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 var (
@@ -21,11 +22,31 @@ var (
 
 // GenerateKey generates a random AES-128 key (16 bytes).
 func GenerateKey() ([]byte, error) {
-	key := make([]byte, 16)
+	return GenerateMediaKey("aes128")
+}
+
+// GenerateMediaKey generates a key for the explicitly selected media cipher.
+func GenerateMediaKey(suite string) ([]byte, error) {
+	length, err := mediaKeySize(suite)
+	if err != nil {
+		return nil, err
+	}
+	key := make([]byte, length)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("crypto: generate key: %w", err)
 	}
 	return key, nil
+}
+
+func mediaKeySize(suite string) (int, error) {
+	switch suite {
+	case "aes128":
+		return 16, nil
+	case "aes256", "chacha20":
+		return 32, nil
+	default:
+		return 0, fmt.Errorf("crypto: unsupported media cipher %q", suite)
+	}
 }
 
 // GenerateToken generates a random token string (32 bytes, hex-like).
@@ -48,13 +69,32 @@ func HashPassword(password string, salt []byte) []byte {
 	return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32)
 }
 
-// VoiceCipher handles AES-128-GCM encryption for voice packets.
+// VoiceCipher handles authenticated voice and screen packets.
 type VoiceCipher struct {
 	aead cipher.AEAD
 }
 
 // NewVoiceCipher creates a new voice cipher from a 16-byte AES key.
 func NewVoiceCipher(key []byte) (*VoiceCipher, error) {
+	return NewMediaCipher("aes128", key)
+}
+
+// NewMediaCipher refuses unknown suites and mismatched key lengths.
+func NewMediaCipher(suite string, key []byte) (*VoiceCipher, error) {
+	length, err := mediaKeySize(suite)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != length {
+		return nil, fmt.Errorf("crypto: %s requires a %d-byte key", suite, length)
+	}
+	if suite == "chacha20" {
+		aead, err := chacha20poly1305.New(key)
+		if err != nil {
+			return nil, fmt.Errorf("crypto: new chacha20: %w", err)
+		}
+		return &VoiceCipher{aead: aead}, nil
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: new cipher: %w", err)
@@ -94,7 +134,7 @@ func (vc *VoiceCipher) Decrypt(sessionID uint32, seqNum uint32, header, cipherte
 	return plaintext, nil
 }
 
-// Overhead returns the number of bytes the AEAD adds to the plaintext (GCM auth tag).
+// Overhead returns the number of bytes the AEAD adds to the plaintext.
 func (vc *VoiceCipher) Overhead() int {
 	return vc.aead.Overhead()
 }

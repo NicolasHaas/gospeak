@@ -119,7 +119,7 @@ func TestControlClientAuthenticateClearsDeadlineAfterSuccess(t *testing.T) {
 			return
 		}
 		_ = protocol.WriteControlMessage(serverConn, &pb.ControlMessage{
-			AuthResponse: &pb.AuthResponse{SessionID: 1, Username: "alice"},
+			AuthResponse: &pb.AuthResponse{SessionID: 1, Username: "alice", MediaCipher: "aes128", EncryptionKey: make([]byte, 16)},
 		})
 	}()
 
