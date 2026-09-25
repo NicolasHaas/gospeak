@@ -285,6 +285,8 @@ func TestPlayoutRemovesInactiveSpeakerState(t *testing.T) {
 
 func TestJoinChannelWaitsForSuccessfulResponseBeforeChangingState(t *testing.T) {
 	e := NewEngine()
+	joined := make(chan int64, 1)
+	e.OnChannelJoined = func(id int64) { joined <- id }
 	g := newConnectionGeneration()
 	g.control = &ControlClient{conn: &recordingConn{}}
 	g.voice = &VoiceClient{channelID: 1}
@@ -300,6 +302,11 @@ func TestJoinChannelWaitsForSuccessfulResponseBeforeChangingState(t *testing.T) 
 	if got := e.GetChannelID(); got != 1 {
 		t.Fatalf("channel before response = %d, want 1", got)
 	}
+	select {
+	case <-joined:
+		t.Fatal("join callback ran before server accepted")
+	default:
+	}
 	if got := g.voice.channelID; got != 1 {
 		t.Fatalf("voice channel before response = %d, want 1", got)
 	}
@@ -313,10 +320,20 @@ func TestJoinChannelWaitsForSuccessfulResponseBeforeChangingState(t *testing.T) 
 	if got := g.voice.channelID; got != 2 {
 		t.Fatalf("voice channel after response = %d, want 2", got)
 	}
+	select {
+	case id := <-joined:
+		if id != 2 {
+			t.Fatalf("join callback channel = %d, want 2", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("join callback did not run after ACK")
+	}
 }
 
 func TestRejectedChannelJoinDoesNotChangeState(t *testing.T) {
 	e := NewEngine()
+	joined := make(chan int64, 1)
+	e.OnChannelJoined = func(id int64) { joined <- id }
 	g := newConnectionGeneration()
 	g.control = &ControlClient{conn: &recordingConn{}}
 	g.voice = &VoiceClient{channelID: 1}
@@ -337,6 +354,69 @@ func TestRejectedChannelJoinDoesNotChangeState(t *testing.T) {
 	}
 	if got := g.voice.channelID; got != 1 {
 		t.Fatalf("voice channel after rejection = %d, want 1", got)
+	}
+	barrier := make(chan struct{})
+	e.invokeCallback(func() { close(barrier) })
+	<-barrier
+	select {
+	case <-joined:
+		t.Fatal("rejected join cleared chat")
+	default:
+	}
+}
+
+func TestAudioInitializationFailureNotifiesCurrentConnection(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	e.mu.Lock()
+	e.generation = g
+	e.state = StateConnected
+	e.mu.Unlock()
+	want := errors.New("no input device")
+	e.initAudioFn = func() (*audioResources, error) { return nil, want }
+	errorsSeen := make(chan error, 1)
+	e.OnAudioFailure = func(err error) { errorsSeen <- err }
+	e.startAudio(g)
+	select {
+	case err := <-errorsSeen:
+		if !errors.Is(err, want) {
+			t.Fatalf("audio error = %v, want %v", err, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("audio failure was not reported")
+	}
+	e.Disconnect()
+}
+
+func TestAudioFailureAfterDisconnectIsNotReported(t *testing.T) {
+	e := NewEngine()
+	g := newConnectionGeneration()
+	e.mu.Lock()
+	e.generation = g
+	e.state = StateConnected
+	e.mu.Unlock()
+	started, release := make(chan struct{}), make(chan struct{})
+	e.initAudioFn = func() (*audioResources, error) {
+		close(started)
+		<-release
+		return nil, errors.New("old connection audio failed")
+	}
+	reported := make(chan struct{}, 1)
+	e.OnAudioFailure = func(error) { reported <- struct{}{} }
+	e.startAudio(g)
+	<-started
+	disconnected := make(chan struct{})
+	go func() { e.Disconnect(); close(disconnected) }()
+	<-g.ctx.Done()
+	close(release)
+	<-disconnected
+	barrier := make(chan struct{})
+	e.invokeCallback(func() { close(barrier) })
+	<-barrier
+	select {
+	case <-reported:
+		t.Fatal("stale audio failure was reported")
+	default:
 	}
 }
 
