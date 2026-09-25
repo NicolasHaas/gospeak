@@ -263,6 +263,8 @@ type Engine struct {
 	OnError            func(err error)
 	OnVoiceActivity    func(active bool)
 	OnRMSLevel         func(level float64)
+	OnAudioFailure     func(error)
+	OnChannelJoined    func(channelID int64)
 	OnDisconnect       func(reason string)
 	OnChatMessage      func(channelID int64, sender, text string, ts int64)
 	OnScreenShareEvent func(event *pb.ScreenShareEvent)
@@ -654,6 +656,9 @@ func (e *Engine) startAudio(g *connectionGeneration) {
 		if err != nil {
 			slog.Error("audio init failed (continuing without audio)", "err", err)
 			resources.close()
+			if callback := e.OnAudioFailure; callback != nil {
+				e.invokeGenerationCallback(g, func() { callback(err) })
+			}
 			return
 		}
 		for _, warning := range resources.warnings {
@@ -1154,6 +1159,9 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		}
 		if applied {
 			e.clearScreenShareStateGenerationLocked(g)
+			if callback := e.OnChannelJoined; callback != nil {
+				e.enqueueGenerationCallbackLocked(g, func() { callback(response.ChannelID) })
+			}
 			select {
 			case g.keepaliveNow <- struct{}{}:
 			default:
