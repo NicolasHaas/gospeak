@@ -15,6 +15,7 @@ type DataProviderFactory interface {
 	Tx(context.Context) (DataStoreTx, error)
 }
 
+// DataStoreTx is single-owner: call its methods sequentially, including Commit and Rollback.
 type DataStoreTx interface {
 	DataStore
 	TokenTransactionProvider
@@ -127,5 +128,9 @@ type MessageReadProvider interface {
 
 type MessageWriteProvider interface {
 	CreateMessage(message *model.Message) error
+	// Transactional callers must commit before treating the ID as durable. Each write prunes at most
+	// 1000 excess rows; imported backlogs may temporarily exceed maxPerChannel until later writes.
+	CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) error
+	PruneExpiredMessages(maxAge time.Duration, limit int) (int64, error)
 	DeleteMessage(messageID int64) error
 }

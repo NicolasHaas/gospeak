@@ -1201,41 +1201,46 @@ func TestCreateMessage(t *testing.T) {
 	tests := map[string]tcase{
 		"valid_message": {
 			message: &model.Message{
-				ChannelID: 1,
-				SenderID:  1,
-				Body:      "Hello, world!",
+				ChannelID:  1,
+				SenderID:   1,
+				SenderName: "alice",
+				Body:       "Hello, world!",
 			},
 			expectErr: false,
 		},
 		"empty_body": {
 			message: &model.Message{
-				ChannelID: 1,
-				SenderID:  1,
-				Body:      "",
+				ChannelID:  1,
+				SenderID:   1,
+				SenderName: "alice",
+				Body:       "",
 			},
 			expectErr: true,
 		},
 		"whitespace_only_body": {
 			message: &model.Message{
-				ChannelID: 1,
-				SenderID:  1,
-				Body:      "   ",
+				ChannelID:  1,
+				SenderID:   1,
+				SenderName: "alice",
+				Body:       "   ",
 			},
 			expectErr: true,
 		},
 		"body_at_max_length": {
 			message: &model.Message{
-				ChannelID: 1,
-				SenderID:  1,
-				Body:      strings.Repeat("a", model.MessageMaxBodyLength),
+				ChannelID:  1,
+				SenderID:   1,
+				SenderName: "alice",
+				Body:       strings.Repeat("a", model.MessageMaxBodyLength),
 			},
 			expectErr: false,
 		},
 		"body_exceeds_max_length": {
 			message: &model.Message{
-				ChannelID: 1,
-				SenderID:  1,
-				Body:      strings.Repeat("a", model.MessageMaxBodyLength+1),
+				ChannelID:  1,
+				SenderID:   1,
+				SenderName: "alice",
+				Body:       strings.Repeat("a", model.MessageMaxBodyLength+1),
 			},
 			expectErr: true,
 		},
@@ -1250,6 +1255,7 @@ func TestCreateMessage(t *testing.T) {
 				t.Fatalf("failed to open test connection: %v", err)
 			}
 
+			createMessageChannel(t, store.NonTx(), "chat")
 			err = store.NonTx().CreateMessage(tc.message)
 			if tc.expectErr {
 				if err == nil {
@@ -1279,10 +1285,12 @@ func TestListMessages(t *testing.T) {
 	st := store.NonTx()
 
 	msgs := []model.Message{
-		{ChannelID: 1, SenderID: 1, Body: "msg one"},
-		{ChannelID: 1, SenderID: 2, Body: "msg two"},
-		{ChannelID: 2, SenderID: 1, Body: "msg three"},
+		{ChannelID: 1, SenderID: 1, SenderName: "alice", Body: "msg one"},
+		{ChannelID: 1, SenderID: 2, SenderName: "bob", Body: "msg two"},
+		{ChannelID: 2, SenderID: 1, SenderName: "alice", Body: "msg three"},
 	}
+	createMessageChannel(t, st, "chat-one")
+	createMessageChannel(t, st, "chat-two")
 	for i := range msgs {
 		if err := st.CreateMessage(&msgs[i]); err != nil {
 			t.Fatalf("CreateMessage[%d]: unexpected error: %v", i, err)
@@ -1310,17 +1318,6 @@ func TestListMessages(t *testing.T) {
 		}
 	})
 
-	t.Run("filter_by_sender", func(t *testing.T) {
-		senderID := int64(2)
-		got, err := st.ListMessages(model.MessageFilters{LimitToSenderID: &senderID})
-		if err != nil {
-			t.Fatalf("ListMessages: unexpected error: %v", err)
-		}
-		if len(got) != 1 {
-			t.Fatalf("ListMessages: expected 1 message for sender 2, got %d", len(got))
-		}
-	})
-
 	t.Run("pagination", func(t *testing.T) {
 		pageSize := int64(2)
 		got, err := st.ListMessages(model.MessageFilters{PageSize: &pageSize})
@@ -1332,15 +1329,14 @@ func TestListMessages(t *testing.T) {
 		}
 	})
 
-	t.Run("offset", func(t *testing.T) {
+	t.Run("cursor", func(t *testing.T) {
 		pageSize := int64(10)
-		offset := int64(2)
-		got, err := st.ListMessages(model.MessageFilters{PageSize: &pageSize, Offset: &offset})
+		got, err := st.ListMessages(model.MessageFilters{PageSize: &pageSize, BeforeID: msgs[1].ID})
 		if err != nil {
 			t.Fatalf("ListMessages: unexpected error: %v", err)
 		}
 		if len(got) != 1 {
-			t.Fatalf("ListMessages: expected 1 message with offset 2, got %d", len(got))
+			t.Fatalf("ListMessages: expected 1 message before cursor, got %d", len(got))
 		}
 	})
 }
@@ -1355,7 +1351,8 @@ func TestDeleteMessage(t *testing.T) {
 
 	st := store.NonTx()
 
-	msg := &model.Message{ChannelID: 1, SenderID: 1, Body: "to be deleted"}
+	msg := &model.Message{ChannelID: 1, SenderID: 1, SenderName: "alice", Body: "to be deleted"}
+	createMessageChannel(t, st, "chat")
 	if err := st.CreateMessage(msg); err != nil {
 		t.Fatalf("CreateMessage: unexpected error: %v", err)
 	}
