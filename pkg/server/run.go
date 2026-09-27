@@ -90,7 +90,7 @@ func (s *Server) Run() error {
 			return fmt.Errorf("server: prune expired chat: %w", err)
 		}
 		if !s.startWorker(func() { s.runChatJanitor(st) }) {
-			return fmt.Errorf("server: start chat janitor: %w", s.ctx.Err())
+			return nil // Shutdown won startup; Run's deferred Shutdown waits for cleanup.
 		}
 	}
 
