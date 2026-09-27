@@ -28,6 +28,8 @@ type Config struct {
 	MediaCipher                 string        // aes128, aes256, or chacha20 for both media planes
 	ChannelsFile                string        // YAML file defining channels to create on startup
 	MetricsAddr                 string        // HTTP bind address for /metrics endpoint (empty = disabled)
+	ChatHistoryLimit            int           // retained messages per channel
+	ChatMaxAge                  time.Duration // zero disables expiry
 	PreAuthTimeout              time.Duration // maximum TLS handshake and authentication time
 	MaxPreAuthConnections       int           // maximum concurrent unauthenticated connections per TCP plane
 	MaxSessions                 int           // maximum concurrent authenticated sessions
@@ -55,6 +57,8 @@ func DefaultConfig() Config {
 		VoiceAddr:                   ":9601",
 		ScreenAddr:                  ":9603",
 		MetricsAddr:                 "",
+		ChatHistoryLimit:            500,
+		ChatMaxAge:                  30 * 24 * time.Hour,
 		DBPath:                      "gospeak.db",
 		DataDir:                     ".",
 		MediaCipher:                 "aes128",

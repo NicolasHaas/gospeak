@@ -22,10 +22,7 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/rbac"
 )
 
-const (
-	maxChatMessageRunes   = 2000
-	maxBanDurationSeconds = int64(10 * 365 * 24 * 60 * 60)
-)
+const maxBanDurationSeconds = int64(10 * 365 * 24 * 60 * 60)
 
 func (s *Server) beginSessionBanCheck(userID int64) {
 	s.sessionBanMu.Lock()
@@ -103,10 +100,11 @@ func (s *Server) activateAfterBanChecks(userID int64, ip string, reservation *Se
 
 // ControlHandler handles TCP/TLS control plane connections.
 type ControlHandler struct {
-	server  *Server
-	store   datastore.DataProviderFactory
-	mu      sync.RWMutex
-	connMap map[uint32]*controlClient // sessionID -> serialized outbound connection
+	server        *Server
+	store         datastore.DataProviderFactory
+	mu            sync.RWMutex
+	connMap       map[uint32]*controlClient // sessionID -> serialized outbound connection
+	chatSelection map[uint32]int64          // explicit text channel; absent = legacy voice channel
 
 }
 
@@ -446,9 +444,10 @@ func authRateLimitKey(addr net.Addr) string {
 // newControlHandler creates a control handler.
 func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHandler {
 	return &ControlHandler{
-		server:  srv,
-		store:   st,
-		connMap: make(map[uint32]*controlClient),
+		server:        srv,
+		store:         st,
+		connMap:       make(map[uint32]*controlClient),
+		chatSelection: make(map[uint32]int64),
 	}
 }
 
@@ -461,6 +460,7 @@ func (ch *ControlHandler) setConn(sessionID uint32, conn net.Conn) *controlClien
 	}
 	ch.mu.Lock()
 	previous := ch.connMap[sessionID]
+	delete(ch.chatSelection, sessionID)
 	ch.connMap[sessionID] = client
 	ch.mu.Unlock()
 	if previous != nil {
@@ -474,6 +474,7 @@ func (ch *ControlHandler) removeConn(sessionID uint32) {
 	ch.mu.Lock()
 	client := ch.connMap[sessionID]
 	delete(ch.connMap, sessionID)
+	delete(ch.chatSelection, sessionID)
 	ch.mu.Unlock()
 	if client != nil {
 		_ = client.Close()
@@ -1233,7 +1234,10 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 		s.handleUnban(sessionID, msg.UnbanReq, st, conn)
 
 	case msg.ChatMsg != nil:
-		s.handleChatMessage(handler, sessionID, msg.ChatMsg)
+		s.handleChatMessage(handler, sessionID, msg.ChatMsg, st, conn)
+
+	case msg.ChatHistoryReq != nil:
+		s.handleChatHistory(handler, sessionID, msg.ChatHistoryReq, st, conn)
 
 	case msg.ScreenShareStartReq != nil:
 		s.handleScreenShareStart(handler, sessionID, msg.ScreenShareStartReq, conn)
@@ -1836,37 +1840,6 @@ func (s *Server) channelUsers(channelID int64) []pb.UserInfo {
 		}
 	}
 	return users
-}
-
-func (s *Server) handleChatMessage(handler *ControlHandler, sessionID uint32, chat *pb.ChatMessage) {
-	session, ok := s.sessions.GetSnapshot(sessionID)
-	if !ok {
-		return
-	}
-	chID := s.channels.ChannelOf(session.ID)
-	if chID == 0 {
-		return // not in a channel
-	}
-
-	// Validate and sanitize message
-	text := sanitizeText(strings.TrimSpace(chat.Text))
-	if len(text) == 0 || utf8.RuneCountInString(text) > maxChatMessageRunes {
-		return // empty or too long, silently drop
-	}
-
-	event := &pb.ControlMessage{
-		ChatEvent: &pb.ChatMessage{
-			ChannelID:  chID,
-			SenderID:   session.UserID,
-			SenderName: session.Username,
-			Text:       text,
-			Timestamp:  time.Now().Unix(),
-		},
-	}
-
-	// Broadcast to all channel members including sender (for confirmation)
-	handler.broadcastToChannel(chID, event, 0)
-	s.metrics.ChatMessagesSent.Add(1)
 }
 
 func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, req *pb.SetUserRoleRequest, st datastore.DataProviderFactory, conn net.Conn) {

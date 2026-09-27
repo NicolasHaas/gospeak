@@ -28,6 +28,8 @@ type ControlMessage struct {
 	UnbanResp           *UnbanResponse                 `json:"unban_response,omitempty"`
 	ChatMsg             *ChatMessage                   `json:"chat_message,omitempty"`
 	ChatEvent           *ChatMessage                   `json:"chat_event,omitempty"`
+	ChatHistoryReq      *ChatHistoryRequest            `json:"chat_history_request,omitempty"`
+	ChatHistoryResp     *ChatHistoryResponse           `json:"chat_history_response,omitempty"`
 	ScreenShareStartReq *ScreenShareStartRequest       `json:"screen_share_start_request,omitempty"`
 	ScreenShareStopReq  *ScreenShareStopRequest        `json:"screen_share_stop_request,omitempty"`
 	ScreenShareSubReq   *ScreenShareSubscribeRequest   `json:"screen_share_subscribe_request,omitempty"`
@@ -215,11 +217,24 @@ type Pong struct {
 // ----- Chat -----
 
 type ChatMessage struct {
+	ID         int64  `json:"id,omitempty"`
 	ChannelID  int64  `json:"channel_id"`
 	SenderID   int64  `json:"sender_id"`
 	SenderName string `json:"sender_name"`
 	Text       string `json:"text"`
 	Timestamp  int64  `json:"timestamp"`
+}
+
+type ChatHistoryRequest struct {
+	ChannelID int64 `json:"channel_id"`
+	BeforeID  int64 `json:"before_id,omitempty"`
+	Limit     int64 `json:"limit,omitempty"`
+}
+
+type ChatHistoryResponse struct {
+	ChannelID int64         `json:"channel_id"`
+	Messages  []ChatMessage `json:"messages"`
+	HasMore   bool          `json:"has_more"`
 }
 
 // ----- Screen Sharing -----

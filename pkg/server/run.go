@@ -19,6 +19,9 @@ func (s *Server) Run() error {
 	if s.store == nil {
 		return fmt.Errorf("server: missing store dependency")
 	}
+	if s.cfg.ChatHistoryLimit < 1 || s.cfg.ChatHistoryLimit > 10000 || s.cfg.ChatMaxAge < 0 || s.cfg.ChatMaxAge%time.Second != 0 {
+		return fmt.Errorf("server: invalid chat retention")
+	}
 	defer s.Shutdown()
 	st := s.store
 
@@ -79,6 +82,15 @@ func (s *Server) Run() error {
 		// Start Prometheus metrics HTTP endpoint
 		if err := s.startMetricsHTTP(); err != nil {
 			return err
+		}
+	}
+
+	if s.cfg.ChatMaxAge > 0 {
+		if _, err := st.NonTx().PruneExpiredMessages(s.cfg.ChatMaxAge, 1000); err != nil {
+			return fmt.Errorf("server: prune expired chat: %w", err)
+		}
+		if !s.startWorker(func() { s.runChatJanitor(st) }) {
+			return fmt.Errorf("server: start chat janitor: %w", s.ctx.Err())
 		}
 	}
 

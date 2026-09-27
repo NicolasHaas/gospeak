@@ -118,6 +118,7 @@ func controlMessageCost(message *pb.ControlMessage) (string, int) {
 	}
 	switch {
 	case message.ChannelListRequest != nil,
+		message.ChatHistoryReq != nil,
 		message.JoinChannelRequest != nil,
 		message.LeaveChannelRequest != nil,
 		message.UserStateUpdate != nil,

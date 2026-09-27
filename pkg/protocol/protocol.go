@@ -47,7 +47,7 @@ var controlMessageFields = map[string]struct{}{
 	"kick_user_request": {}, "ban_user_request": {},
 	"list_bans_request": {}, "list_bans_response": {},
 	"unban_request": {}, "unban_response": {},
-	"chat_message": {}, "chat_event": {},
+	"chat_message": {}, "chat_event": {}, "chat_history_request": {}, "chat_history_response": {},
 	"screen_share_start_request": {}, "screen_share_stop_request": {},
 	"screen_share_subscribe_request": {}, "screen_share_share_request": {},
 	"screen_share_unsubscribe_request": {}, "screen_share_event": {},

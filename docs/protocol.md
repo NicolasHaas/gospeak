@@ -127,17 +127,11 @@ Temporary sub-channels are removed five minutes after becoming empty. Occupied t
 
 ### Chat
 
-```mermaid
-sequenceDiagram
-    participant A as Client A
-    participant S as Server
-    participant B as Client B
+The server stores a message before broadcasting it. It takes sender identity from the authenticated session, not the request. A client may send `ChatMessage{channel_id, text}` for an existing channel without joining voice; a zero channel ID still means the current voice channel for older clients. An invite scoped to one channel cannot read or write another channel's chat. Unscoped accounts may read and write any existing channel, matching the current channel model.
 
-    A->>S: ChatMessage{channelID, text}
-    S->>S: Attach senderID, senderName, timestamp
-    S->>A: ChatEvent (echo back)
-    S->>B: ChatEvent (to all in channel)
-```
+`ChatHistoryRequest{channel_id, before_id, limit}` returns `ChatHistoryResponse{channel_id, messages, has_more}` in descending message-ID order. The first page uses `before_id = 0`; subsequent pages use the last message ID from the previous page. Pages default to 40 and cannot exceed 40. Requesting history also selects that channel for live chat events on the control connection, independently of voice membership. Older clients that never request history continue to receive live events for their voice channel. The server clears the text selection on disconnect.
+
+`ChatEvent` includes the stored message ID. The server targets 500 retained messages per channel and 30 days of history by default. Operators can change `-chat-history-limit` (1..10000) and `-chat-max-age` (a Go duration; `0` disables age expiry). Each write prunes at most 1000 excess rows in its channel; a large imported count backlog can remain above the target until further writes. A one-minute sweep removes up to 1000 age-expired rows per pass, including idle channels. Oversized legacy messages are truncated for history responses without changing their stored contents. Live events can overlap a history page, so clients should deduplicate by message ID. The current desktop client does not request history or select a separate text channel yet.
 
 ### Screen Sharing Signalling
 

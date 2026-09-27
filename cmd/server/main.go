@@ -27,6 +27,8 @@ func main() {
 	flag.StringVar(&cfg.MediaCipher, "media-cipher", cfg.MediaCipher, "Voice and screen AEAD: aes128, aes256, or chacha20")
 	flag.StringVar(&cfg.ChannelsFile, "channels-file", "", "YAML file defining channels to create on startup")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", cfg.MetricsAddr, "HTTP bind address for plaintext /metrics and /healthz (empty to disable)")
+	flag.IntVar(&cfg.ChatHistoryLimit, "chat-history-limit", cfg.ChatHistoryLimit, "Messages retained per channel (1..10000)")
+	flag.DurationVar(&cfg.ChatMaxAge, "chat-max-age", cfg.ChatMaxAge, "Maximum message age (0 disables expiry)")
 	flag.IntVar(&cfg.MaxSessions, "max-sessions", cfg.MaxSessions, "Maximum concurrent authenticated sessions")
 	flag.IntVar(&cfg.MaxSessionsPerUser, "max-sessions-per-user", cfg.MaxSessionsPerUser, "Maximum concurrent sessions per account")
 	flag.IntVar(&cfg.ControlMessageBurst, "control-message-burst", cfg.ControlMessageBurst, "Maximum control-message cost burst per session and account (minimum 5)")
