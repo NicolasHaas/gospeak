@@ -91,15 +91,23 @@ func TestChatMessagesUseRuneLimits(t *testing.T) {
 		runes     int
 		wantCount int64
 	}{
-		{name: "accepts text at rune limit", runes: maxChatMessageRunes, wantCount: 1},
-		{name: "rejects text over rune limit", runes: maxChatMessageRunes + 1, wantCount: 0},
+		{name: "accepts text at rune limit", runes: model.MessageMaxBodyLength, wantCount: 1},
+		{name: "rejects text over rune limit", runes: model.MessageMaxBodyLength + 1, wantCount: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			srv, _, handler := newTestServer(t)
-			session := mustCreateSession(t, srv.sessions, 1, "sender", model.RoleUser)
-			srv.channels.Join(session.ID, 1)
+			srv, st, handler := newTestServer(t)
+			channel := model.NewChannel()
+			if err := st.NonTx().CreateChannel(channel); err != nil {
+				t.Fatal(err)
+			}
+			user, err := st.NonTx().CreateUser("sender", model.RoleUser)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session := mustCreateSession(t, srv.sessions, user.ID, user.Username, user.Role)
+			srv.channels.Join(session.ID, channel.ID)
 
-			srv.handleChatMessage(handler, session.ID, &pb.ChatMessage{Text: strings.Repeat("界", test.runes)})
+			srv.handleChatMessage(handler, session.ID, &pb.ChatMessage{Text: strings.Repeat("界", test.runes)}, st, &bufferConn{})
 
 			if got := srv.metrics.ChatMessagesSent.Load(); got != test.wantCount {
 				t.Fatalf("ChatMessagesSent = %d, want %d", got, test.wantCount)

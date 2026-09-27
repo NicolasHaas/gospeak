@@ -133,4 +133,5 @@ type MessageWriteProvider interface {
 	CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) error
 	PruneExpiredMessages(maxAge time.Duration, limit int) (int64, error)
 	DeleteMessage(messageID int64) error
+	DeleteMessageInChannel(messageID, channelID int64) (bool, error)
 }

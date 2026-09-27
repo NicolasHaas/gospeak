@@ -1508,3 +1508,16 @@ func (s *baseProvider) DeleteMessage(messageID int64) error {
 	}
 	return nil
 }
+
+// DeleteMessageInChannel checks channel identity in the write, not in a separate read.
+func (s *baseProvider) DeleteMessageInChannel(messageID, channelID int64) (bool, error) {
+	if messageID <= 0 || channelID <= 0 {
+		return false, fmt.Errorf("datastore: invalid message identity")
+	}
+	result, err := s.ExecContext(context.Background(), "DELETE FROM messages WHERE id = ? AND channel_id = ?", messageID, channelID)
+	if err != nil {
+		return false, fmt.Errorf("datastore: delete channel message: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count != 0, err
+}
