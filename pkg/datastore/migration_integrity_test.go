@@ -104,8 +104,8 @@ func TestMigrationRepairsVersionEightMissingTokenTimestamp(t *testing.T) {
 	if err := store.DB.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatalf("read repaired schema version: %v", err)
 	}
-	if version != 10 {
-		t.Fatalf("repaired schema version = %d, want 10", version)
+	if version != 11 {
+		t.Fatalf("repaired schema version = %d, want 11", version)
 	}
 }
 

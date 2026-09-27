@@ -18,6 +18,7 @@ import (
 
 const (
 	dbTimeLayout       = "2006-01-02 15:04:05"
+	messageTimeLayout  = "2006-01-02 15:04:05.000000000"
 	tokenKindInvite    = 0
 	tokenKindBootstrap = 1
 )
@@ -481,6 +482,29 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: "CREATE INDEX idx_bans_user_id ON bans(user_id) WHERE user_id > 0"},
 			},
 		},
+		{
+			version: 11,
+			steps: []migrationStep{
+				{statement: `CREATE TABLE IF NOT EXISTS messages (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					channel_id INTEGER NOT NULL DEFAULT 0,
+					sender_id INTEGER NOT NULL DEFAULT 0,
+					body TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL DEFAULT (datetime('now'))
+				)`},
+				{statement: "ALTER TABLE messages ADD COLUMN sender_name TEXT NOT NULL DEFAULT ''", table: "messages", column: "sender_name"},
+				{statement: "DELETE FROM messages WHERE NOT EXISTS (SELECT 1 FROM channels WHERE id = messages.channel_id)"},
+				{statement: "UPDATE messages SET created_at = created_at || '.000000000' WHERE length(created_at) = 19"},
+				{statement: "CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id DESC)"},
+				{statement: "CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at, id)"},
+				{statement: "CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at, id)"},
+				{statement: `CREATE TRIGGER IF NOT EXISTS delete_channel_messages AFTER DELETE ON channels
+					BEGIN DELETE FROM messages WHERE channel_id = OLD.id; END`},
+				{statement: `CREATE TRIGGER IF NOT EXISTS require_message_channel BEFORE INSERT ON messages
+					WHEN NOT EXISTS (SELECT 1 FROM channels WHERE id = NEW.channel_id)
+					BEGIN SELECT RAISE(ABORT, 'message channel missing'); END`},
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -524,6 +548,8 @@ func tableColumnExists(ctx context.Context, db DB, table, column string) (bool, 
 		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tokens') WHERE name = ?)"
 	case "channels":
 		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('channels') WHERE name = ?)"
+	case "messages":
+		query = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = ?)"
 	default:
 		return false, fmt.Errorf("datastore: inspect unsupported schema table %q", table)
 	}
@@ -571,6 +597,17 @@ func formatDBTime(t time.Time) string {
 
 func parseDBTime(value string) (time.Time, error) {
 	return time.ParseInLocation(dbTimeLayout, value, time.UTC)
+}
+
+func formatMessageTime(t time.Time) string {
+	return t.UTC().Format(messageTimeLayout)
+}
+
+func parseMessageTime(value string) (time.Time, error) {
+	if t, err := time.ParseInLocation(messageTimeLayout, value, time.UTC); err == nil {
+		return t, nil
+	}
+	return parseDBTime(value) // pre-migration rows have whole-second timestamps
 }
 
 // ---- Users ----
@@ -1308,45 +1345,140 @@ func (s *baseProvider) DeleteBan(id int64) (bool, error) {
 // ---- Messages ----
 
 func (s *baseProvider) CreateMessage(message *model.Message) error {
+	if message == nil || message.ChannelID <= 0 || message.SenderID <= 0 {
+		return fmt.Errorf("datastore: invalid message identity")
+	}
+	if err := model.ValidateUsername(message.SenderName); err != nil {
+		return fmt.Errorf("datastore: invalid message sender: %w", err)
+	}
 	if err := message.Validate(); err != nil {
 		return fmt.Errorf("datastore: message failed validation: %w", err)
 	}
 
-	res, err := s.ExecContext(
+	createdAt := time.Now().UTC()
+	err := s.QueryRowContext(
 		context.Background(),
-		"INSERT INTO messages (channel_id, sender_id, body) VALUES (?, ?, ?)",
-		message.ChannelID, message.SenderID, message.Body)
+		"INSERT INTO messages (channel_id, sender_id, sender_name, body, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+		message.ChannelID, message.SenderID, message.SenderName, message.Body, formatMessageTime(createdAt)).Scan(&message.ID)
 	if err != nil {
 		return fmt.Errorf("datastore: create message: %w", err)
 	}
-	message.ID, err = res.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("datastore: create message last insert id: %w", err)
-	}
-	message.CreatedAt = time.Now().UTC()
+	message.CreatedAt = createdAt
 
 	return nil
 }
 
-func (s *baseProvider) ListMessages(filters model.MessageFilters) ([]model.Message, error) {
-	query := `
-		SELECT id, channel_id, sender_id, body, created_at
-		FROM messages
-		WHERE (? IS NULL OR channel_id = ?)
-		AND (? IS NULL OR sender_id = ?)
-		ORDER BY id DESC
-		LIMIT COALESCE(?, 100)
-		OFFSET COALESCE(?, 0)
-	`
+// CreateMessageWithRetention stores a message and prunes its channel in the same transaction.
+func (s *nonTxProvider) CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) error {
+	if message == nil {
+		return fmt.Errorf("datastore: invalid message identity")
+	}
+	tx, err := s.DB.(*sql.DB).BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("datastore: begin message transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	provider := &txProvider{baseProvider: baseProvider{DB: tx}, tx: tx}
+	stored := *message
+	if err := provider.CreateMessageWithRetention(&stored, maxPerChannel, maxAge); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("datastore: commit message: %w", err)
+	}
+	*message = stored
+	return nil
+}
 
-	rows, err := s.QueryContext(
-		context.Background(),
-		query,
-		filters.LimitToChannelID, filters.LimitToChannelID,
-		filters.LimitToSenderID, filters.LimitToSenderID,
-		filters.PageSize,
-		filters.Offset,
-	)
+func (s *txProvider) CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) (err error) {
+	if message == nil {
+		return fmt.Errorf("datastore: invalid message identity")
+	}
+	if maxPerChannel < 1 || maxPerChannel > 10000 || maxAge < 0 || maxAge%time.Second != 0 {
+		return fmt.Errorf("datastore: invalid message retention")
+	}
+	const savepoint = "gospeak_message_retention"
+	if _, err := s.ExecContext(context.Background(), "SAVEPOINT "+savepoint); err != nil {
+		return fmt.Errorf("datastore: begin message savepoint: %w", err)
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if _, rollbackErr := s.ExecContext(context.Background(), "ROLLBACK TO SAVEPOINT "+savepoint); rollbackErr != nil {
+			err = fmt.Errorf("%w; rollback message savepoint: %v", err, rollbackErr)
+		}
+		if _, releaseErr := s.ExecContext(context.Background(), "RELEASE SAVEPOINT "+savepoint); releaseErr != nil {
+			err = fmt.Errorf("%w; release message savepoint: %v", err, releaseErr)
+		}
+	}()
+	stored := *message
+	if err := s.CreateMessage(&stored); err != nil {
+		return err
+	}
+	if maxAge > 0 {
+		// ponytail: prune at most 1000 per write; run sweeps for idle or imported backlogs.
+		cutoff := formatMessageTime(time.Now().Add(-maxAge))
+		if _, err := s.ExecContext(context.Background(), `DELETE FROM messages WHERE id IN (
+			SELECT id FROM messages WHERE channel_id = ? AND created_at < ? ORDER BY created_at, id LIMIT 1000)`, stored.ChannelID, cutoff); err != nil {
+			return fmt.Errorf("datastore: prune old messages: %w", err)
+		}
+	}
+	// ponytail: at most 1000 stale rows per write; batch backfill if old history exceeds this.
+	if _, err := s.ExecContext(context.Background(), `DELETE FROM messages WHERE id IN (
+		SELECT id FROM messages WHERE channel_id = ? AND id <= COALESCE((
+			SELECT id FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)
+		ORDER BY id LIMIT 1000)`, stored.ChannelID, stored.ChannelID, maxPerChannel); err != nil {
+		return fmt.Errorf("datastore: prune message count: %w", err)
+	}
+	if _, err := s.ExecContext(context.Background(), "RELEASE SAVEPOINT "+savepoint); err != nil {
+		return fmt.Errorf("datastore: release message savepoint: %w", err)
+	}
+	*message = stored
+	return nil
+}
+
+// PruneExpiredMessages deletes at most limit old rows per call; the server can sweep idle channels.
+func (s *baseProvider) PruneExpiredMessages(maxAge time.Duration, limit int) (int64, error) {
+	if maxAge < time.Second || maxAge%time.Second != 0 || limit < 1 || limit > 1000 {
+		return 0, fmt.Errorf("datastore: invalid message expiry sweep")
+	}
+	res, err := s.ExecContext(context.Background(), `DELETE FROM messages WHERE id IN (
+		SELECT id FROM messages WHERE created_at < ? ORDER BY created_at, id LIMIT ?)`,
+		formatMessageTime(time.Now().Add(-maxAge)), limit)
+	if err != nil {
+		return 0, fmt.Errorf("datastore: prune expired messages: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+func (s *baseProvider) ListMessages(filters model.MessageFilters) ([]model.Message, error) {
+	if filters.PageSize != nil && (*filters.PageSize < 1 || *filters.PageSize > 100) {
+		return nil, fmt.Errorf("datastore: message page size must be 1..100")
+	}
+	if filters.BeforeID < 0 {
+		return nil, fmt.Errorf("datastore: invalid message cursor")
+	}
+	query := "SELECT id, channel_id, sender_id, sender_name, body, created_at FROM messages WHERE 1=1"
+	var args []any
+	if filters.LimitToChannelID != nil {
+		query += " AND channel_id = ?"
+		args = append(args, *filters.LimitToChannelID)
+	}
+	if filters.BeforeID > 0 {
+		query += " AND id < ?"
+		args = append(args, filters.BeforeID)
+	}
+	if !filters.Since.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, formatMessageTime(filters.Since))
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	pageSize := int64(100)
+	if filters.PageSize != nil {
+		pageSize = *filters.PageSize
+	}
+	rows, err := s.QueryContext(context.Background(), query, append(args, pageSize)...)
 	if err != nil {
 		return nil, fmt.Errorf("datastore: list messages: %w", err)
 	}
@@ -1356,12 +1488,12 @@ func (s *baseProvider) ListMessages(filters model.MessageFilters) ([]model.Messa
 	for rows.Next() {
 		var m model.Message
 		var createdAt string
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.SenderID, &m.Body, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.SenderID, &m.SenderName, &m.Body, &createdAt); err != nil {
 			return nil, fmt.Errorf("datastore: scan message: %w", err)
 		}
-		parsed, err := parseDBTime(createdAt)
+		parsed, err := parseMessageTime(createdAt)
 		if err != nil {
-			return nil, fmt.Errorf("datastore: scan channel: %w", err)
+			return nil, fmt.Errorf("datastore: scan message time: %w", err)
 		}
 		m.CreatedAt = parsed
 		messages = append(messages, m)
