@@ -44,6 +44,8 @@ message ControlMessage {
     ChatMessage           chat_event              = 37;
     ChatHistoryRequest    chat_history_request    = 57;
     ChatHistoryResponse   chat_history_response   = 58;
+    ChatDeleteRequest     chat_delete_request     = 59;
+    ChatDeleteEvent       chat_delete_event       = 60;
     ScreenShareStartRequest        screen_share_start_request         = 38;
     ScreenShareStopRequest         screen_share_stop_request          = 39;
     ScreenShareSubscribeRequest    screen_share_subscribe_request     = 40;
@@ -233,6 +235,16 @@ message ChatHistoryResponse {
   int64 channel_id = 1;
   repeated ChatMessage messages = 2;
   bool has_more = 3;
+}
+
+message ChatDeleteRequest {
+  int64 channel_id = 1;
+  int64 message_id = 2;
+}
+
+message ChatDeleteEvent {
+  int64 channel_id = 1;
+  int64 message_id = 2;
 }
 
 message ScreenShareStartRequest {

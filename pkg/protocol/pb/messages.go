@@ -30,6 +30,8 @@ type ControlMessage struct {
 	ChatEvent           *ChatMessage                   `json:"chat_event,omitempty"`
 	ChatHistoryReq      *ChatHistoryRequest            `json:"chat_history_request,omitempty"`
 	ChatHistoryResp     *ChatHistoryResponse           `json:"chat_history_response,omitempty"`
+	ChatDeleteReq       *ChatDeleteRequest             `json:"chat_delete_request,omitempty"`
+	ChatDeleteEvent     *ChatDeleteEvent               `json:"chat_delete_event,omitempty"`
 	ScreenShareStartReq *ScreenShareStartRequest       `json:"screen_share_start_request,omitempty"`
 	ScreenShareStopReq  *ScreenShareStopRequest        `json:"screen_share_stop_request,omitempty"`
 	ScreenShareSubReq   *ScreenShareSubscribeRequest   `json:"screen_share_subscribe_request,omitempty"`
@@ -235,6 +237,16 @@ type ChatHistoryResponse struct {
 	ChannelID int64         `json:"channel_id"`
 	Messages  []ChatMessage `json:"messages"`
 	HasMore   bool          `json:"has_more"`
+}
+
+type ChatDeleteRequest struct {
+	ChannelID int64 `json:"channel_id"`
+	MessageID int64 `json:"message_id"`
+}
+
+type ChatDeleteEvent struct {
+	ChannelID int64 `json:"channel_id"`
+	MessageID int64 `json:"message_id"`
 }
 
 // ----- Screen Sharing -----

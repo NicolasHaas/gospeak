@@ -14,21 +14,24 @@ const (
 	PermManageTokens
 	PermEditChannel
 	PermManageRoles
+	PermDeleteChatMessage
 )
 
 // permissionMatrix maps roles to their allowed permissions.
 var permissionMatrix = map[model.Role]map[Permission]bool{
 	model.RoleAdmin: {
-		PermCreateChannel: true,
-		PermDeleteChannel: true,
-		PermKickUser:      true,
-		PermBanUser:       true,
-		PermManageTokens:  true,
-		PermEditChannel:   true,
-		PermManageRoles:   true,
+		PermCreateChannel:     true,
+		PermDeleteChannel:     true,
+		PermKickUser:          true,
+		PermBanUser:           true,
+		PermManageTokens:      true,
+		PermEditChannel:       true,
+		PermManageRoles:       true,
+		PermDeleteChatMessage: true,
 	},
 	model.RoleModerator: {
-		PermKickUser: true,
+		PermKickUser:          true,
+		PermDeleteChatMessage: true,
 	},
 	model.RoleUser: {
 		// No special permissions — can only join channels and talk
@@ -69,6 +72,8 @@ func permName(p Permission) string {
 		return "edit_channel"
 	case PermManageRoles:
 		return "manage_roles"
+	case PermDeleteChatMessage:
+		return "delete_chat_message"
 	default:
 		return "unknown"
 	}

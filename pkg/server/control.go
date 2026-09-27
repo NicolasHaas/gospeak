@@ -1239,6 +1239,9 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 	case msg.ChatHistoryReq != nil:
 		s.handleChatHistory(handler, sessionID, msg.ChatHistoryReq, st, conn)
 
+	case msg.ChatDeleteReq != nil:
+		s.handleChatDelete(handler, sessionID, msg.ChatDeleteReq, st, conn)
+
 	case msg.ScreenShareStartReq != nil:
 		s.handleScreenShareStart(handler, sessionID, msg.ScreenShareStartReq, conn)
 

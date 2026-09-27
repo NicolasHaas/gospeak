@@ -171,6 +171,8 @@ func TestControlMessageCostCoversEveryInboundRequest(t *testing.T) {
 		{"list bans", &pb.ControlMessage{ListBansReq: &pb.ListBansRequest{}}, "expensive", 5},
 		{"unban", &pb.ControlMessage{UnbanReq: &pb.UnbanRequest{}}, "expensive", 5},
 		{"chat", &pb.ControlMessage{ChatMsg: &pb.ChatMessage{}}, "chat", 2},
+		{"chat history", &pb.ControlMessage{ChatHistoryReq: &pb.ChatHistoryRequest{}}, "expensive", 5},
+		{"chat delete", &pb.ControlMessage{ChatDeleteReq: &pb.ChatDeleteRequest{}}, "expensive", 5},
 		{"screen start", &pb.ControlMessage{ScreenShareStartReq: &pb.ScreenShareStartRequest{}}, "expensive", 5},
 		{"screen stop", &pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}}, "expensive", 5},
 		{"screen subscribe", &pb.ControlMessage{ScreenShareSubReq: &pb.ScreenShareSubscribeRequest{}}, "expensive", 5},

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"net"
 	"strings"
 	"testing"
@@ -111,6 +112,9 @@ func TestChatHistoryHidesExpiredRowsBeforeSweep(t *testing.T) {
 	}
 	conn := &bufferConn{}
 	srv.handleChatHistory(handler, session.ID, &pb.ChatHistoryRequest{ChannelID: channel.ID}, st, conn)
+	if !bytes.Contains(conn.buffer.Bytes(), []byte(`"messages":[]`)) {
+		t.Fatalf("empty history wire = %s", conn.buffer.String())
+	}
 	response, err := protocol.ReadControlMessage(conn)
 	if err != nil || response.ChatHistoryResp == nil || len(response.ChatHistoryResp.Messages) != 0 {
 		t.Fatalf("expired history = %#v, %v", response, err)
