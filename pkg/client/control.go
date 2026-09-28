@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -151,11 +152,14 @@ func (c *ControlClient) Done() <-chan struct{} {
 }
 
 func isClosedErr(err error) bool {
-	if err == nil {
-		return false
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, io.EOF) {
+		return true
 	}
-	s := err.Error()
-	return s == "use of closed network connection" ||
-		s == "tls: use of closed connection" ||
-		s == "EOF"
+	for err != nil {
+		if err.Error() == "use of closed network connection" || err.Error() == "tls: use of closed connection" {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
