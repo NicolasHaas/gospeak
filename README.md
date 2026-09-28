@@ -190,7 +190,7 @@ upgrade guidance for duplicate sibling names.
 | GUI | [Fyne](https://fyne.io/) v2 |
 | Audio I/O | [PortAudio](http://www.portaudio.com/) via [gordonklaus/portaudio](https://github.com/gordonklaus/portaudio) |
 | Voice Codec | [Opus](https://opus-codec.org/) via [hraban/opus](https://github.com/hraban/opus) |
-| Encryption | AES-GCM (stdlib), ChaCha20-Poly1305 and Argon2id (`golang.org/x/crypto`) |
+| Encryption | AES-GCM (stdlib), ChaCha20-Poly1305 (`golang.org/x/crypto`) |
 | Database | SQLite via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go) |
 | TLS | Go stdlib `crypto/tls` (TLS 1.3) |
 | Config | [gopkg.in/yaml.v3](https://pkg.go.dev/gopkg.in/yaml.v3) |

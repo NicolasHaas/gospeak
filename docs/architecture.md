@@ -92,7 +92,7 @@ graph LR
 | `pkg/protocol` | Framing and packet formats for control, voice, and screen-share transports |
 | `pkg/protocol/pb` | All control message type definitions (structs with JSON tags) |
 | `pkg/audio` | Audio interfaces (`Capturer`, `Player`, `AudioEncoder`, `AudioDecoder`, `VoiceDetector`, `DecoderFactory`, `DeviceLister`) + PortAudio/Opus default implementations |
-| `pkg/crypto` | AES-GCM and ChaCha20-Poly1305 media encryption, key generation, token hashing (SHA-256), password hashing (Argon2id) |
+| `pkg/crypto` | AES-GCM and ChaCha20-Poly1305 media encryption, key generation, token hashing (SHA-256) |
 | `pkg/screenshare` | Platform-specific screen capture and JPEG encoding helpers |
 | `pkg/model` | Core domain types: User, Channel, Token, Ban, Session, Role, Permission |
 | `pkg/rbac` | Role-based access control and the User/Moderator/Admin permission matrix |

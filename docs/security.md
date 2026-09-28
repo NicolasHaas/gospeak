@@ -20,7 +20,6 @@ Text chat is protected in transit by the control connection's TLS, not end-to-en
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
 | UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
-| Password attacks | Password authentication is not implemented; a dormant Argon2id helper uses Time=1, Memory=64 MiB, and Threads=4 |
 | Privilege escalation | Server-side RBAC checks on every admin operation |
 
 ## Encryption Overview
@@ -232,15 +231,6 @@ Every admin operation is checked server-side via `rbac.HasPermission()` before e
 - Normal kicks and account bans never persist an IP address. Client-supplied moderation reasons are neither persisted, logged, nor echoed to affected connections; disconnect notices are generic. Runtime address use for connection handling and rate limiting remains in memory.
 - Upgrading removes legacy ban reasons and clears legacy IP data that was not created through the explicit IP-ban action.
 - Active account and exact-address bans can be listed in bounded cursor pages and removed only by administrators.
-
-## Password Hashing
-
-This helper is not called by the current token-based authentication flow. It is
-available for possible future password authentication:
-
-- **Algorithm**: Argon2id (winner of the Password Hashing Competition)
-- **Parameters**: Time=1, Memory=64MB, Threads=4, Output=32 bytes
-- **Implementation**: `golang.org/x/crypto/argon2`
 
 ## Recommendations for Production
 
