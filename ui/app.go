@@ -10,6 +10,7 @@ import (
 	"net"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1092,6 +1093,18 @@ func (a *App) confirmServerTrust(controlAddr, received, expected string, connect
 
 // ----- Admin / Settings dialogs -----
 
+func parseTokenSettings(usesText, daysText string) (int, int64, error) {
+	uses, err := strconv.ParseInt(strings.TrimSpace(usesText), 10, 32)
+	if err != nil || uses < 0 {
+		return 0, 0, fmt.Errorf("max uses must be a non-negative whole number")
+	}
+	days, err := strconv.ParseInt(strings.TrimSpace(daysText), 10, 64)
+	if err != nil || days < 0 || days > 3650 {
+		return 0, 0, fmt.Errorf("expiry must be 0 to 3650 days (0 means never)")
+	}
+	return int(uses), days * 86400, nil
+}
+
 func (a *App) showServerSettings() {
 	role := a.engine.GetRole()
 	var sections []fyne.CanvasObject
@@ -1103,13 +1116,14 @@ func (a *App) showServerSettings() {
 		maxUsesEntry := widget.NewEntry()
 		maxUsesEntry.SetText("10")
 		expiresEntry := widget.NewEntry()
-		expiresEntry.SetText("86400")
+		expiresEntry.SetText("1")
 
 		createTokenBtn := widget.NewButton("Create Token", func() {
-			var maxUses int
-			_, _ = fmt.Sscanf(maxUsesEntry.Text, "%d", &maxUses)
-			var expires int64
-			_, _ = fmt.Sscanf(expiresEntry.Text, "%d", &expires)
+			maxUses, expires, err := parseTokenSettings(maxUsesEntry.Text, expiresEntry.Text)
+			if err != nil {
+				dialog.ShowError(err, a.window)
+				return
+			}
 			if err := a.engine.CreateToken(roleSelect.Selected, maxUses, expires); err != nil {
 				dialog.ShowError(err, a.window)
 			}
@@ -1118,8 +1132,8 @@ func (a *App) showServerSettings() {
 		sections = append(sections,
 			widget.NewLabelWithStyle("Create Invite Token", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewHBox(widget.NewLabel("Role:"), roleSelect),
-			container.NewHBox(widget.NewLabel("Max Uses:"), maxUsesEntry),
-			container.NewHBox(widget.NewLabel("Expires (sec):"), expiresEntry),
+			container.NewHBox(widget.NewLabel("Uses (0 = unlimited):"), maxUsesEntry),
+			container.NewHBox(widget.NewLabel("Expires (days, 0 = never):"), expiresEntry),
 			createTokenBtn,
 			widget.NewSeparator(),
 		)
