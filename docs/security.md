@@ -6,6 +6,8 @@ and must be restricted separately when enabled.
 
 > **Note on the shared key model:** Voice uses one server-wide media key distributed to all clients. Screen sharing uses a separate key per active share, distributed to the sharer and authorized channel members. The server generates both keys and can decrypt media if compromised.
 
+Text chat is protected in transit by the control connection's TLS, not end-to-end encrypted. By default, the server stores message text and sender names in SQLite, returns up to 30 days of history, and targets 500 retained messages per channel. Age-expired rows are removed by bounded sweeps, so they may remain in the database longer. Operators can change `-chat-max-age` and `-chat-history-limit`, or set the history limit to `0` for live-only chat. This hides existing stored messages without deleting them; they can reappear if storage is re-enabled. The server checks channel scope for reads and writes; moderators and administrators can delete stored messages.
+
 ## Threat Model
 
 | Threat | Mitigation |
