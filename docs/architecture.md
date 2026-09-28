@@ -16,7 +16,7 @@ graph TB
         CTRL[Control Plane<br/>TCP/TLS 1.3<br/>:9600]
         SFU[Voice Plane<br/>UDP SFU<br/>:9601]
         SCR[Optional Screen Plane<br/>TCP/TLS Relay<br/>:9603]
-        DB[(SQLite<br/>Users, Channels,<br/>Tokens, Bans)]
+        DB[(SQLite<br/>Users, Channels,<br/>Messages, Tokens, Bans)]
     end
 
     C1 <-->|JSON over TLS| CTRL

@@ -35,6 +35,10 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `UnbanResponse`
 - `ChatMessage`
 - `ChatEvent`
+- `ChatHistoryRequest`
+- `ChatHistoryResponse`
+- `ChatDeleteRequest`
+- `ChatDeleteEvent`
 - `ScreenShareStartRequest`
 - `ScreenShareStopRequest`
 - `ScreenShareSubscribeRequest`
@@ -133,7 +137,7 @@ When persistence is enabled, the server stores a message before broadcasting it.
 
 `ChatEvent` includes a stored message ID when persistence is enabled. The server targets 500 retained messages per channel and 30 days of history by default. Operators can change `-chat-history-limit` (0 disables storage and history; 1..10000 retains messages) and `-chat-max-age` (a Go duration; `0` disables age expiry). With storage disabled, live chat still works and events have ID 0. Existing stored rows are left untouched, hidden from history, and not swept while disabled; re-enabling persistence exposes any rows still within the configured retention period. Each write prunes at most 1000 excess rows in its channel; a large imported count backlog can remain above the target until further writes. A one-minute sweep removes up to 1000 age-expired rows per pass, including idle channels. Oversized legacy messages are truncated for history responses without changing their stored contents. Live events can overlap a history page, so clients should deduplicate by nonzero message ID.
 
-A moderator or administrator may send `ChatDeleteRequest{channel_id, message_id}` to remove any stored message in a channel their account can access, regardless of the author's role. The server deletes only a matching channel/message pair and emits `ChatDeleteEvent{channel_id, message_id}` to text subscribers; the requester also receives it as an acknowledgement. The client should treat duplicate deletion events as harmless. Older clients receive live chat but not deletion events because they reject unknown protocol fields, so an already displayed message can remain visible until they disconnect. Deletion is unavailable while persistence is disabled; live-only messages (ID 0) cannot be deleted after delivery. The current desktop client does not request history, select a separate text channel, or offer a delete action yet.
+A moderator or administrator may send `ChatDeleteRequest{channel_id, message_id}` to remove any stored message in a channel their account can access, regardless of the author's role. The server deletes only a matching channel/message pair and emits `ChatDeleteEvent{channel_id, message_id}` to text subscribers; the requester also receives it as an acknowledgement. The client should treat duplicate deletion events as harmless. Older clients receive live chat but not deletion events because they reject unknown protocol fields, so an already displayed message can remain visible until they disconnect. Deletion is unavailable while persistence is disabled; live-only messages (ID 0) cannot be deleted after delivery. The desktop client loads history on text-channel selection, pages through older messages, and offers deletion to moderators and administrators.
 
 ### Screen Sharing Signalling
 

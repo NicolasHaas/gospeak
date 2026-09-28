@@ -12,7 +12,7 @@ GoSpeak uses a selective forwarding architecture: the control plane handles sign
 - **Channel system**: hierarchical channels with sub-channels, temporary channels, max-user limits
 - **Role-based access control**: Admin, Moderator, User roles with granular permissions
 - **Token-based authentication**: 256-bit random tokens, SHA-256 hashed storage
-- **Text chat**: ephemeral per-channel messaging for connected channel members
+- **Text chat**: channel history with configurable retention or live-only mode; text selection is independent of voice
 - **Basic screen sharing**: opt-in per-channel viewing with a dedicated encrypted relay plane
 - **Desktop GUI**: native cross-platform UI built with [Fyne](https://fyne.io/)
 - **Server bookmarks**: save and manage server connections
@@ -54,12 +54,18 @@ metric semantics, dashboard thresholds, authenticated-session limits,
 control-message budget costs, rejection labels, and throttled-log behavior.
 
 On first run, GoSpeak writes an admin bootstrap credential to
-`bootstrap-admin.token` in the data directory. For this bind-mounted Compose
-setup, read it on the host with `cat ./data/bootstrap-admin.token`.
-Use it for the first admin login and
-save the personal token returned by the server. Interrupted first logins can be
-retried for the same administrator. The server removes the bootstrap file once
-that personal token is used; the credential is never written to normal logs.
+`bootstrap-admin.token` in the data directory. The container writes it as an owner-only file, so copy it out of this bind-mounted Compose setup rather than relying on host file permissions:
+
+```bash
+docker compose cp server:/data/bootstrap-admin.token "$HOME/bootstrap-admin.token"
+cat "$HOME/bootstrap-admin.token"
+```
+
+Use it for the first admin login and save the personal token returned by the
+server. Interrupted first logins can be retried for the same administrator.
+Remove the copied `$HOME/bootstrap-admin.token` after logging in. The server
+removes its bootstrap file once that personal token is used; the credential
+is never written to normal logs.
 
 ### Run the Server (Binary)
 
@@ -81,6 +87,8 @@ Download the appropriate binary for your platform from [Releases](https://github
 ```
 
 Enter the server address, your username, and (optionally) an invite token to connect. On first login the server issues a personal token; keep it to reconnect with the same username.
+
+Select a channel to read and send text. Use **Join Voice** separately if you want to talk there; you can keep reading another channel's chat.
 
 For a self-signed server, the client displays its SHA-256 public-key fingerprint before sending credentials. Verify that fingerprint with the server operator through a trusted channel, then choose **Trust and Connect**. The saved pin is checked for both control and screen connections. A later identity change is a hard connection failure and requires an explicit **Re-trust and Connect** confirmation after the new fingerprint has been verified. Publicly trusted certificates are validated with the operating system's CA store and hostname checks without a TOFU prompt.
 
@@ -139,6 +147,8 @@ started with `-screen-share`.
 | `-data` | `.` | Data directory for generated TLS files and the first-run `bootstrap-admin.token` |
 | `-open` | `false` | Allow connections without a token |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
+| `-chat-history-limit` | `500` | Messages retained per channel (`0` disables storage, not live chat) |
+| `-chat-max-age` | `720h` | Maximum stored message age (`0` disables age expiry) |
 | `-channels-file` | | YAML file for initial channel setup |
 | `-cert` / `-key` | *(empty)* | Custom matching TLS pair, including self-signed certificates; provide both. When both are empty, GoSpeak loads or creates `server.crt` and `server.key` in `-data`. On the first new TLS connection within 30 days of expiry, it renews the automatic certificate without changing the private key or TOFU identity |
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` HTTP bind address; opt in with a trusted bind such as `127.0.0.1:9602` |
