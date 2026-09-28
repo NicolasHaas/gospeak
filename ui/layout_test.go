@@ -83,8 +83,8 @@ func TestChatDraftSurvivesSendErrorAndJoinRequest(t *testing.T) {
 	}
 	a.engine.OnChannelJoined(2)
 	fyne.DoAndWait(func() {})
-	if len(a.chatBox.Objects) != 0 {
-		t.Fatal("accepted join did not clear old channel chat")
+	if len(a.chatBox.Objects) != 1 {
+		t.Fatal("voice join cleared independent text chat")
 	}
 	a.chatBox.Add(widget.NewLabel("server A message"))
 	a.engine.OnStateChange(client.StateDisconnected)
@@ -114,29 +114,30 @@ func TestAudioFailureIsVisibleAndResetsOnDisconnect(t *testing.T) {
 	}
 }
 
-func TestChatFollowsVoiceUntilIndependentChatExists(t *testing.T) {
+func TestChatContextFollowsTextSelectionNotVoice(t *testing.T) {
 	fyneApp := test.NewApp()
 	defer fyneApp.Quit()
 	a := &App{fyneApp: fyneApp, window: fyneApp.NewWindow("GoSpeak"), engine: client.NewEngine()}
 	a.buildUI()
 	a.channels = []pb.ChannelInfo{{ID: 1, Name: "Lobby"}, {ID: 2, Name: "Games"}}
-	a.selectedChannelID = 2
-	a.updateChatContext(1)
-	if a.chatHeader.Text != "Chat: Lobby (voice)" || !a.chatEntry.Disabled() {
-		t.Fatal("selecting Games must not make Lobby chat look like Games chat")
+	a.chatChannelID = 2
+	a.updateChatContext()
+	if a.chatHeader.Text != "Chat: Games" || a.chatEntry.Disabled() {
+		t.Fatal("Games text chat must work without voice")
 	}
-	a.selectedChannelID = 1
-	a.updateChatContext(1)
-	if a.chatEntry.Disabled() {
-		t.Fatal("chat must be available when the selected channel matches voice")
+	a.chatChannelID = 1
+	a.updateChatContext()
+	if a.chatHeader.Text != "Chat: Lobby" || a.chatEntry.Disabled() {
+		t.Fatal("text channel must be independent of voice")
 	}
-	a.updateChatContext(0)
-	if a.chatHeader.Text != "Join voice to chat" || !a.chatEntry.Disabled() {
-		t.Fatal("chat must be unavailable outside voice")
+	a.chatChannelID = 0
+	a.updateChatContext()
+	if a.chatHeader.Text != "Select a text channel" || !a.chatEntry.Disabled() {
+		t.Fatal("chat must be unavailable without a text selection")
 	}
 	a.channels[0].Name = strings.Repeat("W", 64)
-	a.selectedChannelID = 1
-	a.updateChatContext(1)
+	a.chatChannelID = 1
+	a.updateChatContext()
 	if width := a.window.Content().MinSize().Width; width > 800 {
 		t.Fatalf("long channel name makes window %.0f px wide", width)
 	}
