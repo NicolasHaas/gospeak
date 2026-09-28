@@ -1,8 +1,8 @@
 # GoSpeak
 
-A privacy-focused voice communication server and client, inspired by TeamSpeak. The application is written primarily in Go; the desktop client integrates native PortAudio and Opus libraries through CGO.
+GoSpeak is a self-hosted voice server and desktop client inspired by TeamSpeak, with an emphasis on auditable code and minimal dependencies. It is written in Go, using the standard library where practical and native Opus and PortAudio through CGO for audio.
 
-GoSpeak uses a selective forwarding architecture: the control plane handles signalling, the voice plane relays encrypted audio packets, and the screen plane relays encrypted screen-share frames.
+GoSpeak uses a client-server SFU model, not peer-to-peer connections. TLS handles control and text chat, UDP carries encrypted voice through the server, and an optional TCP/TLS relay in the same server handles screen sharing. Clients send UDP to the server's known, reachable endpoint, so ordinary client NAT does not require STUN or TURN.
 
 ## Features
 
@@ -22,7 +22,7 @@ GoSpeak uses a selective forwarding architecture: the control plane handles sign
 - **Voice Activity Detection**: energy-based VAD with configurable threshold
 - **Containerized builds**: multi-stage Podman/Docker builds for Linux and Windows
 
-> **Note:** The server generates voice and screen-share keys for its selected media cipher and distributes them over TLS. It relays media without decoding it, but a compromised server could decrypt it. See the [security threat model](docs/security.md).
+> **Note:** The server generates the media encryption keys and distributes them to clients over authenticated TLS. It verifies incoming media packets and forwards their original ciphertext without decoding the audio or images. This protects traffic in transit, but it is not end-to-end encryption: a compromised server could decrypt the media. So host your own within a community you trust! See the [security threat model](docs/security.md).
 
 ## Quick Start
 
@@ -96,32 +96,28 @@ Existing bookmark files remain compatible. They gain a `trusted_server_pins` sec
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    GoSpeak Server                                    │
-│                                                                      │
-│  ┌──────────────┐  ┌───────────────┐  ┌──────────────┐  ┌──────────┐ │
-│  │ Control Plane │  │  Voice SFU   │  │Screen Relay* │  │  SQLite  │ │
-│  │ TCP/TLS 1.3  │  │  UDP Relay    │  │  TCP/TLS     │  │  Store   │ │
-│  │   :9600      │  │   :9601       │  │   :9603      │  │          │ │
-│  └──────────────┘  └───────────────┘  └──────────────┘  └──────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
-  │                    │                 │
-   JSON/TLS            Selected AEAD      Selected AEAD
-  │                    │                 │
-┌─────────────────────────────────────────────────────┐
-│                   GoSpeak Client                    │
-│                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌────────┐  ┌────────┐ │
-│  │ Fyne GUI │  │  Engine  │  │ Audio  │  │ Crypto │ │
-│  │          │  │  Control │  │ Opus   │  │ Media  │ │
-│  │          │  │  + Voice │  │ + VAD  │  │ AEAD   │ │
-│  └──────────┘  └──────────┘  └────────┘  └────────┘ │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    A["GoSpeak client A"]
+    B["GoSpeak client B"]
+
+    subgraph Server["Your GoSpeak server"]
+        Control["Control and text chat<br/>TCP / TLS 1.3 :9600"]
+        Voice["Voice SFU<br/>Encrypted UDP :9601"]
+        Screen["Optional screen relay<br/>Encrypted media over TLS :9603"]
+        DB[("SQLite")]
+        Control --- DB
+    end
+
+    A <-->|Control and chat| Control
+    B <-->|Control and chat| Control
+    A <-->|Voice| Voice
+    B <-->|Voice| Voice
+    A <-->|Screen sharing| Screen
+    B <-->|Screen sharing| Screen
 ```
 
-`*` The screen relay is disabled by default and exists only when the server is
-started with `-screen-share`.
+Screen sharing is disabled by default; enable it with `-screen-share`.
 
 ## Documentation
 
