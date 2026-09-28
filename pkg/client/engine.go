@@ -267,7 +267,9 @@ type Engine struct {
 	OnAudioFailure     func(error)
 	OnChannelJoined    func(channelID int64)
 	OnDisconnect       func(reason string)
-	OnChatMessage      func(channelID int64, sender, text string, ts int64)
+	OnChatMessage      func(message pb.ChatMessage)
+	OnChatHistory      func(response pb.ChatHistoryResponse)
+	OnChatDeleted      func(event pb.ChatDeleteEvent)
 	OnScreenShareEvent func(event *pb.ScreenShareEvent)
 	OnScreenFrame      func(img image.Image)
 	OnTokenCreated     func(token string)
@@ -1208,9 +1210,21 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 
 	case msg.ChatEvent != nil:
 		if callback := e.OnChatMessage; callback != nil {
-			e.enqueueGenerationCallbackLocked(g, func() {
-				callback(msg.ChatEvent.ChannelID, msg.ChatEvent.SenderName, msg.ChatEvent.Text, msg.ChatEvent.Timestamp)
-			})
+			message := *msg.ChatEvent
+			e.enqueueChatCallbackLocked(g, func() { callback(message) })
+		}
+
+	case msg.ChatHistoryResp != nil:
+		if callback := e.OnChatHistory; callback != nil {
+			response := *msg.ChatHistoryResp
+			response.Messages = append([]pb.ChatMessage(nil), response.Messages...)
+			e.enqueueChatCallbackLocked(g, func() { callback(response) })
+		}
+
+	case msg.ChatDeleteEvent != nil:
+		if callback := e.OnChatDeleted; callback != nil {
+			event := *msg.ChatDeleteEvent
+			e.enqueueChatCallbackLocked(g, func() { callback(event) })
 		}
 
 	case msg.ScreenShareEvent != nil:
@@ -1493,33 +1507,49 @@ func (e *Engine) CreateToken(role string, maxUses int, expiresInSeconds int64) e
 	})
 }
 
-// SendChat sends a text message to the current channel.
-func (e *Engine) SendChat(text string) error {
+// SendChat sends a text message to the selected text channel.
+func (e *Engine) SendChat(channelID int64, text string) error {
 	g, ctrl, ok := e.beginControlOperation()
 	if !ok {
 		return fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
+	if channelID <= 0 {
+		return fmt.Errorf("no text channel selected")
+	}
+	return ctrl.Send(&pb.ControlMessage{
+		ChatMsg: &pb.ChatMessage{ChannelID: channelID, Text: text},
+	})
+}
 
-	g.mu.Lock()
-	e.mu.RLock()
-	current := g.ctx.Err() == nil && e.generation == g && e.state == StateConnected
-	channelID := e.channelID
-	e.mu.RUnlock()
-	g.mu.Unlock()
-	if !current {
+// LoadChatHistory selects a text channel and fetches one page, newest first.
+func (e *Engine) LoadChatHistory(channelID, beforeID int64) error {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
 		return fmt.Errorf("not connected")
 	}
-	if channelID == 0 {
-		return fmt.Errorf("not in a channel")
+	defer g.wg.Done()
+	if channelID <= 0 || beforeID < 0 {
+		return fmt.Errorf("invalid chat history request")
 	}
+	return ctrl.Send(&pb.ControlMessage{ChatHistoryReq: &pb.ChatHistoryRequest{
+		ChannelID: channelID, BeforeID: beforeID,
+	}})
+}
 
-	return ctrl.Send(&pb.ControlMessage{
-		ChatMsg: &pb.ChatMessage{
-			ChannelID: channelID,
-			Text:      text,
-		},
-	})
+// DeleteChatMessage requests moderator removal of a stored message.
+func (e *Engine) DeleteChatMessage(channelID, messageID int64) error {
+	g, ctrl, ok := e.beginControlOperation()
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+	defer g.wg.Done()
+	if channelID <= 0 || messageID <= 0 {
+		return fmt.Errorf("invalid chat message")
+	}
+	return ctrl.Send(&pb.ControlMessage{ChatDeleteReq: &pb.ChatDeleteRequest{
+		ChannelID: channelID, MessageID: messageID,
+	}})
 }
 
 // StartScreenShare announces a screen share and begins streaming once the server confirms it.
@@ -2403,20 +2433,28 @@ func (e *Engine) enqueueGenerationCallbackLocked(g *connectionGeneration, fn fun
 	e.enqueueQualifiedGenerationCallbackLocked(g, fn, false)
 }
 
+func (e *Engine) enqueueChatCallbackLocked(g *connectionGeneration, fn func()) {
+	if !e.enqueueQualifiedGenerationCallbackLocked(g, fn, true) {
+		go e.requestDisconnect(g, "chat callback backlog full")
+	}
+}
+
 func (e *Engine) enqueueReliableGenerationCallbackLocked(g *connectionGeneration, fn func()) {
 	e.enqueueQualifiedGenerationCallbackLocked(g, fn, true)
 }
 
-func (e *Engine) enqueueQualifiedGenerationCallbackLocked(g *connectionGeneration, fn func(), reliable bool) {
+func (e *Engine) enqueueQualifiedGenerationCallbackLocked(g *connectionGeneration, fn func(), reliable bool) bool {
 	e.mu.RLock()
 	current := e.generation == g
 	e.mu.RUnlock()
 	g.mu.Lock()
 	active := g.ctx.Err() == nil
+	queued := false
 	if current && active {
-		e.enqueueCallback(fn, reliable)
+		queued = e.enqueueCallback(fn, reliable)
 	}
 	g.mu.Unlock()
+	return queued
 }
 
 func (e *Engine) invokeGenerationCallback(g *connectionGeneration, fn func()) {
