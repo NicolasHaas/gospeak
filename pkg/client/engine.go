@@ -466,6 +466,11 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 		e.voiceDebugEnabled = true
 		e.startVoiceDebugLogging(g)
 	}
+	g.run(func(context.Context) {
+		ticker := time.NewTicker(controlHeartbeatInterval)
+		defer ticker.Stop()
+		g.controlHeartbeat(ctrl, ticker.C)
+	})
 	g.run(func(context.Context) { e.keepaliveLoop(g) })
 	e.startAudio(g)
 

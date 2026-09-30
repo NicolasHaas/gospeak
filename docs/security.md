@@ -53,6 +53,7 @@ graph TB
 ## Control Plane Security (TLS 1.3)
 
 - The control plane uses **TLS 1.3** (the latest version) for all TCP connections
+- Updated clients send a control Ping every 60 seconds. The server closes authenticated control connections after five minutes without a complete valid message; partial frames do not extend that deadline. Older clients that remain silent on the control plane must reconnect, even if they are still sending voice packets.
 - On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
 - The automatic certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
 - The first new TLS connection within 30 days of expiry renews it, even if the server has stayed up continuously. Renewal keeps the existing private key, so saved TOFU fingerprints remain valid. If renewal fails while the cached certificate is still valid, GoSpeak serves that certificate and retries on a later connection; it fails closed after expiry

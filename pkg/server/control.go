@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1149,8 +1150,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		default:
 		}
 
-		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(conn)
+		// A fixed deadline covers the entire frame; partial reads do not renew it.
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+			return
+		}
+		reader := io.LimitedReader{R: conn, N: protocol.MaxControlMessage + 4}
+		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(&reader)
 		if err != nil {
+			// Only silence is normal idle expiry; an unfinished frame is invalid.
+			if errors.Is(err, os.ErrDeadlineExceeded) && reader.N == protocol.MaxControlMessage+4 {
+				return
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || isClosedErr(err) {
 				return
 			}

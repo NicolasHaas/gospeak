@@ -54,6 +54,10 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `ErrorResponse`
 - `Ping` / `Pong`
 
+### Control heartbeat
+
+Clients send `Ping` every 60 seconds, and the server echoes its timestamp in `Pong`. Both messages already exist on the wire. The server gives each authenticated control frame a five-minute read deadline, renewed only after a complete valid frame. Voice and screen traffic do not renew it. Older clients that send no control messages for five minutes are disconnected.
+
 ### Wire Format
 
 ```
