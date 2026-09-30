@@ -50,6 +50,9 @@ func NewScreenShareManager(suite ...string) *ScreenShareManager {
 }
 
 func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int64, username string, width, height int32) (*pb.ScreenShareEvent, error) {
+	if width <= 0 || height <= 0 || width > 8192 || height > 8192 {
+		return nil, fmt.Errorf("invalid screen dimensions")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

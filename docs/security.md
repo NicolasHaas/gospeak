@@ -149,6 +149,7 @@ For each voice packet:
 - If additional users join later, the sharer can share the active key with the current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
 - The server transiently authenticates and opens each packet, then forwards the original authenticated ciphertext to subscribed viewers without parsing, decoding, logging, or retaining frame plaintext.
+- Viewers treat authenticated frames as untrusted input. Before decoding pixels, they require JPEG format, positive dimensions no larger than 8192 per axis and 16,777,216 pixels in total, and an exact match between the frame metadata and JPEG header. Invalid frames are dropped. These checks require an updated client; the relay does not protect older viewers from malicious image content.
 
 Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that continues across key changes within one authenticated control connection. A new key creates fresh replay state on the server and viewers, but does not reset the sender's counter. The counter resets only for a new control-connection generation, and sharing stops before it can wrap. The ordered relay authenticates a frame before committing its strictly increasing sequence, so duplicate and out-of-order frames are rejected without letting forged high sequences poison the state.
 

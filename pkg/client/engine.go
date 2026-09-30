@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/jpeg"
 	"log/slog"
 	"math"
 	"net"
@@ -2103,7 +2102,7 @@ func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.Scree
 		slog.Debug("screen frame unmarshal error", "err", err)
 		return
 	}
-	img, _, err := image.Decode(bytes.NewReader(frame.Data))
+	img, err := decodeScreenImage(frame)
 	if err != nil {
 		slog.Debug("screen frame decode error", "err", err)
 		return

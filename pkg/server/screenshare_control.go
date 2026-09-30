@@ -25,7 +25,7 @@ func (s *Server) handleScreenShareStart(handler *ControlHandler, sessionID uint3
 		sendError(conn, 40, "join a channel before sharing your screen")
 		return
 	}
-	if req.Width <= 0 || req.Height <= 0 {
+	if req.Width <= 0 || req.Height <= 0 || req.Width > 8192 || req.Height > 8192 {
 		sendError(conn, 40, "invalid screen dimensions")
 		return
 	}
