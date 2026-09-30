@@ -92,6 +92,52 @@ func TestSendSharesSubmitAndScreenVisibility(t *testing.T) {
 	}
 }
 
+func TestInputMeterAndReadableUserNames(t *testing.T) {
+	f := test.NewApp()
+	defer f.Quit()
+	a := &App{fyneApp: f, window: f.NewWindow("GoSpeak"), engine: client.NewEngine()}
+	a.buildUI()
+	a.bindEvents()
+	t.Run("input meter", func(t *testing.T) {
+		if a.engine.OnRMSLevel == nil {
+			t.Fatal("input level callback is not connected")
+		}
+		a.engine.OnStateChange(client.StateConnected)
+		fyne.DoAndWait(func() {})
+		for _, tc := range []struct{ rms, want float64 }{{2500, 0.5}, {10000, 1}, {0, 0}} {
+			a.engine.OnRMSLevel(tc.rms)
+			fyne.DoAndWait(func() {})
+			if a.vuMeter.Value != tc.want {
+				t.Fatalf("RMS %v: meter = %v, want %v", tc.rms, a.vuMeter.Value, tc.want)
+			}
+		}
+		a.engine.OnRMSLevel(2500)
+		fyne.DoAndWait(func() {})
+		a.engine.OnAudioFailure(errors.New("no input device"))
+		a.engine.OnRMSLevel(2500)
+		fyne.DoAndWait(func() {})
+		if a.vuMeter.Value != 0 || a.vadIndicator.Text != "Audio unavailable" {
+			t.Fatal("audio failure must empty meter and preserve its reason")
+		}
+		a.vuMeter.SetValue(0.5)
+		a.engine.OnStateChange(client.StateDisconnected)
+		a.engine.OnRMSLevel(2500)
+		fyne.DoAndWait(func() {})
+		if a.vuMeter.Value != 0 || a.mediaControls.Visible() {
+			t.Fatal("disconnect must reset and hide the meter")
+		}
+	})
+	t.Run("user contrast", func(t *testing.T) {
+		a.channels = []pb.ChannelInfo{{ID: 1, Name: "Lobby", Users: []pb.UserInfo{{Username: "Guest"}}}}
+		row := a.channelList.CreateItem()
+		a.updateChannelListItem(1, row)
+		label := row.(*fyne.Container).Objects[2].(*widget.Label)
+		if label.Importance != widget.MediumImportance {
+			t.Fatal("user names must use normal foreground contrast")
+		}
+	})
+}
+
 func TestChatLoadingAndEmptyStates(t *testing.T) {
 	f := test.NewApp()
 	defer f.Quit()

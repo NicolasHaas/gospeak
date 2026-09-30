@@ -53,6 +53,7 @@ type App struct {
 	disconnectBtn   *widget.Button
 	serverBtn       *widget.Button
 	vadIndicator    *widget.Label
+	vuMeter         *widget.ProgressBar
 	voiceStatus     *widget.Label
 	audioReason     *widget.Label
 	mediaControls   *fyne.Container
@@ -263,6 +264,9 @@ func (a *App) buildUI() {
 
 	muteFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.muteBtn)
 	deafenFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.deafenBtn)
+	a.vuMeter = widget.NewProgressBar()
+	a.vuMeter.TextFormatter = func() string { return "" }
+	meter := container.New(layout.NewGridWrapLayout(fyne.NewSize(140, 20)), a.vuMeter)
 	a.vadIndicator = widget.NewLabel("Voice idle")
 	a.vadIndicator.Hide()
 	a.voiceStatus = widget.NewLabel("Voice channel: none")
@@ -273,7 +277,7 @@ func (a *App) buildUI() {
 	audioSettings := widget.NewButton("Audio Settings", a.showSettingsDialog)
 	a.mediaControls = container.NewVBox(
 		container.NewHBox(a.joinChannelBtn, muteFixed, deafenFixed, audioSettings),
-		container.NewBorder(nil, nil, nil, a.vadIndicator, a.voiceStatus),
+		container.NewBorder(nil, nil, nil, container.NewHBox(a.vadIndicator, meter), a.voiceStatus),
 		a.audioReason,
 	)
 	a.mediaControls.Hide()
@@ -424,6 +428,7 @@ func (a *App) bindEvents() {
 				a.mediaControls.Hide()
 				a.disconnectBtn.Hide()
 				a.vadIndicator.SetText("Voice idle")
+				a.vuMeter.SetValue(0)
 				a.audioFailed = false
 				a.audioReason.SetText("")
 				a.audioReason.Hide()
@@ -490,6 +495,16 @@ func (a *App) bindEvents() {
 		})
 	}
 
+	a.engine.OnRMSLevel = func(level float64) {
+		fyne.Do(func() {
+			if !a.mediaControls.Visible() || a.audioFailed || a.engine.IsMuted() {
+				a.vuMeter.SetValue(0)
+				return
+			}
+			a.vuMeter.SetValue(level / 5000)
+		})
+	}
+
 	a.engine.OnVoiceActivity = func(active bool) {
 		fyne.Do(func() {
 			if a.audioFailed {
@@ -508,6 +523,7 @@ func (a *App) bindEvents() {
 	a.engine.OnAudioFailure = func(err error) {
 		fyne.Do(func() {
 			a.audioFailed = true
+			a.vuMeter.SetValue(0)
 			a.vadIndicator.SetText("Audio unavailable")
 			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Check Audio Settings, then reconnect.", err))
 			a.audioReason.Show()
@@ -1507,7 +1523,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 	} else {
 		icon.SetResource(theme.AccountIcon())
 		indent.SetMinSize(fyne.NewSize(float32(item.depth+1)*20, 1))
-		label.Importance = widget.LowImportance
+		label.Importance = widget.MediumImportance
 		status := ""
 		if item.user.Muted {
 			status += " [M]"
@@ -1687,6 +1703,7 @@ func (a *App) showUserContextMenu(user pb.UserInfo) {
 
 func (a *App) updateMuteButtons() {
 	if a.engine.IsMuted() {
+		a.vuMeter.SetValue(0)
 		if !a.audioFailed {
 			a.vadIndicator.SetText("Muted")
 		}
