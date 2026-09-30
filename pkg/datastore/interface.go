@@ -132,6 +132,5 @@ type MessageWriteProvider interface {
 	// 1000 excess rows; imported backlogs may temporarily exceed maxPerChannel until later writes.
 	CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) error
 	PruneExpiredMessages(maxAge time.Duration, limit int) (int64, error)
-	DeleteMessage(messageID int64) error
 	DeleteMessageInChannel(messageID, channelID int64) (bool, error)
 }

@@ -1378,7 +1378,11 @@ func (s *nonTxProvider) CreateMessageWithRetention(message *model.Message, maxPe
 	if message == nil {
 		return fmt.Errorf("datastore: invalid message identity")
 	}
-	tx, err := s.DB.(*sql.DB).BeginTx(context.Background(), nil)
+	db, ok := s.DB.(*sql.DB)
+	if !ok || db == nil {
+		return fmt.Errorf("datastore: message transaction requires a database")
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("datastore: begin message transaction: %w", err)
 	}
@@ -1504,14 +1508,6 @@ func (s *baseProvider) ListMessages(filters model.MessageFilters) ([]model.Messa
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
-}
-
-func (s *baseProvider) DeleteMessage(messageID int64) error {
-	_, err := s.ExecContext(context.Background(), "DELETE FROM messages WHERE id = ?", messageID)
-	if err != nil {
-		return fmt.Errorf("datastore: delete message: %w", err)
-	}
-	return nil
 }
 
 // DeleteMessageInChannel checks channel identity in the write, not in a separate read.
