@@ -1341,6 +1341,27 @@ func TestListMessages(t *testing.T) {
 	})
 }
 
+func TestGetUserByPersonalTokenHashRejectsEmptyHash(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+
+	if _, err := store.NonTx().CreateUser("tokenless", model.RoleUser); err != nil {
+		t.Fatalf("CreateUser: failed to seed user: %v", err)
+	}
+
+	got, err := store.NonTx().GetUserByPersonalTokenHash("")
+	if err != nil {
+		t.Fatalf("GetUserByPersonalTokenHash(empty): unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("GetUserByPersonalTokenHash(empty) resolved to user %q", got.Username)
+	}
+}
+
 func TestDeleteMessage(t *testing.T) {
 	t.Parallel()
 

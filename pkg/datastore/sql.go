@@ -712,6 +712,11 @@ func (s *baseProvider) GetUserByID(id int64) (*model.User, error) {
 }
 
 func (s *baseProvider) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	if hash == "" {
+		// Token-less users store an empty hash; an empty lookup must never
+		// resolve to one of them as an authenticated identity.
+		return nil, nil
+	}
 	u := &model.User{}
 	var roleInt int
 	var createdAt string

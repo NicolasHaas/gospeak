@@ -1527,6 +1527,15 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 		return
 	}
 
+	if req.ExpiresInSeconds < 0 || req.ExpiresInSeconds > maxBanDurationSeconds {
+		sendError(conn, 31, "invalid token expiry")
+		return
+	}
+	role, err := model.ParseRole(req.Role)
+	if err != nil {
+		sendError(conn, 31, "unknown role")
+		return
+	}
 	rawToken, err := crypto.GenerateToken()
 	if err != nil {
 		sendError(conn, 31, "failed to generate token")
@@ -1539,7 +1548,6 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	}
 
 	hash := crypto.HashToken(rawToken)
-	role := model.ParseRole(req.Role)
 
 	if err := st.NonTx().CreateToken(hash, role, req.ChannelScope, session.UserID, int(req.MaxUses), expiresAt); err != nil {
 		slog.Error("create token", "err", err)
@@ -1862,7 +1870,11 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 		return
 	}
 
-	newRole := model.ParseRole(req.NewRole)
+	newRole, err := model.ParseRole(req.NewRole)
+	if err != nil {
+		sendError(conn, 31, "unknown role")
+		return
+	}
 
 	// Serialize remote target policy checks with kicks and other role changes.
 	s.remoteModerationMu.Lock()

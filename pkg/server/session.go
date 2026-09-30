@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -376,7 +377,10 @@ func (sm *SessionManager) ValidateScreenAuth(sessionID uint32, token string) boo
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	s, ok := sm.sessions[sessionID]
-	return ok && s.ScreenAuthToken == token
+	if !ok {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(s.ScreenAuthToken), []byte(token)) == 1
 }
 
 // Remove removes a session and its replay state.

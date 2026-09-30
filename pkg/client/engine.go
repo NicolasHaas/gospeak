@@ -1202,7 +1202,7 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		// Ping/pong handled silently
 
 	case msg.CreateTokenResp != nil:
-		slog.Debug("token created", "token", msg.CreateTokenResp.Token)
+		slog.Debug("token created")
 		if callback := e.OnTokenCreated; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.CreateTokenResp.Token) })
 		}

@@ -317,13 +317,11 @@ func TestRole_ParseRole(t *testing.T) {
 		{"admin", RoleAdmin},
 		{"moderator", RoleModerator},
 		{"user", RoleUser},
-		{"", RoleUser},
-		{"unknown", RoleUser},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			if got := ParseRole(tt.input); got != tt.want {
+			if got, err := ParseRole(tt.input); err != nil || got != tt.want {
 				t.Errorf("ParseRole(%q) = %d, want %d", tt.input, got, tt.want)
 			}
 		})
