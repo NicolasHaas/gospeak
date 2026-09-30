@@ -12,7 +12,6 @@ const (
 	PermKickUser
 	PermBanUser
 	PermManageTokens
-	PermEditChannel
 	PermManageRoles
 	PermDeleteChatMessage
 )
@@ -25,7 +24,6 @@ var permissionMatrix = map[model.Role]map[Permission]bool{
 		PermKickUser:          true,
 		PermBanUser:           true,
 		PermManageTokens:      true,
-		PermEditChannel:       true,
 		PermManageRoles:       true,
 		PermDeleteChatMessage: true,
 	},
@@ -68,8 +66,6 @@ func permName(p Permission) string {
 		return "ban_user"
 	case PermManageTokens:
 		return "manage_tokens"
-	case PermEditChannel:
-		return "edit_channel"
 	case PermManageRoles:
 		return "manage_roles"
 	case PermDeleteChatMessage:

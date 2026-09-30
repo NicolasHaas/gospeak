@@ -205,7 +205,6 @@ graph TB
         P3[KickUser]
         P4[BanUser]
         P5[ManageTokens]
-        P6[EditChannel]
         P7[ManageRoles]
     end
 
@@ -214,7 +213,6 @@ graph TB
     ADMIN --> P3
     ADMIN --> P4
     ADMIN --> P5
-    ADMIN --> P6
     ADMIN --> P7
     MOD --> P3
 ```
