@@ -2002,15 +2002,16 @@ func isValidUsername(name string) bool {
 	return model.ValidateUsername(name) == nil
 }
 
-// sanitizeText strips control characters (except newline) from user-supplied text
-// to prevent UI spoofing, terminal escape injection, and null-byte attacks.
+// sanitizeText strips control and Unicode format characters (except newline)
+// from user-supplied text to prevent UI spoofing, terminal escape injection,
+// null-byte attacks, and bidi/hidden-text tricks.
 func sanitizeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' {
 			return ' ' // collapse newlines to spaces
 		}
-		if unicode.IsControl(r) {
-			return -1 // strip all other control chars (null, bell, ANSI escapes, etc.)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1 // strip other control chars and format chars (RLO, ZWSP, ...)
 		}
 		return r
 	}, s)

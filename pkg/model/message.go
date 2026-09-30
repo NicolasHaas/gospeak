@@ -12,6 +12,8 @@ const MessageMaxBodyLength = 2000
 
 var ErrMessageBodyTooLong = fmt.Errorf("message body exceeds %d characters", MessageMaxBodyLength)
 var ErrMessageBodyEmpty = errors.New("message body cannot be empty")
+var ErrMessageBodyInvalidUTF8 = errors.New("message body is not valid UTF-8")
+var ErrMessageBodyControl = errors.New("message body contains control or format characters")
 
 type Message struct {
 	ID         int64     `json:"id"`
@@ -25,6 +27,10 @@ type Message struct {
 func (m *Message) Validate() error {
 	if strings.TrimSpace(m.Body) == "" {
 		return ErrMessageBodyEmpty
+	} else if !utf8.ValidString(m.Body) {
+		return ErrMessageBodyInvalidUTF8
+	} else if containsControlCharacter(m.Body) {
+		return ErrMessageBodyControl
 	} else if utf8.RuneCountInString(m.Body) > MessageMaxBodyLength {
 		return ErrMessageBodyTooLong
 	}
