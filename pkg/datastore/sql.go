@@ -1347,6 +1347,23 @@ func (s *baseProvider) DeleteBan(id int64) (bool, error) {
 	return rows == 1, nil
 }
 
+// PruneExpiredBans deletes at most limit rows whose expires_at has already
+// passed; permanent bans (expires_at IS NULL) are never deleted. The IN-subquery
+// form is the portable bounded-DELETE pattern (SQLite needs
+// SQLITE_ENABLE_UPDATE_DELETE_LIMIT for a bare DELETE ... LIMIT).
+func (s *baseProvider) PruneExpiredBans(limit int) (int64, error) {
+	if limit < 1 || limit > MaxBanPageSize {
+		return 0, fmt.Errorf("datastore: invalid ban expiry sweep")
+	}
+	res, err := s.ExecContext(context.Background(), `DELETE FROM bans WHERE id IN (
+		SELECT id FROM bans WHERE expires_at IS NOT NULL AND expires_at <= datetime('now') ORDER BY id LIMIT ?)`,
+		limit)
+	if err != nil {
+		return 0, fmt.Errorf("datastore: prune expired bans: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // ---- Messages ----
 
 func (s *baseProvider) CreateMessage(message *model.Message) error {

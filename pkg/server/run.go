@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 )
 
 const metricsShutdownTimeout = 5 * time.Second
@@ -89,9 +90,16 @@ func (s *Server) Run() error {
 		if _, err := st.NonTx().PruneExpiredMessages(s.cfg.ChatMaxAge, 1000); err != nil {
 			return fmt.Errorf("server: prune expired chat: %w", err)
 		}
-		if !s.startWorker(func() { s.runChatJanitor(st) }) {
-			return nil // Shutdown won startup; Run's deferred Shutdown waits for cleanup.
-		}
+	}
+	if _, err := st.NonTx().PruneExpiredBans(datastore.MaxBanPageSize); err != nil {
+		return fmt.Errorf("server: prune expired bans: %w", err)
+	}
+	if !s.startWorker(func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		s.runRetentionJanitor(st, ticker.C)
+	}) {
+		return nil // Shutdown won startup; deferred Shutdown waits for cleanup.
 	}
 
 	slog.Info("GoSpeak server running", s.runningLogArgs()...)
