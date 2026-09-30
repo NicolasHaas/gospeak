@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 
-	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -62,11 +61,6 @@ func GenerateToken() (string, error) {
 func HashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("%x", h[:])
-}
-
-// HashPassword hashes a password using Argon2id.
-func HashPassword(password string, salt []byte) []byte {
-	return argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32)
 }
 
 // VoiceCipher handles authenticated voice and screen packets.

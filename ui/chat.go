@@ -44,6 +44,7 @@ func (a *App) selectChatChannel(channelID int64) {
 	a.chatDeleted = make(map[int64]bool)
 	a.chatLoading = true
 	a.updateChatContext()
+	a.renderChat()
 }
 
 func (a *App) loadEarlierChat() {
@@ -140,6 +141,13 @@ func (a *App) removeChatMessage(event pb.ChatDeleteEvent) {
 
 func (a *App) renderChat() {
 	rows := make([]fyne.CanvasObject, 0, len(a.chatRows))
+	if a.chatChannelID != 0 && len(a.chatRows) == 0 {
+		text := "No messages yet."
+		if a.chatLoading {
+			text = "Loading messages..."
+		}
+		rows = append(rows, widget.NewLabel(text))
+	}
 	role := a.engine.GetRole()
 	canDelete := role == "admin" || role == "moderator"
 	for _, message := range a.chatRows {
