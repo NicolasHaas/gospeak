@@ -53,6 +53,8 @@ type App struct {
 	disconnectBtn   *widget.Button
 	serverBtn       *widget.Button
 	vadIndicator    *widget.Label
+	voiceStatus     *widget.Label
+	audioReason     *widget.Label
 	mediaControls   *fyne.Container
 	mainArea        *container.Split
 	welcome         *fyne.Container
@@ -61,6 +63,7 @@ type App struct {
 	chatBox     *fyne.Container
 	chatScroll  *container.Scroll
 	chatEntry   *widget.Entry
+	chatSend    *widget.Button
 	chatHeader  *widget.Label
 	chatMore    *widget.Button
 	chatPane    *fyne.Container
@@ -72,6 +75,7 @@ type App struct {
 	screenLabel *widget.Label
 
 	// State
+	audioFailed        bool
 	channels           []pb.ChannelInfo
 	selectedChannelID  int64
 	chatChannelID      int64
@@ -201,6 +205,7 @@ func (a *App) buildUI() {
 	})
 	a.disconnectBtn.Disable()
 	a.disconnectBtn.Hide()
+	a.disconnectBtn.Importance = widget.LowImportance
 
 	// Fixed-width mute/deafen buttons to prevent layout shift on toggle.
 	a.muteBtn = widget.NewButtonWithIcon("  Mute  ", theme.VolumeMuteIcon(), func() {
@@ -258,7 +263,19 @@ func (a *App) buildUI() {
 
 	muteFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.muteBtn)
 	deafenFixed := container.New(layout.NewGridWrapLayout(fyne.NewSize(110, 36)), a.deafenBtn)
-	a.mediaControls = container.NewHBox(muteFixed, deafenFixed)
+	a.vadIndicator = widget.NewLabel("Voice idle")
+	a.vadIndicator.Hide()
+	a.voiceStatus = widget.NewLabel("Voice channel: none")
+	a.voiceStatus.Wrapping = fyne.TextWrapBreak
+	a.audioReason = widget.NewLabel("")
+	a.audioReason.Wrapping = fyne.TextWrapWord
+	a.audioReason.Hide()
+	audioSettings := widget.NewButton("Audio Settings", a.showSettingsDialog)
+	a.mediaControls = container.NewVBox(
+		container.NewHBox(a.joinChannelBtn, muteFixed, deafenFixed, audioSettings),
+		container.NewBorder(nil, nil, nil, a.vadIndicator, a.voiceStatus),
+		a.audioReason,
+	)
 	a.mediaControls.Hide()
 	a.shareBtn.Hide()
 
@@ -270,15 +287,11 @@ func (a *App) buildUI() {
 	toolbar := container.NewHBox(
 		a.disconnectBtn,
 		a.shareBtn,
-		a.mediaControls,
 		layout.NewSpacer(),
 		a.serverBtn,
 		settingsBtn,
 		helpBtn,
 	)
-
-	a.vadIndicator = widget.NewLabel("Voice idle")
-	a.vadIndicator.Hide()
 
 	// --- Channel/User List (Sidebar) ---
 	a.channelList = widget.NewList(
@@ -300,16 +313,18 @@ func (a *App) buildUI() {
 	a.channelList.OnSelected = func(id widget.ListItemID) {
 		a.onChannelListSelect(id)
 	}
+	a.channelList.HideSeparators = true
 
 	sidebar := container.NewBorder(
 		widget.NewLabelWithStyle("Channels", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		container.NewVBox(a.joinChannelBtn, a.shareChannelBtn), nil, nil,
+		a.shareChannelBtn, nil, nil,
 		a.channelList,
 	)
 
 	// --- Status ---
 	a.statusLabel = widget.NewLabel("Disconnected")
 	a.statusLabel.TextStyle = fyne.TextStyle{Italic: true}
+	a.statusLabel.Wrapping = fyne.TextWrapBreak
 
 	versionLabel := widget.NewLabel(version.String())
 	versionLabel.TextStyle = fyne.TextStyle{Italic: true}
@@ -341,6 +356,8 @@ func (a *App) buildUI() {
 		}
 		a.chatEntry.SetText("")
 	}
+	a.chatSend = widget.NewButton("Send", func() { a.chatEntry.OnSubmitted(a.chatEntry.Text) })
+	a.chatSend.Disable()
 
 	a.chatHeader = widget.NewLabelWithStyle("Select a text channel", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.chatHeader.Wrapping = fyne.TextWrapBreak
@@ -372,7 +389,7 @@ func (a *App) buildUI() {
 	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
 	a.chatPane = container.NewBorder(a.chatMore, nil, nil, nil, a.chatScroll)
 	a.chatStack = container.NewStack(a.chatPane, a.screenBox)
-	chatPanel := container.NewBorder(chatHeaderBar, a.chatEntry, nil, nil, a.chatStack)
+	chatPanel := container.NewBorder(chatHeaderBar, container.NewBorder(nil, nil, nil, a.chatSend, a.chatEntry), nil, nil, a.chatStack)
 
 	// --- Main layout ---
 	a.mainArea = container.NewHSplit(sidebar, chatPanel)
@@ -383,10 +400,10 @@ func (a *App) buildUI() {
 		a.connectBtn,
 	))
 
-	statusBar := container.NewHBox(a.statusLabel, layout.NewSpacer(), a.vadIndicator, versionLabel)
+	statusBar := container.NewBorder(nil, nil, nil, versionLabel, a.statusLabel)
 
 	content := container.NewBorder(
-		toolbar,
+		container.NewVBox(toolbar, a.mediaControls),
 		statusBar,
 		nil, nil,
 		container.NewStack(a.mainArea, a.welcome),
@@ -407,6 +424,9 @@ func (a *App) bindEvents() {
 				a.mediaControls.Hide()
 				a.disconnectBtn.Hide()
 				a.vadIndicator.SetText("Voice idle")
+				a.audioFailed = false
+				a.audioReason.SetText("")
+				a.audioReason.Hide()
 				a.connectBtn.Enable()
 				a.disconnectBtn.Disable()
 				a.muteBtn.Disable()
@@ -439,6 +459,7 @@ func (a *App) bindEvents() {
 				a.disconnectBtn.Enable()
 				a.muteBtn.Enable()
 				a.deafenBtn.Enable()
+				a.vadIndicator.SetText("Audio starting...")
 				a.updateMuteButtons()
 				a.updateJoinChannelButton()
 				a.updateShareButton()
@@ -471,7 +492,12 @@ func (a *App) bindEvents() {
 
 	a.engine.OnVoiceActivity = func(active bool) {
 		fyne.Do(func() {
-			if active {
+			if a.audioFailed {
+				return
+			}
+			if a.engine.IsMuted() {
+				a.vadIndicator.SetText("Muted")
+			} else if active && a.engine.GetChannelID() != 0 {
 				a.vadIndicator.SetText("Speaking")
 			} else {
 				a.vadIndicator.SetText("Voice idle")
@@ -481,14 +507,19 @@ func (a *App) bindEvents() {
 
 	a.engine.OnAudioFailure = func(err error) {
 		fyne.Do(func() {
+			a.audioFailed = true
 			a.vadIndicator.SetText("Audio unavailable")
-			dialog.ShowError(fmt.Errorf("voice unavailable: %w", err), a.window)
+			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Check Audio Settings, then reconnect.", err))
+			a.audioReason.Show()
+			a.muteBtn.Disable()
+			a.deafenBtn.Disable()
 		})
 	}
 	a.engine.OnChannelJoined = func(channelID int64) {
 		fyne.Do(func() {
 			a.updateChatContext()
 			a.updateJoinChannelButton()
+			a.channelList.Refresh()
 		})
 	}
 
@@ -678,11 +709,25 @@ func (a *App) updateShareButton() {
 }
 
 func (a *App) updateJoinChannelButton() {
+	channelID := a.engine.GetChannelID()
+	voice := "Voice channel: none"
+	if channelID != 0 {
+		voice = fmt.Sprintf("Voice channel: #%d", channelID)
+		for _, channel := range a.channels {
+			if channel.ID == channelID {
+				voice = "Voice channel: " + channel.Name
+				break
+			}
+		}
+	}
+	a.voiceStatus.SetText(voice)
+	a.joinChannelBtn.SetText("Join Voice")
 	if a.engine.GetState() != client.StateConnected || a.selectedChannelID == 0 {
 		a.joinChannelBtn.Disable()
 		return
 	}
-	if a.selectedChannelID == a.engine.GetChannelID() {
+	if a.selectedChannelID == channelID {
+		a.joinChannelBtn.SetText("In Voice Channel")
 		a.joinChannelBtn.Disable()
 		return
 	}
@@ -693,6 +738,7 @@ func (a *App) updateChatContext() {
 	if a.chatChannelID == 0 {
 		a.chatHeader.SetText("Select a text channel")
 		a.chatEntry.Disable()
+		a.chatSend.Disable()
 		return
 	}
 	name := fmt.Sprintf("channel #%d", a.chatChannelID)
@@ -705,6 +751,7 @@ func (a *App) updateChatContext() {
 	a.chatHeader.SetText(fmt.Sprintf("Chat: %s", name))
 	a.chatEntry.SetPlaceHolder("Type a message... (Enter to send)")
 	a.chatEntry.Enable()
+	a.chatSend.Enable()
 }
 
 func (a *App) syncSelectedChannel() {
@@ -792,6 +839,7 @@ func (a *App) showChatPanel() {
 	a.screenBox.Hide()
 	a.chatPane.Show()
 	a.chatEntry.Show()
+	a.chatSend.Show()
 	a.updateWatchButton()
 }
 
@@ -799,6 +847,7 @@ func (a *App) showScreenPanel() {
 	a.chatPane.Hide()
 	a.screenBox.Show()
 	a.chatEntry.Hide()
+	a.chatSend.Hide()
 	a.updateWatchButton()
 }
 
@@ -1429,6 +1478,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 			icon.SetResource(theme.FolderIcon())
 		}
 		userCount := len(item.channel.Users)
+		label.Importance = widget.MediumImportance
 		name := item.channel.Name
 		if item.channel.IsTemp {
 			name = "~ " + name
@@ -1456,6 +1506,8 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		}
 	} else {
 		icon.SetResource(theme.AccountIcon())
+		indent.SetMinSize(fyne.NewSize(float32(item.depth+1)*20, 1))
+		label.Importance = widget.LowImportance
 		status := ""
 		if item.user.Muted {
 			status += " [M]"
@@ -1635,9 +1687,15 @@ func (a *App) showUserContextMenu(user pb.UserInfo) {
 
 func (a *App) updateMuteButtons() {
 	if a.engine.IsMuted() {
+		if !a.audioFailed {
+			a.vadIndicator.SetText("Muted")
+		}
 		a.muteBtn.SetText(" Unmute ")
 		a.muteBtn.Importance = widget.DangerImportance
 	} else {
+		if !a.audioFailed && a.vadIndicator.Text == "Muted" {
+			a.vadIndicator.SetText("Voice idle")
+		}
 		a.muteBtn.SetText("  Mute  ")
 		a.muteBtn.Importance = widget.MediumImportance
 	}
@@ -1733,8 +1791,9 @@ func (a *App) showHelpDialog() {
 		"  Info icon        — This help dialog\n\n" +
 		"CHAT\n" +
 		"  Messages are per-channel.\n" +
-		"  Select a channel, then use Join Channel to join voice and chat.\n" +
-		"  Press Enter to send a message."
+		"  Select a channel for text chat. Join Voice moves voice membership.\n" +
+		"  Voice channel shows membership, not audio availability.\n" +
+		"  Press Enter or Send to send a message."
 	if runtime.GOOS == "windows" {
 		helpText += "\n\nHOTKEYS (global, work in background)\n" +
 			fmt.Sprintf("  %-16s - Toggle Mute\n", a.settings.MuteKey) +
