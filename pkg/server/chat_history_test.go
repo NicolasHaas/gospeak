@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -107,7 +108,7 @@ func TestChatHistoryHidesExpiredRowsBeforeSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-60 * 24 * time.Hour).UTC().Format("2006-01-02 15:04:05.000000000")
-	if _, err := st.(*datastore.ProviderFactory).DB.Exec("UPDATE messages SET created_at = ? WHERE id = ?", old, msg.ID); err != nil {
+	if _, err := st.(*datastore.ProviderFactory).DB.ExecContext(context.Background(), "UPDATE messages SET created_at = ? WHERE id = ?", old, msg.ID); err != nil {
 		t.Fatal(err)
 	}
 	conn := &bufferConn{}
@@ -200,7 +201,7 @@ func TestChatHistoryCapsOversizedLegacyRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	big := strings.Repeat("<", 100000)
-	if _, err := st.(*datastore.ProviderFactory).DB.Exec("UPDATE messages SET body = ?, sender_name = ? WHERE id = ?", big, big, msg.ID); err != nil {
+	if _, err := st.(*datastore.ProviderFactory).DB.ExecContext(context.Background(), "UPDATE messages SET body = ?, sender_name = ? WHERE id = ?", big, big, msg.ID); err != nil {
 		t.Fatal(err)
 	}
 	conn := &bufferConn{}
@@ -214,7 +215,7 @@ func TestChatHistoryCapsOversizedLegacyRows(t *testing.T) {
 		t.Fatalf("legacy wire lengths = %d / %d", len(got.Text), len(got.SenderName))
 	}
 	var stored string
-	if err := st.(*datastore.ProviderFactory).DB.QueryRow("SELECT body FROM messages WHERE id = ?", msg.ID).Scan(&stored); err != nil || stored != big {
+	if err := st.(*datastore.ProviderFactory).DB.QueryRowContext(context.Background(), "SELECT body FROM messages WHERE id = ?", msg.ID).Scan(&stored); err != nil || stored != big {
 		t.Fatalf("stored legacy row changed: len=%d, err=%v", len(stored), err)
 	}
 }

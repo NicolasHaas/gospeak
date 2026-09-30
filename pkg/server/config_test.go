@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,7 +137,7 @@ func TestImportChannelsFromYAMLRejectsDuplicateSiblingDeclarations(t *testing.T)
 
 func TestImportChannelsFromYAMLRollsBackOnStoreFailure(t *testing.T) {
 	st := newChannelImportStore(t)
-	if _, err := st.DB.Exec(`CREATE TRIGGER reject_broken_channel
+	if _, err := st.DB.ExecContext(context.Background(), `CREATE TRIGGER reject_broken_channel
 		BEFORE INSERT ON channels WHEN NEW.name = 'broken'
 		BEGIN SELECT RAISE(FAIL, 'injected channel failure'); END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)
@@ -248,7 +249,7 @@ func TestHandleImportChannelsReturnsGenericFailure(t *testing.T) {
 
 func TestRunRollsBackLobbyWhenChannelInitializationFails(t *testing.T) {
 	st := newChannelImportStore(t)
-	if _, err := st.DB.Exec(`CREATE TRIGGER reject_broken_startup_channel
+	if _, err := st.DB.ExecContext(context.Background(), `CREATE TRIGGER reject_broken_startup_channel
 		BEFORE INSERT ON channels WHEN NEW.name = 'broken'
 		BEGIN SELECT RAISE(FAIL, 'injected startup failure'); END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)

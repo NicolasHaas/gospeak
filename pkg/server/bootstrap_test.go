@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -346,7 +347,7 @@ func TestBootstrapProvisioningRollsBackPersonalTokenStoreFailure(t *testing.T) {
 	}
 	rawToken := readBootstrapToken(t, credentialPath)
 	provider := st.(*datastore.ProviderFactory)
-	if _, err := provider.DB.Exec(`CREATE TRIGGER fail_bootstrap_personal_token
+	if _, err := provider.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_bootstrap_personal_token
 		BEFORE UPDATE OF personal_token_hash ON users
 		BEGIN SELECT RAISE(ABORT, 'forced personal token failure'); END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)
@@ -361,7 +362,7 @@ func TestBootstrapProvisioningRollsBackPersonalTokenStoreFailure(t *testing.T) {
 	if len(users) != 0 {
 		t.Fatalf("users after rolled-back provisioning = %d, want 0", len(users))
 	}
-	if _, err := provider.DB.Exec(`DROP TRIGGER fail_bootstrap_personal_token`); err != nil {
+	if _, err := provider.DB.ExecContext(context.Background(), `DROP TRIGGER fail_bootstrap_personal_token`); err != nil {
 		t.Fatalf("drop failure trigger: %v", err)
 	}
 	if _, err := authenticateBootstrap(t, srv, st, "bootstrap-admin", rawToken); err != nil {
