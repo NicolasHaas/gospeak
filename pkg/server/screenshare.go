@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
+
+var errScreenShareBusy = errors.New("channel already has an active screen share")
 
 type ScreenShareManager struct {
 	mediaCipher             string
@@ -57,7 +60,7 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	defer m.mu.Unlock()
 
 	if active, ok := m.activeByChannel[channelID]; ok && active.Active && active.SessionID != sessionID {
-		return nil, fmt.Errorf("channel already has an active screen share")
+		return nil, errScreenShareBusy
 	}
 	key, err := gospeakCrypto.GenerateMediaKey(m.mediaCipher)
 	if err != nil {
@@ -207,7 +210,7 @@ func (m *ScreenShareManager) Subscribe(channelID int64, viewerSessionID uint32) 
 	m.viewerTarget[viewerSessionID] = active.SessionID
 	viewerCount := len(m.subscribersByShare[active.SessionID])
 	if viewerCount > math.MaxInt32 {
-		return nil, fmt.Errorf("too many screen share viewers: %d", viewerCount)
+		return nil, fmt.Errorf("too many screen share viewers")
 	}
 	active.Viewers = int32(viewerCount)
 	clone := cloneScreenShareEvent(active)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"time"
@@ -32,7 +33,12 @@ func (s *Server) handleScreenShareStart(handler *ControlHandler, sessionID uint3
 
 	event, err := s.screenShare.Start(session.ChannelID, sessionID, session.UserID, session.Username, req.Width, req.Height)
 	if err != nil {
-		sendError(conn, 40, err.Error())
+		if errors.Is(err, errScreenShareBusy) {
+			sendError(conn, 40, errScreenShareBusy.Error())
+			return
+		}
+		slog.Error("start screen share failed", "session", sessionID)
+		sendError(conn, 40, "screen share failed")
 		return
 	}
 	viewerSessionIDs := s.channels.Members(session.ChannelID)

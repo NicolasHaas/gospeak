@@ -2062,12 +2062,13 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 	case "users":
 		data, err = ExportUsersYAML(st)
 	default:
-		sendError(conn, 31, "unknown export type: "+req.Type)
+		sendError(conn, 31, "unknown export type")
 		return
 	}
 
 	if err != nil {
-		sendError(conn, 31, "export failed: "+err.Error())
+		slog.Error("export failed", "err", err)
+		sendError(conn, 31, "export failed")
 		return
 	}
 

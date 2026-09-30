@@ -63,6 +63,9 @@ func (s *Server) startMetricsHTTP() error {
 	s.metricsMu.Unlock()
 
 	if !s.startWorker(func() {
+		if addr, ok := ln.Addr().(*net.TCPAddr); ok && !addr.IP.IsLoopback() {
+			slog.Warn("unauthenticated metrics exposed on non-loopback address", "addr", addr.String())
+		}
 		slog.Info("metrics HTTP listening", "addr", ln.Addr().String())
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("metrics HTTP error", "err", err)
