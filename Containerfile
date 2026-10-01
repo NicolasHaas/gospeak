@@ -62,34 +62,36 @@ RUN mkdir -p /win-deps/include /win-deps/lib && \
     git -C /tmp/portaudio-src remote add origin https://github.com/PortAudio/portaudio.git && \
     git -C /tmp/portaudio-src fetch --depth 1 origin "$PORTAUDIO_COMMIT" && \
     git -C /tmp/portaudio-src checkout --detach FETCH_HEAD && \
-    cd /tmp/portaudio-src && mkdir build && cd build && \
-    cmake .. -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
+    cmake -S /tmp/portaudio-src -B /tmp/portaudio-build \
+        -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
         -DCMAKE_INSTALL_PREFIX=/win-deps \
         -DPA_USE_WASAPI=ON \
         -DPA_USE_WMME=ON \
         -DPA_USE_DS=OFF \
         -DPA_USE_ASIO=OFF \
         -DPA_USE_JACK=OFF \
-        -DPA_BUILD_SHARED_LIBS=OFF \
+        -DPA_BUILD_SHARED=OFF \
         -DBUILD_SHARED_LIBS=OFF && \
-    make -j$(nproc) && make install && \
+    cmake --build /tmp/portaudio-build -j$(nproc) && \
+    cmake --install /tmp/portaudio-build && \
     # Opus
     git init /tmp/opus-src && \
     git -C /tmp/opus-src remote add origin https://github.com/xiph/opus.git && \
     git -C /tmp/opus-src fetch --depth 1 origin "$OPUS_COMMIT" && \
     git -C /tmp/opus-src checkout --detach FETCH_HEAD && \
-    cd /tmp/opus-src && mkdir build && cd build && \
-    cmake .. -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
+    cmake -S /tmp/opus-src -B /tmp/opus-build \
+        -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw-toolchain.cmake \
         -DCMAKE_INSTALL_PREFIX=/win-deps \
         -DOPUS_STACK_PROTECTOR=OFF \
         -DOPUS_FORTIFY_SOURCE=OFF \
         -DBUILD_SHARED_LIBS=OFF && \
-    make -j$(nproc) && make install && \
+    cmake --build /tmp/opus-build -j$(nproc) && \
+    cmake --install /tmp/opus-build && \
     # pkg-config files
     mkdir -p /win-deps/lib/pkgconfig && \
     printf 'prefix=/win-deps\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: portaudio-2.0\nVersion: 19.7\nDescription: PortAudio\nLibs: -L${libdir} -lportaudio -lwinmm -lole32 -lsetupapi\nCflags: -I${includedir}\n' > /win-deps/lib/pkgconfig/portaudio-2.0.pc && \
     printf 'prefix=/win-deps\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: opus\nVersion: 1.5.2\nDescription: Opus\nLibs: -L${libdir} -lopus\nCflags: -I${includedir}/opus\n' > /win-deps/lib/pkgconfig/opus.pc && \
-    rm -rf /tmp/portaudio-src /tmp/opus-src
+    rm -rf /tmp/portaudio-src /tmp/portaudio-build /tmp/opus-src /tmp/opus-build
 
 # ============================================================
 # Stage 3: Go build — only this reruns on source changes

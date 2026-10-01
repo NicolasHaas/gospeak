@@ -106,6 +106,31 @@ func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 	}
 }
 
+func TestWindowsDependenciesBuildOutsideSourceTree(t *testing.T) {
+	containerfile := readProjectFile(t, "Containerfile")
+	// PortAudio's pinned source already tracks build/msvc and build/scons.
+	for _, library := range []string{"portaudio", "opus"} {
+		if !strings.Contains(containerfile, "cmake -S /tmp/"+library+"-src -B /tmp/"+library+"-build") {
+			t.Errorf("%s must configure in a separate build directory", library)
+		}
+		for _, command := range []string{"cmake --build", "cmake --install"} {
+			if !strings.Contains(containerfile, command+" /tmp/"+library+"-build") {
+				t.Errorf("%s must use its separate %s directory", library, command)
+			}
+		}
+	}
+	if strings.Contains(containerfile, "mkdir build") {
+		t.Error("dependency builds must not collide with upstream build directories")
+	}
+}
+
+func TestWindowsPortAudioDisablesSharedLibrary(t *testing.T) {
+	containerfile := readProjectFile(t, "Containerfile")
+	if !strings.Contains(containerfile, "-DPA_BUILD_SHARED=OFF") || strings.Contains(containerfile, "-DPA_BUILD_SHARED_LIBS=") {
+		t.Error("PortAudio must use its actual shared-library option to produce a standalone Windows client")
+	}
+}
+
 func assertImmutableActionRefs(t *testing.T, workflow string) {
 	t.Helper()
 	actionRef := regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*[^#\s]+@([^\s#]+)`)
