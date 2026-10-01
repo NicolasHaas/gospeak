@@ -25,6 +25,8 @@ type VAD struct {
 // holdFrames: number of frames to keep active after voice stops (e.g., 15 = 300ms at 20ms/frame)
 // preBufferFrames: number of frames to pre-buffer (e.g., 3 = 60ms)
 func NewVAD(threshold float64, holdFrames, preBufferFrames int) *VAD {
+	holdFrames = max(0, holdFrames)
+	preBufferFrames = max(0, preBufferFrames)
 	return &VAD{
 		threshold:  threshold,
 		holdTime:   holdFrames,

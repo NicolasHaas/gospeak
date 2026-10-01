@@ -23,14 +23,16 @@ func (r Role) String() string {
 }
 
 // ParseRole converts a string to a Role.
-func ParseRole(s string) Role {
+func ParseRole(s string) (Role, error) {
 	switch s {
 	case "admin":
-		return RoleAdmin
+		return RoleAdmin, nil
 	case "moderator":
-		return RoleModerator
+		return RoleModerator, nil
+	case "user":
+		return RoleUser, nil
 	default:
-		return RoleUser
+		return RoleUser, ErrInvalidRole
 	}
 }
 

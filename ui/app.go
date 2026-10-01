@@ -1446,10 +1446,15 @@ func (a *App) flattenChannels() []flatItem {
 	for _, ch := range a.channels {
 		childMap[ch.ParentID] = append(childMap[ch.ParentID], ch)
 	}
-	// Recursively flatten starting from root (ParentID=0)
+	// Recursively flatten starting from root (ParentID=0).
+	visited := map[int64]bool{0: true}
 	var flatten func(parentID int64, depth int)
 	flatten = func(parentID int64, depth int) {
 		for _, ch := range childMap[parentID] {
+			if visited[ch.ID] {
+				continue
+			}
+			visited[ch.ID] = true
 			items = append(items, flatItem{isChannel: true, channel: ch, channelID: ch.ID, depth: depth})
 			for _, u := range ch.Users {
 				items = append(items, flatItem{isChannel: false, user: u, channelID: ch.ID, depth: depth})

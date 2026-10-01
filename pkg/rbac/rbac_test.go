@@ -14,7 +14,6 @@ func TestHasPermission_AdminHasAllPermissions(t *testing.T) {
 		PermKickUser,
 		PermBanUser,
 		PermManageTokens,
-		PermEditChannel,
 		PermManageRoles,
 	}
 
@@ -38,7 +37,6 @@ func TestHasPermission_ModeratorOnlyKickUser(t *testing.T) {
 		{"kick_user", PermKickUser, true},
 		{"ban_user", PermBanUser, false},
 		{"manage_tokens", PermManageTokens, false},
-		{"edit_channel", PermEditChannel, false},
 		{"manage_roles", PermManageRoles, false},
 	}
 
@@ -58,7 +56,6 @@ func TestHasPermission_UserHasNoPermissions(t *testing.T) {
 		PermKickUser,
 		PermBanUser,
 		PermManageTokens,
-		PermEditChannel,
 		PermManageRoles,
 	}
 
@@ -120,7 +117,7 @@ func TestRequirePermission_ReturnsDeniedMessageWhenForbidden(t *testing.T) {
 		{"user kick_user", model.RoleUser, PermKickUser, "kick_user"},
 		{"moderator ban_user", model.RoleModerator, PermBanUser, "ban_user"},
 		{"moderator manage_roles", model.RoleModerator, PermManageRoles, "manage_roles"},
-		{"unknown role", model.Role(99), PermEditChannel, "edit_channel"},
+		{"unknown role", model.Role(99), PermManageRoles, "manage_roles"},
 	}
 
 	for _, tt := range tests {

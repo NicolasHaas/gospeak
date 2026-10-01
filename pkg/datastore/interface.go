@@ -120,6 +120,9 @@ type BanWriteProvider interface {
 	CreateUserBan(userID, bannedBy int64, expiresAt time.Time) error
 	CreateIPBan(ip string, bannedBy int64, expiresAt time.Time) error
 	DeleteBan(id int64) (bool, error)
+	// PruneExpiredBans deletes at most limit rows whose expiry has already
+	// passed. Permanent bans (expires_at IS NULL / zero value) are never touched.
+	PruneExpiredBans(limit int) (int64, error)
 }
 
 type MessageReadProvider interface {
@@ -132,6 +135,5 @@ type MessageWriteProvider interface {
 	// 1000 excess rows; imported backlogs may temporarily exceed maxPerChannel until later writes.
 	CreateMessageWithRetention(message *model.Message, maxPerChannel int, maxAge time.Duration) error
 	PruneExpiredMessages(maxAge time.Duration, limit int) (int64, error)
-	DeleteMessage(messageID int64) error
 	DeleteMessageInChannel(messageID, channelID int64) (bool, error)
 }

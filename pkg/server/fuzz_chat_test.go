@@ -20,8 +20,8 @@ func FuzzChatTextSanitization(f *testing.F) {
 			t.Fatal("chat text sanitization produced invalid or unstable text")
 		}
 		for _, r := range text {
-			if unicode.IsControl(r) {
-				t.Fatalf("chat text retained control character %U", r)
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				t.Fatalf("chat text retained control or format character %U", r)
 			}
 		}
 	})

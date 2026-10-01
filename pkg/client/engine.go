@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/jpeg"
 	"log/slog"
 	"math"
 	"net"
@@ -467,6 +466,11 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 		e.voiceDebugEnabled = true
 		e.startVoiceDebugLogging(g)
 	}
+	g.run(func(context.Context) {
+		ticker := time.NewTicker(controlHeartbeatInterval)
+		defer ticker.Stop()
+		g.controlHeartbeat(ctrl, ticker.C)
+	})
 	g.run(func(context.Context) { e.keepaliveLoop(g) })
 	e.startAudio(g)
 
@@ -1203,7 +1207,7 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		// Ping/pong handled silently
 
 	case msg.CreateTokenResp != nil:
-		slog.Debug("token created", "token", msg.CreateTokenResp.Token)
+		slog.Debug("token created")
 		if callback := e.OnTokenCreated; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.CreateTokenResp.Token) })
 		}
@@ -2103,7 +2107,7 @@ func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.Scree
 		slog.Debug("screen frame unmarshal error", "err", err)
 		return
 	}
-	img, _, err := image.Decode(bytes.NewReader(frame.Data))
+	img, err := decodeScreenImage(frame)
 	if err != nil {
 		slog.Debug("screen frame decode error", "err", err)
 		return
@@ -2532,14 +2536,6 @@ func (e *Engine) enqueueOptionalGenerationCallbackLocked(g *connectionGeneration
 		return
 	}
 	e.enqueueGenerationCallbackLocked(g, fn)
-}
-
-func (e *Engine) notifyGenerationState(g *connectionGeneration, state State) {
-	if callback := e.OnStateChange; callback != nil {
-		e.callbackMu.Lock()
-		e.enqueueReliableGenerationCallbackLocked(g, func() { callback(state) })
-		e.callbackMu.Unlock()
-	}
 }
 
 func (e *Engine) notifyStateChange(state State) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1149,8 +1150,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		default:
 		}
 
-		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(conn)
+		// A fixed deadline covers the entire frame; partial reads do not renew it.
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+			return
+		}
+		reader := io.LimitedReader{R: conn, N: protocol.MaxControlMessage + 4}
+		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(&reader)
 		if err != nil {
+			// Only silence is normal idle expiry; an unfinished frame is invalid.
+			if errors.Is(err, os.ErrDeadlineExceeded) && reader.N == protocol.MaxControlMessage+4 {
+				return
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || isClosedErr(err) {
 				return
 			}
@@ -1527,6 +1537,15 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 		return
 	}
 
+	if req.ExpiresInSeconds < 0 || req.ExpiresInSeconds > maxBanDurationSeconds {
+		sendError(conn, 31, "invalid token expiry")
+		return
+	}
+	role, err := model.ParseRole(req.Role)
+	if err != nil {
+		sendError(conn, 31, "unknown role")
+		return
+	}
 	rawToken, err := crypto.GenerateToken()
 	if err != nil {
 		sendError(conn, 31, "failed to generate token")
@@ -1539,7 +1558,6 @@ func (s *Server) handleCreateToken(sessionID uint32, req *pb.CreateTokenRequest,
 	}
 
 	hash := crypto.HashToken(rawToken)
-	role := model.ParseRole(req.Role)
 
 	if err := st.NonTx().CreateToken(hash, role, req.ChannelScope, session.UserID, int(req.MaxUses), expiresAt); err != nil {
 		slog.Error("create token", "err", err)
@@ -1862,7 +1880,11 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 		return
 	}
 
-	newRole := model.ParseRole(req.NewRole)
+	newRole, err := model.ParseRole(req.NewRole)
+	if err != nil {
+		sendError(conn, 31, "unknown role")
+		return
+	}
 
 	// Serialize remote target policy checks with kicks and other role changes.
 	s.remoteModerationMu.Lock()
@@ -2002,15 +2024,16 @@ func isValidUsername(name string) bool {
 	return model.ValidateUsername(name) == nil
 }
 
-// sanitizeText strips control characters (except newline) from user-supplied text
-// to prevent UI spoofing, terminal escape injection, and null-byte attacks.
+// sanitizeText strips control and Unicode format characters (except newline)
+// from user-supplied text to prevent UI spoofing, terminal escape injection,
+// null-byte attacks, and bidi/hidden-text tricks.
 func sanitizeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' {
 			return ' ' // collapse newlines to spaces
 		}
-		if unicode.IsControl(r) {
-			return -1 // strip all other control chars (null, bell, ANSI escapes, etc.)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1 // strip other control chars and format chars (RLO, ZWSP, ...)
 		}
 		return r
 	}, s)
@@ -2049,12 +2072,13 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 	case "users":
 		data, err = ExportUsersYAML(st)
 	default:
-		sendError(conn, 31, "unknown export type: "+req.Type)
+		sendError(conn, 31, "unknown export type")
 		return
 	}
 
 	if err != nil {
-		sendError(conn, 31, "export failed: "+err.Error())
+		slog.Error("export failed", "err", err)
+		sendError(conn, 31, "export failed")
 		return
 	}
 

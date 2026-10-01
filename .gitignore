@@ -18,6 +18,7 @@
 # TLS certs (auto-generated)
 server.crt
 server.key
+bootstrap-admin.token
 
 # IDE
 .vscode/

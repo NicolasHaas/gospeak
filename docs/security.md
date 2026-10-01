@@ -53,6 +53,7 @@ graph TB
 ## Control Plane Security (TLS 1.3)
 
 - The control plane uses **TLS 1.3** (the latest version) for all TCP connections
+- Updated clients send a control Ping every 60 seconds. The server closes authenticated control connections after five minutes without a complete valid message; partial frames do not extend that deadline. Older clients that remain silent on the control plane must reconnect, even if they are still sending voice packets.
 - On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
 - The automatic certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
 - The first new TLS connection within 30 days of expiry renews it, even if the server has stayed up continuously. Renewal keeps the existing private key, so saved TOFU fingerprints remain valid. If renewal fails while the cached certificate is still valid, GoSpeak serves that certificate and retries on a later connection; it fails closed after expiry
@@ -149,6 +150,7 @@ For each voice packet:
 - If additional users join later, the sharer can share the active key with the current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
 - The server transiently authenticates and opens each packet, then forwards the original authenticated ciphertext to subscribed viewers without parsing, decoding, logging, or retaining frame plaintext.
+- Viewers treat authenticated frames as untrusted input. Before decoding pixels, they require JPEG format, positive dimensions no larger than 8192 per axis and 16,777,216 pixels in total, and an exact match between the frame metadata and JPEG header. Invalid frames are dropped. These checks require an updated client; the relay does not protect older viewers from malicious image content.
 
 Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that continues across key changes within one authenticated control connection. A new key creates fresh replay state on the server and viewers, but does not reset the sender's counter. The counter resets only for a new control-connection generation, and sharing stops before it can wrap. The ordered relay authenticates a frame before committing its strictly increasing sequence, so duplicate and out-of-order frames are rejected without letting forged high sequences poison the state.
 
@@ -204,7 +206,6 @@ graph TB
         P3[KickUser]
         P4[BanUser]
         P5[ManageTokens]
-        P6[EditChannel]
         P7[ManageRoles]
     end
 
@@ -213,7 +214,6 @@ graph TB
     ADMIN --> P3
     ADMIN --> P4
     ADMIN --> P5
-    ADMIN --> P6
     ADMIN --> P7
     MOD --> P3
 ```

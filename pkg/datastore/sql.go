@@ -712,6 +712,11 @@ func (s *baseProvider) GetUserByID(id int64) (*model.User, error) {
 }
 
 func (s *baseProvider) GetUserByPersonalTokenHash(hash string) (*model.User, error) {
+	if hash == "" {
+		// Token-less users store an empty hash; an empty lookup must never
+		// resolve to one of them as an authenticated identity.
+		return nil, nil
+	}
 	u := &model.User{}
 	var roleInt int
 	var createdAt string
@@ -1342,6 +1347,23 @@ func (s *baseProvider) DeleteBan(id int64) (bool, error) {
 	return rows == 1, nil
 }
 
+// PruneExpiredBans deletes at most limit rows whose expires_at has already
+// passed; permanent bans (expires_at IS NULL) are never deleted. The IN-subquery
+// form is the portable bounded-DELETE pattern (SQLite needs
+// SQLITE_ENABLE_UPDATE_DELETE_LIMIT for a bare DELETE ... LIMIT).
+func (s *baseProvider) PruneExpiredBans(limit int) (int64, error) {
+	if limit < 1 || limit > MaxBanPageSize {
+		return 0, fmt.Errorf("datastore: invalid ban expiry sweep")
+	}
+	res, err := s.ExecContext(context.Background(), `DELETE FROM bans WHERE id IN (
+		SELECT id FROM bans WHERE expires_at IS NOT NULL AND expires_at <= datetime('now') ORDER BY id LIMIT ?)`,
+		limit)
+	if err != nil {
+		return 0, fmt.Errorf("datastore: prune expired bans: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // ---- Messages ----
 
 func (s *baseProvider) CreateMessage(message *model.Message) error {
@@ -1373,7 +1395,11 @@ func (s *nonTxProvider) CreateMessageWithRetention(message *model.Message, maxPe
 	if message == nil {
 		return fmt.Errorf("datastore: invalid message identity")
 	}
-	tx, err := s.DB.(*sql.DB).BeginTx(context.Background(), nil)
+	db, ok := s.DB.(*sql.DB)
+	if !ok || db == nil {
+		return fmt.Errorf("datastore: message transaction requires a database")
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("datastore: begin message transaction: %w", err)
 	}
@@ -1499,14 +1525,6 @@ func (s *baseProvider) ListMessages(filters model.MessageFilters) ([]model.Messa
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
-}
-
-func (s *baseProvider) DeleteMessage(messageID int64) error {
-	_, err := s.ExecContext(context.Background(), "DELETE FROM messages WHERE id = ?", messageID)
-	if err != nil {
-		return fmt.Errorf("datastore: delete message: %w", err)
-	}
-	return nil
 }
 
 // DeleteMessageInChannel checks channel identity in the write, not in a separate read.

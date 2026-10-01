@@ -177,16 +177,19 @@ func (handler *ControlHandler) broadcastChat(channelID int64, event *pb.ControlM
 }
 
 // ponytail: one bounded batch per minute; old imported backlogs drain over multiple ticks.
-func (s *Server) runChatJanitor(st datastore.DataProviderFactory) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
+func (s *Server) runRetentionJanitor(st datastore.DataProviderFactory, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			if _, err := st.NonTx().PruneExpiredMessages(s.cfg.ChatMaxAge, 1000); err != nil {
-				slog.Error("prune expired chat", "err", err)
+		case <-ticks:
+			if s.cfg.ChatHistoryLimit > 0 && s.cfg.ChatMaxAge > 0 {
+				if _, err := st.NonTx().PruneExpiredMessages(s.cfg.ChatMaxAge, 1000); err != nil {
+					slog.Error("prune expired chat", "err", err)
+				}
+			}
+			if _, err := st.NonTx().PruneExpiredBans(datastore.MaxBanPageSize); err != nil {
+				slog.Error("prune expired bans", "err", err)
 			}
 		}
 	}

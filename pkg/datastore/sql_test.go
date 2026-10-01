@@ -1341,7 +1341,28 @@ func TestListMessages(t *testing.T) {
 	})
 }
 
-func TestDeleteMessage(t *testing.T) {
+func TestGetUserByPersonalTokenHashRejectsEmptyHash(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewTestSqlConn(t)
+	if err != nil {
+		t.Fatalf("failed to open test connection: %v", err)
+	}
+
+	if _, err := store.NonTx().CreateUser("tokenless", model.RoleUser); err != nil {
+		t.Fatalf("CreateUser: failed to seed user: %v", err)
+	}
+
+	got, err := store.NonTx().GetUserByPersonalTokenHash("")
+	if err != nil {
+		t.Fatalf("GetUserByPersonalTokenHash(empty): unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("GetUserByPersonalTokenHash(empty) resolved to user %q", got.Username)
+	}
+}
+
+func TestDeleteMessageInChannel(t *testing.T) {
 	t.Parallel()
 
 	store, err := NewTestSqlConn(t)
@@ -1357,8 +1378,22 @@ func TestDeleteMessage(t *testing.T) {
 		t.Fatalf("CreateMessage: unexpected error: %v", err)
 	}
 
-	if err := st.DeleteMessage(msg.ID); err != nil {
-		t.Fatalf("DeleteMessage: unexpected error: %v", err)
+	// A cross-channel delete must not remove the message: identity is bound
+	// to the channel in the write itself.
+	deleted, err := st.DeleteMessageInChannel(msg.ID, msg.ChannelID+1)
+	if err != nil {
+		t.Fatalf("DeleteMessageInChannel(wrong channel): unexpected error: %v", err)
+	}
+	if deleted {
+		t.Fatal("DeleteMessageInChannel(wrong channel) deleted the message")
+	}
+
+	deleted, err = st.DeleteMessageInChannel(msg.ID, msg.ChannelID)
+	if err != nil {
+		t.Fatalf("DeleteMessageInChannel: unexpected error: %v", err)
+	}
+	if !deleted {
+		t.Fatal("DeleteMessageInChannel(correct channel) did not delete the message")
 	}
 
 	got, err := st.ListMessages(model.MessageFilters{})
@@ -1366,6 +1401,6 @@ func TestDeleteMessage(t *testing.T) {
 		t.Fatalf("ListMessages: unexpected error: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("DeleteMessage: expected 0 messages after delete, got %d", len(got))
+		t.Fatalf("expected 0 messages after delete, got %d", len(got))
 	}
 }

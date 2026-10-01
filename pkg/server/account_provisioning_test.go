@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -92,7 +93,7 @@ func TestInviteProvisioningRollsBackPersonalTokenFailure(t *testing.T) {
 	if !ok {
 		t.Fatalf("test store type = %T, want *datastore.ProviderFactory", st)
 	}
-	if _, err := factory.DB.Exec(`
+	if _, err := factory.DB.ExecContext(context.Background(), `
 		CREATE TRIGGER fail_personal_token_update
 		BEFORE UPDATE OF personal_token_hash ON users
 		BEGIN
@@ -113,7 +114,7 @@ func TestInviteProvisioningRollsBackPersonalTokenFailure(t *testing.T) {
 	if user, err := st.NonTx().GetUserByUsername("rolled-back"); err != nil || user != nil {
 		t.Fatalf("failed provisioning persisted user: user=%#v err=%v", user, err)
 	}
-	if _, err := factory.DB.Exec("DROP TRIGGER fail_personal_token_update"); err != nil {
+	if _, err := factory.DB.ExecContext(context.Background(), "DROP TRIGGER fail_personal_token_update"); err != nil {
 		t.Fatalf("drop failure trigger: %v", err)
 	}
 	if retry := authenticateControl(t, srv, st, "retry", invite); retry.AuthResponse == nil {

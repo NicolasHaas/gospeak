@@ -91,6 +91,30 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 		s.recordScreenAuthRejection(conn.RemoteAddr().String(), "invalid_message")
 		return
 	}
+	if s.store != nil {
+		if !s.sessions.ValidateScreenAuth(auth.SessionID, auth.Token) {
+			s.recordScreenAuthRejection(conn.RemoteAddr().String(), "authentication")
+			return
+		}
+		ip, _ := canonicalControlPeerIP(conn.RemoteAddr())
+		if ip != "" {
+			banned, err := s.store.NonTx().IsIPBanned(ip)
+			if err != nil {
+				slog.Warn("screen ingress ban check failed")
+				return
+			}
+			if banned {
+				session, ok := s.sessions.GetSnapshot(auth.SessionID)
+				if !ok {
+					return
+				}
+				protected, err := s.store.NonTx().IsBootstrapUser(session.UserID)
+				if err != nil || !protected {
+					return
+				}
+			}
+		}
+	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		slog.Error("clear screen auth deadline", "session", auth.SessionID)
 		return

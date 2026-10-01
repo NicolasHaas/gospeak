@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"time"
@@ -25,14 +26,19 @@ func (s *Server) handleScreenShareStart(handler *ControlHandler, sessionID uint3
 		sendError(conn, 40, "join a channel before sharing your screen")
 		return
 	}
-	if req.Width <= 0 || req.Height <= 0 {
+	if req.Width <= 0 || req.Height <= 0 || req.Width > 8192 || req.Height > 8192 {
 		sendError(conn, 40, "invalid screen dimensions")
 		return
 	}
 
 	event, err := s.screenShare.Start(session.ChannelID, sessionID, session.UserID, session.Username, req.Width, req.Height)
 	if err != nil {
-		sendError(conn, 40, err.Error())
+		if errors.Is(err, errScreenShareBusy) {
+			sendError(conn, 40, errScreenShareBusy.Error())
+			return
+		}
+		slog.Error("start screen share failed", "session", sessionID)
+		sendError(conn, 40, "screen share failed")
 		return
 	}
 	viewerSessionIDs := s.channels.Members(session.ChannelID)
