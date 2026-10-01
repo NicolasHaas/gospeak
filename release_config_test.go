@@ -124,6 +124,13 @@ func TestWindowsDependenciesBuildOutsideSourceTree(t *testing.T) {
 	}
 }
 
+func TestWindowsPortAudioDisablesSharedLibrary(t *testing.T) {
+	containerfile := readProjectFile(t, "Containerfile")
+	if !strings.Contains(containerfile, "-DPA_BUILD_SHARED=OFF") || strings.Contains(containerfile, "-DPA_BUILD_SHARED_LIBS=") {
+		t.Error("PortAudio must use its actual shared-library option to produce a standalone Windows client")
+	}
+}
+
 func assertImmutableActionRefs(t *testing.T, workflow string) {
 	t.Helper()
 	actionRef := regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*[^#\s]+@([^\s#]+)`)

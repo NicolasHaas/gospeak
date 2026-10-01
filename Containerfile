@@ -70,7 +70,7 @@ RUN mkdir -p /win-deps/include /win-deps/lib && \
         -DPA_USE_DS=OFF \
         -DPA_USE_ASIO=OFF \
         -DPA_USE_JACK=OFF \
-        -DPA_BUILD_SHARED_LIBS=OFF \
+        -DPA_BUILD_SHARED=OFF \
         -DBUILD_SHARED_LIBS=OFF && \
     cmake --build /tmp/portaudio-build -j$(nproc) && \
     cmake --install /tmp/portaudio-build && \
