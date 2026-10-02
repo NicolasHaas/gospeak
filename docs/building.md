@@ -10,7 +10,7 @@ reproducible.
 ## Prerequisites
 
 - **Podman** (or Docker) is used for container builds.
-- **Go 1.24.4 or newer** is only needed for local development without containers.
+- **Go 1.26.8 or newer** is only needed for local development without containers.
 
 ## Quick Build
 
@@ -63,7 +63,7 @@ tag; prereleases publish only their versioned tag.
 ```mermaid
 graph TB
     subgraph "Stage 1: builder-base"
-        S1[golang:1.24.4-bookworm]
+        S1[golang:1.26.8-bookworm]
         S1 --> DEPS[Install system deps:<br/>PortAudio, Opus, OpenGL,<br/>MinGW cross-compiler]
     end
 
@@ -186,6 +186,7 @@ go build -tags nolibopusfile ./cmd/client/
 
 ### macOS
 
+Go 1.26 builds require macOS 12 Monterey or newer.
 Install the Xcode Command Line Tools first so a C compiler is available, then:
 
 ```bash

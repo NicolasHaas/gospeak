@@ -53,7 +53,7 @@ func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 
 func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 	containerfile := readProjectFile(t, "Containerfile")
-	if !strings.Contains(containerfile, "FROM golang:1.24.4-bookworm@sha256:") {
+	if !strings.Contains(containerfile, "FROM golang:1.26.8-bookworm@sha256:") {
 		t.Error("container build does not use the release Go toolchain version")
 	}
 	digest := regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
