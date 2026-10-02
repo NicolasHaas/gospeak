@@ -14,7 +14,7 @@ Thank you for your interest in contributing to GoSpeak! This document provides g
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.26.8 or later
 - Podman or Docker (for container builds)
 - System dependencies for local builds (see below)
 
