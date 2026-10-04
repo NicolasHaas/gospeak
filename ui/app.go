@@ -313,7 +313,9 @@ func (a *App) buildUI() {
 			gearBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), nil)
 			gearBtn.Importance = widget.LowImportance
 			gearBtn.Hide()
-			return container.NewHBox(indent, icon, label, layout.NewSpacer(), gearBtn)
+			joinBtn := widget.NewButtonWithIcon("Join", theme.LoginIcon(), nil)
+			joinBtn.Importance = widget.LowImportance
+			return container.NewHBox(indent, icon, label, layout.NewSpacer(), gearBtn, joinBtn)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			a.updateChannelListItem(id, obj)
@@ -396,7 +398,9 @@ func (a *App) buildUI() {
 	})
 	a.backBtn.Hide()
 	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
-	a.chatPane = container.NewBorder(a.chatMore, nil, nil, nil, a.chatScroll)
+	chatBottom := widget.NewButtonWithIcon("Scroll to bottom", theme.MoveDownIcon(), a.chatScroll.ScrollToBottom)
+	chatBottom.Importance = widget.LowImportance
+	a.chatPane = container.NewBorder(a.chatMore, chatBottom, nil, nil, a.chatScroll)
 	a.chatStack = container.NewStack(a.chatPane, a.screenBox)
 	chatPanel := container.NewBorder(chatHeaderBar, container.NewBorder(nil, nil, nil, a.chatSend, a.chatEntry), nil, nil, a.chatStack)
 
@@ -1532,6 +1536,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 	label := box.Objects[2].(*widget.Label)
 	// Objects[3] is layout spacer
 	gearBtn := box.Objects[4].(*widget.Button)
+	joinBtn := box.Objects[5].(*widget.Button)
 
 	item := a.getItem(id)
 	currentChannelID := a.engine.GetChannelID()
@@ -1544,6 +1549,13 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 			icon.SetResource(theme.FolderOpenIcon())
 		} else {
 			icon.SetResource(theme.FolderIcon())
+		}
+		joinBtn.OnTapped = func() { a.joinChannel(item.channelID) }
+		joinBtn.Show()
+		if a.engine.GetState() == client.StateConnected && item.channelID != currentChannelID {
+			joinBtn.Enable()
+		} else {
+			joinBtn.Disable()
 		}
 		userCount := len(item.channel.Users)
 		label.Importance = widget.MediumImportance
@@ -1574,6 +1586,8 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		}
 	} else {
 		icon.SetResource(theme.AccountIcon())
+		joinBtn.Hide()
+		joinBtn.OnTapped = nil
 		indent.SetMinSize(fyne.NewSize(float32(item.depth+1)*20, 1))
 		label.Importance = widget.MediumImportance
 		status := ""
@@ -1620,13 +1634,17 @@ func (a *App) onChannelListSelect(id widget.ListItemID) {
 }
 
 func (a *App) joinSelectedChannel() {
+	a.joinChannel(a.selectedChannelID)
+}
+
+func (a *App) joinChannel(channelID int64) {
 	if a.engine.GetState() != client.StateConnected {
 		return
 	}
-	if a.selectedChannelID == 0 {
+	if channelID == 0 || channelID == a.engine.GetChannelID() {
 		return
 	}
-	if err := a.engine.JoinChannel(a.selectedChannelID); err != nil {
+	if err := a.engine.JoinChannel(channelID); err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
