@@ -61,11 +61,15 @@ const (
 )
 
 type audioResources struct {
-	capture   audio.Capturer
-	playback  audio.Player
-	encoder   audio.AudioEncoder
-	encoderMu sync.Mutex
-	warnings  []error
+	captureMu  sync.RWMutex
+	playbackMu sync.RWMutex
+	inputName  string
+	outputName string
+	capture    audio.Capturer
+	playback   audio.Player
+	encoder    audio.AudioEncoder
+	encoderMu  sync.Mutex
+	warnings   []error
 }
 
 func (r *audioResources) encode(frame []int16) ([]byte, error) {
@@ -78,12 +82,16 @@ func (r *audioResources) close() {
 	if r == nil {
 		return
 	}
+	r.playbackMu.Lock()
 	if r.playback != nil {
 		_ = r.playback.Stop()
 	}
+	r.playbackMu.Unlock()
+	r.captureMu.Lock()
 	if r.capture != nil {
 		_ = r.capture.Close()
 	}
+	r.captureMu.Unlock()
 }
 
 type connectionGeneration struct {
@@ -235,12 +243,16 @@ type Engine struct {
 	screenStartWait     time.Duration
 
 	// Audio initialization functions allow platform-specific audio backends.
-	initAudioFn   func() (*audioResources, error)
-	newCaptureFn  func(deviceName string) (audio.Capturer, error)
-	newPlaybackFn func(deviceName string) (audio.Player, error)
-	newEncoderFn  func() (audio.AudioEncoder, error)
-	audioInput    string
-	audioOutput   string
+	// ponytail: serialize native device setup; per-generation setup if contention matters.
+	audioSettingsMu sync.Mutex
+	initAudioFn     func() (*audioResources, error)
+	newCaptureFn    func(deviceName string) (audio.Capturer, error)
+	newPlaybackFn   func(deviceName string) (audio.Player, error)
+	newEncoderFn    func() (audio.AudioEncoder, error)
+	audioInput      string
+	audioOutput     string
+	inputVolume     float64
+	outputVolume    float64
 
 	// Voice debug counters (reset each log interval; only used when debug is enabled)
 	voiceDebugEnabled   bool
@@ -263,7 +275,7 @@ type Engine struct {
 	OnError            func(err error)
 	OnVoiceActivity    func(active bool)
 	OnRMSLevel         func(level float64)
-	OnAudioFailure     func(error)
+	OnAudioFailure     func(error) // nil reports successful initialization/recovery
 	OnChannelJoined    func(channelID int64)
 	OnDisconnect       func(reason string)
 	OnChatMessage      func(message pb.ChatMessage)
@@ -284,6 +296,8 @@ type Engine struct {
 func NewEngine() *Engine {
 	e := &Engine{
 		state:              StateDisconnected,
+		inputVolume:        100,
+		outputVolume:       100,
 		decoders:           make(map[uint32]audio.AudioDecoder),
 		jitterBufs:         make(map[uint32]*JitterBuffer),
 		speakerLastSeen:    make(map[uint32]time.Time),
@@ -600,50 +614,55 @@ func (e *Engine) initAudioDefault() (*audioResources, error) {
 	inputName := e.audioInput
 	outputName := e.audioOutput
 	e.mu.RUnlock()
+	return e.initAudioDevices(inputName, outputName, true)
+}
 
-	resources := &audioResources{}
-	capture, err := e.newCaptureFn(inputName)
+func (e *Engine) openCapture(name string) (audio.Capturer, error) {
+	capture, err := e.newCaptureFn(name)
 	if err == nil {
 		err = capture.Start()
 	}
-	if err != nil && inputName != "" {
-		if capture != nil {
-			_ = capture.Close()
-		}
+	if err != nil && capture != nil {
+		_ = capture.Close()
+		capture = nil
+	}
+	return capture, err
+}
+
+func (e *Engine) openPlayback(name string) (audio.Player, error) {
+	playback, err := e.newPlaybackFn(name)
+	if err == nil {
+		err = playback.Start()
+	}
+	if err != nil && playback != nil {
+		_ = playback.Stop()
+		playback = nil
+	}
+	return playback, err
+}
+
+func (e *Engine) initAudioDevices(inputName, outputName string, fallback bool) (*audioResources, error) {
+	resources := &audioResources{inputName: inputName, outputName: outputName}
+	capture, err := e.openCapture(inputName)
+	if err != nil && inputName != "" && fallback {
 		resources.warnings = append(resources.warnings,
-			fmt.Errorf("configured audio input %q is unavailable; using the system default", inputName))
-		capture, err = e.newCaptureFn("")
-		if err == nil {
-			err = capture.Start()
-		}
+			fmt.Errorf("configured audio input %q is unavailable; using the system default: %w", inputName, err))
+		resources.inputName = ""
+		capture, err = e.openCapture("")
 	}
 	if err != nil {
-		if capture != nil {
-			_ = capture.Close()
-		}
 		return nil, fmt.Errorf("start capture: %w", err)
 	}
 	resources.capture = capture
 
-	playback, err := e.newPlaybackFn(outputName)
-	if err == nil {
-		err = playback.Start()
-	}
-	if err != nil && outputName != "" {
-		if playback != nil {
-			_ = playback.Stop()
-		}
+	playback, err := e.openPlayback(outputName)
+	if err != nil && outputName != "" && fallback {
 		resources.warnings = append(resources.warnings,
-			fmt.Errorf("configured audio output %q is unavailable; using the system default", outputName))
-		playback, err = e.newPlaybackFn("")
-		if err == nil {
-			err = playback.Start()
-		}
+			fmt.Errorf("configured audio output %q is unavailable; using the system default: %w", outputName, err))
+		resources.outputName = ""
+		playback, err = e.openPlayback("")
 	}
 	if err != nil {
-		if playback != nil {
-			_ = playback.Stop()
-		}
 		resources.close()
 		return nil, fmt.Errorf("start playback: %w", err)
 	}
@@ -660,6 +679,14 @@ func (e *Engine) initAudioDefault() (*audioResources, error) {
 
 func (e *Engine) startAudio(g *connectionGeneration) {
 	g.run(func(context.Context) {
+		e.audioSettingsMu.Lock()
+		defer e.audioSettingsMu.Unlock()
+		g.mu.Lock()
+		ready := g.audio != nil || g.ctx.Err() != nil
+		g.mu.Unlock()
+		if ready {
+			return
+		}
 		resources, err := e.initAudioFn()
 		if err != nil {
 			slog.Error("audio init failed (continuing without audio)", "err", err)
@@ -676,30 +703,39 @@ func (e *Engine) startAudio(g *connectionGeneration) {
 			}
 		}
 
-		g.mu.Lock()
-		e.mu.RLock()
-		live := e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
-		e.mu.RUnlock()
-		if live {
-			g.audio = resources
-		}
-		g.mu.Unlock()
-		if !live {
-			resources.close()
-			return
-		}
-
-		e.mu.Lock()
-		e.lastSendTime = time.Now()
-		e.silenceBuf = make([]int16, 960)
-		e.mu.Unlock()
-		select {
-		case g.keepaliveNow <- struct{}{}:
-		default:
-		}
-		g.run(func(context.Context) { e.captureLoop(g) })
-		g.run(func(context.Context) { e.playbackLoop(g) })
+		e.installAudio(g, resources)
 	})
+}
+
+// installAudio transfers ownership only to the still-live generation.
+func (e *Engine) installAudio(g *connectionGeneration, resources *audioResources) bool {
+	g.mu.Lock()
+	e.mu.RLock()
+	live := e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
+	e.mu.RUnlock()
+	if live {
+		g.audio = resources
+	}
+	g.mu.Unlock()
+	if !live {
+		resources.close()
+		return false
+	}
+
+	e.mu.Lock()
+	e.lastSendTime = time.Now()
+	e.silenceBuf = make([]int16, 960)
+	e.mu.Unlock()
+	select {
+	case g.keepaliveNow <- struct{}{}:
+	default:
+	}
+	g.run(func(context.Context) { e.captureLoop(g) })
+	g.run(func(context.Context) { e.playbackLoop(g) })
+	if callback := e.OnAudioFailure; callback != nil {
+		e.invokeGenerationCallback(g, func() { callback(nil) })
+	}
+	return true
 }
 
 // captureLoop reads audio from the mic, runs VAD, encodes, and sends.
@@ -721,15 +757,31 @@ func (e *Engine) captureLoop(g *connectionGeneration) {
 		muted := e.muted
 		channelID := e.channelID
 		e.mu.RUnlock()
-		if resources == nil || resources.capture == nil || resources.encoder == nil || voice == nil {
+		if resources == nil || resources.encoder == nil || voice == nil {
 			return
 		}
 
-		pcm, err := resources.capture.ReadFrame()
-		if err != nil {
-			slog.Debug("capture read error", "err", err)
+		resources.captureMu.RLock()
+		if resources.capture == nil {
+			resources.captureMu.RUnlock()
 			return
 		}
+		pcm, err := resources.capture.ReadFrame()
+		resources.captureMu.RUnlock()
+		if err != nil {
+			slog.Debug("capture read error", "err", err)
+			select {
+			case <-g.ctx.Done():
+				return
+			case <-time.After(voiceFrameDuration):
+				continue
+			}
+		}
+
+		e.mu.RLock()
+		inputVolume := e.inputVolume
+		e.mu.RUnlock()
+		scalePCM(pcm, inputVolume)
 
 		// Compute RMS for VU meter
 		rms := audio.GetRMS(pcm)
@@ -808,7 +860,7 @@ func (e *Engine) playbackLoop(g *connectionGeneration) {
 		deafened := e.deafened
 		e.mu.RUnlock()
 
-		if voice == nil || resources == nil || resources.playback == nil {
+		if voice == nil || resources == nil {
 			return
 		}
 
@@ -822,7 +874,11 @@ func (e *Engine) playbackLoop(g *connectionGeneration) {
 			if deafened {
 				continue
 			}
-			e.playJitterFrames(resources.playback)
+			resources.playbackMu.RLock()
+			if resources.playback != nil {
+				e.playJitterFrames(resources.playback)
+			}
+			resources.playbackMu.RUnlock()
 		case <-g.ctx.Done():
 			return
 		}
@@ -928,7 +984,12 @@ func (e *Engine) playJitterFrames(playback audio.Player) {
 		return
 	}
 
-	if err := playback.WriteFrame(audio.MixFrames(frames, voiceFrameSamples)); err != nil {
+	pcm := audio.MixFrames(frames, voiceFrameSamples)
+	e.mu.RLock()
+	outputVolume := e.outputVolume
+	e.mu.RUnlock()
+	scalePCM(pcm, outputVolume)
+	if err := playback.WriteFrame(pcm); err != nil {
 		slog.Debug("playback error", "err", err)
 	}
 }
@@ -1399,6 +1460,23 @@ func (e *Engine) updateDeafenedGeneration(g *connectionGeneration, deafened bool
 	return e.muted, reset, true
 }
 
+// SetAudioVolumes applies input/output percentages without reopening streams.
+func (e *Engine) SetAudioVolumes(input, output float64) {
+	e.mu.Lock()
+	e.inputVolume, e.outputVolume = normalizeVolume(input), normalizeVolume(output)
+	e.mu.Unlock()
+}
+
+// scalePCM attenuates in place; bounded percentages cannot overflow int16.
+func scalePCM(pcm []int16, volume float64) {
+	if volume == 100 {
+		return
+	}
+	for i, sample := range pcm {
+		pcm[i] = int16(float64(sample) * volume / 100)
+	}
+}
+
 // SetVADThreshold updates the VAD sensitivity.
 func (e *Engine) SetVADThreshold(threshold float64) {
 	e.vad.SetThreshold(threshold)
@@ -1411,6 +1489,115 @@ func (e *Engine) SetAudioDevices(inputName, outputName string) {
 	e.audioInput = inputName
 	e.audioOutput = outputName
 	e.mu.Unlock()
+}
+
+// ApplyAudioDevices opens changed streams before retiring working ones. Empty
+// names select system defaults. A failed switch leaves both streams unchanged.
+func (e *Engine) ApplyAudioDevices(inputName, outputName string) error {
+	e.mu.RLock()
+	g := e.generation
+	state := e.state
+	e.mu.RUnlock()
+	if g != nil {
+		if state != StateConnected || !g.begin() {
+			return fmt.Errorf("audio: connection is not ready")
+		}
+		defer g.wg.Done()
+	}
+	e.audioSettingsMu.Lock()
+	defer e.audioSettingsMu.Unlock()
+	e.mu.Lock()
+	if g == nil && e.state == StateDisconnected {
+		e.audioInput, e.audioOutput = inputName, outputName
+		e.mu.Unlock()
+		return nil
+	}
+	live := g != nil && e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
+	e.mu.Unlock()
+	if !live {
+		return fmt.Errorf("audio: connection changed")
+	}
+	g.mu.Lock()
+	r := g.audio
+	g.mu.Unlock()
+	if r == nil {
+		resources, err := e.initAudioDevices(inputName, outputName, false)
+		if err != nil {
+			return err
+		}
+		if !e.installAudio(g, resources) {
+			return fmt.Errorf("audio: connection changed")
+		}
+	} else {
+		var capture audio.Capturer
+		var playback audio.Player
+		// These names are changed only under audioSettingsMu.
+		if r.inputName != inputName {
+			var err error
+			capture, err = e.openCapture(inputName)
+			if err != nil {
+				return fmt.Errorf("switch audio input %q: %w", inputName, err)
+			}
+		}
+		if r.outputName != outputName {
+			var err error
+			playback, err = e.openPlayback(outputName)
+			if err != nil {
+				if capture != nil {
+					_ = capture.Close()
+				}
+				return fmt.Errorf("switch audio output %q: %w", outputName, err)
+			}
+		}
+		// Wait only for the affected native I/O; the encoder, network and
+		// opposite-direction worker remain live. Never hold g.mu over native calls.
+		if capture != nil {
+			r.captureMu.Lock()
+			defer r.captureMu.Unlock()
+		}
+		if playback != nil {
+			r.playbackMu.Lock()
+			defer r.playbackMu.Unlock()
+		}
+		g.mu.Lock()
+		live = g.ctx.Err() == nil && g.audio == r
+		var oldCapture audio.Capturer
+		var oldPlayback audio.Player
+		if live {
+			if capture != nil {
+				oldCapture, r.capture = r.capture, capture
+				r.inputName = inputName
+			}
+			if playback != nil {
+				oldPlayback, r.playback = r.playback, playback
+				r.outputName = outputName
+			}
+		}
+		g.mu.Unlock()
+		if !live {
+			if capture != nil {
+				_ = capture.Close()
+			}
+			if playback != nil {
+				_ = playback.Stop()
+			}
+			return fmt.Errorf("audio: connection changed")
+		}
+		if oldCapture != nil {
+			_ = oldCapture.Close()
+		}
+		if oldPlayback != nil {
+			_ = oldPlayback.Stop()
+		}
+	}
+	e.mu.Lock()
+	if e.generation != g || g.ctx.Err() != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("audio: connection changed")
+	}
+	e.audioInput, e.audioOutput = inputName, outputName
+	e.mu.Unlock()
+	return nil
 }
 
 // CreateChannel sends a create channel request (admin only).

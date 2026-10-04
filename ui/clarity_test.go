@@ -41,13 +41,24 @@ func TestAudioFailureSurvivesActivity(t *testing.T) {
 	if !a.muteBtn.Disabled() || !a.deafenBtn.Disabled() {
 		t.Fatal("unavailable audio controls must be disabled")
 	}
-	if !a.audioReason.Visible() || !strings.Contains(a.audioReason.Text, "no input device") || !strings.Contains(a.audioReason.Text, "reconnect") {
+	if !a.audioReason.Visible() || !strings.Contains(a.audioReason.Text, "no input device") || !strings.Contains(a.audioReason.Text, "Apply") {
 		t.Fatal("audio failure needs a persistent reason and supported recovery advice")
 	}
 	a.engine.OnChannelJoined(2)
 	fyne.DoAndWait(func() {})
 	if a.voiceStatus.Text != "Voice channel: none" {
 		t.Fatal("membership must come from engine state, not a UI selection or callback argument")
+	}
+	a.chatChannelID = 2
+	a.chatRows = []pb.ChatMessage{{ID: 1, ChannelID: 2, Text: "keep this chat"}}
+	a.chatEntry.SetText("draft")
+	a.engine.OnAudioFailure(nil)
+	fyne.DoAndWait(func() {})
+	if a.audioFailed || a.audioReason.Visible() || a.audioReason.Text != "" || a.muteBtn.Disabled() || a.deafenBtn.Disabled() || a.vadIndicator.Text != "Voice idle" {
+		t.Fatal("successful Apply must clear audio failure and restore controls")
+	}
+	if a.chatChannelID != 2 || len(a.chatRows) != 1 || a.chatRows[0].Text != "keep this chat" || a.chatEntry.Text != "draft" {
+		t.Fatal("audio recovery cleared chat selection, messages or draft")
 	}
 	a.engine.OnStateChange(client.StateDisconnected)
 	fyne.DoAndWait(func() {})

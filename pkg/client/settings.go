@@ -2,6 +2,7 @@ package client
 
 import (
 	"log/slog"
+	"math"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -14,7 +15,17 @@ type Settings struct {
 	VADThreshold float64 `yaml:"vad_threshold"`
 	AudioInput   string  `yaml:"audio_input,omitempty"`
 	AudioOutput  string  `yaml:"audio_output,omitempty"`
+	InputVolume  float64 `yaml:"input_volume"`
+	OutputVolume float64 `yaml:"output_volume"`
 	path         string
+}
+
+// normalizeVolume bounds an app-specific percentage; invalid values use unity.
+func normalizeVolume(volume float64) float64 {
+	if math.IsNaN(volume) || math.IsInf(volume, 0) {
+		return 100
+	}
+	return min(100, max(0, volume))
 }
 
 // DefaultSettings returns default settings.
@@ -23,6 +34,8 @@ func DefaultSettings() *Settings {
 		MuteKey:      "F11",
 		DeafenKey:    "F12",
 		VADThreshold: 200,
+		InputVolume:  100,
+		OutputVolume: 100,
 	}
 }
 
@@ -60,13 +73,16 @@ func loadSettings(path, legacyPath string) *Settings {
 	s.path = loadedPath
 	if err := yaml.Unmarshal(data, s); err != nil {
 		slog.Error("parse settings", "err", err)
-		return s
 	}
+	s.InputVolume = normalizeVolume(s.InputVolume)
+	s.OutputVolume = normalizeVolume(s.OutputVolume)
 	return s
 }
 
 // Save writes settings atomically to the user config directory.
 func (s *Settings) Save() error {
+	s.InputVolume = normalizeVolume(s.InputVolume)
+	s.OutputVolume = normalizeVolume(s.OutputVolume)
 	data, err := yaml.Marshal(s)
 	if err != nil {
 		return err

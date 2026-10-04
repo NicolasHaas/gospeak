@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,6 +78,7 @@ type App struct {
 
 	// State
 	audioFailed        bool
+	audioApplying      bool
 	channels           []pb.ChannelInfo
 	selectedChannelID  int64
 	chatChannelID      int64
@@ -111,6 +113,7 @@ func NewApp() *App {
 		hotkeys:   client.NewGlobalHotkeys(),
 	}
 	a.bookmarks.Load() //nolint:errcheck,gosec // best-effort load
+	a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
 	a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 	a.window = a.fyneApp.NewWindow("GoSpeak")
@@ -171,6 +174,7 @@ func (a *App) promptLegacyConfigMigration() {
 				a.bookmarks = legacyBookmarks
 				legacyLoadErr = legacyBookmarks.Load()
 			}
+			a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 			a.engine.SetVADThreshold(a.settings.VADThreshold)
 			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
@@ -183,6 +187,7 @@ func (a *App) promptLegacyConfigMigration() {
 		a.settings = client.LoadSettings()
 		a.bookmarks = client.NewBookmarkStore()
 		loadErr := a.bookmarks.Load()
+		a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 		a.engine.SetVADThreshold(a.settings.VADThreshold)
 		a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 		a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
@@ -522,10 +527,20 @@ func (a *App) bindEvents() {
 
 	a.engine.OnAudioFailure = func(err error) {
 		fyne.Do(func() {
+			if err == nil {
+				a.audioFailed = false
+				a.audioReason.SetText("")
+				a.audioReason.Hide()
+				a.vadIndicator.SetText("Voice idle")
+				a.muteBtn.Enable()
+				a.deafenBtn.Enable()
+				a.updateMuteButtons()
+				return
+			}
 			a.audioFailed = true
 			a.vuMeter.SetValue(0)
 			a.vadIndicator.SetText("Audio unavailable")
-			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Check Audio Settings, then reconnect.", err))
+			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Choose devices in Audio Settings and press Apply.", err))
 			a.audioReason.Show()
 			a.muteBtn.Disable()
 			a.deafenBtn.Disable()
@@ -887,7 +902,7 @@ func (a *App) startGlobalHotkeys() {
 }
 
 const (
-	defaultServerHost  = "gospeak.haas-nicolas.ch"
+	defaultServerHost  = "gospeak.dev"
 	defaultControlPort = "9600"
 	defaultVoicePort   = "9601"
 )
@@ -1335,6 +1350,9 @@ func (a *App) showSettingsDialog() {
 	for _, d := range inputDevices {
 		inputNames = append(inputNames, d.Name)
 	}
+	if a.settings.AudioInput != "" && !slices.Contains(inputNames, a.settings.AudioInput) {
+		inputNames = append(inputNames, a.settings.AudioInput)
+	}
 	inputSelect := widget.NewSelect(inputNames, nil)
 	if a.settings.AudioInput != "" {
 		inputSelect.SetSelected(a.settings.AudioInput)
@@ -1349,12 +1367,24 @@ func (a *App) showSettingsDialog() {
 	for _, d := range outputDevices {
 		outputNames = append(outputNames, d.Name)
 	}
+	if a.settings.AudioOutput != "" && !slices.Contains(outputNames, a.settings.AudioOutput) {
+		outputNames = append(outputNames, a.settings.AudioOutput)
+	}
 	outputSelect := widget.NewSelect(outputNames, nil)
 	if a.settings.AudioOutput != "" {
 		outputSelect.SetSelected(a.settings.AudioOutput)
 	} else {
 		outputSelect.SetSelected("(Default)")
 	}
+
+	inputVolume := widget.NewSlider(0, 100)
+	inputVolume.SetValue(a.settings.InputVolume)
+	inputLabel := widget.NewLabel(fmt.Sprintf("Input volume: %.0f%%", inputVolume.Value))
+	inputVolume.OnChanged = func(v float64) { inputLabel.SetText(fmt.Sprintf("Input volume: %.0f%%", v)) }
+	outputVolume := widget.NewSlider(0, 100)
+	outputVolume.SetValue(a.settings.OutputVolume)
+	outputLabel := widget.NewLabel(fmt.Sprintf("Output volume: %.0f%%", outputVolume.Value))
+	outputVolume.OnChanged = func(v float64) { outputLabel.SetText(fmt.Sprintf("Output volume: %.0f%%", v)) }
 
 	// VAD threshold slider
 	vadSlider := widget.NewSlider(50, 3000)
@@ -1379,6 +1409,8 @@ func (a *App) showSettingsDialog() {
 		inputSelect,
 		widget.NewLabel("Output Device:"),
 		outputSelect,
+		inputLabel, inputVolume,
+		outputLabel, outputVolume,
 		widget.NewSeparator(),
 		vadLabel,
 		vadSlider,
@@ -1392,37 +1424,52 @@ func (a *App) showSettingsDialog() {
 		content.Add(container.NewHBox(widget.NewLabel("Deafen:"), deafenKeySelect))
 	}
 
-	d := dialog.NewCustomConfirm("Settings", "Apply", "Cancel", content,
+	d := dialog.NewCustomConfirm("Settings", "Apply", "Cancel", container.NewVScroll(content),
 		func(ok bool) {
 			if !ok {
 				return
 			}
+			if a.audioApplying {
+				dialog.ShowInformation("Audio settings", "An audio device switch is still in progress.", a.window)
+				return
+			}
+			a.engine.SetAudioVolumes(inputVolume.Value, outputVolume.Value)
+			a.settings.InputVolume, a.settings.OutputVolume = inputVolume.Value, outputVolume.Value
 			a.engine.SetVADThreshold(vadSlider.Value)
 
 			a.settings.VADThreshold = vadSlider.Value
 			a.settings.MuteKey = muteKeySelect.Selected
 			a.settings.DeafenKey = deafenKeySelect.Selected
-			if inputSelect.Selected != "(Default)" {
-				a.settings.AudioInput = inputSelect.Selected
-			} else {
-				a.settings.AudioInput = ""
-			}
-			if outputSelect.Selected != "(Default)" {
-				a.settings.AudioOutput = outputSelect.Selected
-			} else {
-				a.settings.AudioOutput = ""
-			}
-
 			if err := a.settings.Save(); err != nil {
 				slog.Error("save settings", "err", err)
 			}
-			a.engine.SetVADThreshold(a.settings.VADThreshold)
-			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
+			inputName, outputName := inputSelect.Selected, outputSelect.Selected
+			if inputName == "(Default)" {
+				inputName = ""
+			}
+			if outputName == "(Default)" {
+				outputName = ""
+			}
+			// Native setup must not block Fyne's event loop. Apply is serialized
+			// by the engine and never reconnects the server session.
+			a.audioApplying = true
+			go func() {
+				err := a.engine.ApplyAudioDevices(inputName, outputName)
+				fyne.Do(func() {
+					if err == nil {
+						a.settings.AudioInput, a.settings.AudioOutput = inputName, outputName
+						if saveErr := a.settings.Save(); saveErr != nil {
+							slog.Error("save settings", "err", saveErr)
+						}
+					} else {
+						dialog.ShowError(err, a.window)
+					}
+					a.audioApplying = false
+				})
+			}()
 
 			// Update global hotkeys live
 			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
-
-			dialog.ShowInformation("Settings", "Settings saved. Audio device changes apply on next connection.", a.window)
 		}, a.window)
 	d.Resize(fyne.NewSize(450, 520))
 	d.Show()

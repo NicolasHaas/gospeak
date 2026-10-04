@@ -1,11 +1,49 @@
 package client
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
+
+func TestSettingsVolumes(t *testing.T) {
+	for _, tc := range []struct {
+		data          string
+		input, output float64
+	}{
+		{"mute_key: F9\n", 100, 100},
+		{"input_volume: 0\noutput_volume: 50\n", 0, 50},
+		{"input_volume: -20\noutput_volume: 200\n", 0, 100},
+		{"input_volume: .nan\noutput_volume: .inf\n", 100, 100},
+		{"input_volume: broken\noutput_volume: 25\n", 100, 25},
+	} {
+		path := filepath.Join(t.TempDir(), "settings.yaml")
+		if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := loadSettings(path, "")
+		if s.InputVolume != tc.input || s.OutputVolume != tc.output {
+			t.Fatalf("%q: volumes %v / %v", tc.data, s.InputVolume, s.OutputVolume)
+		}
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+		s = loadSettings(path, "")
+		if s.InputVolume != tc.input || s.OutputVolume != tc.output {
+			t.Fatal("volume round trip changed values")
+		}
+		s.InputVolume, s.OutputVolume = math.NaN(), math.Inf(-1)
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+		s = loadSettings(path, "")
+		if s.InputVolume != 100 || s.OutputVolume != 100 {
+			t.Fatal("nonfinite saved volume not normalized")
+		}
+	}
+}
 
 func TestLoadSettingsRejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
