@@ -151,7 +151,7 @@ stateDiagram-v2
 | Hold Frames | 15 | Number of frames to keep transmitting after voice stops (15 × 20ms = 300ms) |
 | Pre-buffer | 3 | Frames buffered before voice onset for smooth start (3 × 20ms = 60ms) |
 
-The VAD threshold and selected input/output devices are user-configurable via the settings dialog. They are persisted in `settings.yaml` under the operating system's user config directory (`gospeak/`), and device changes apply on the next connection. If a selected device is no longer available, the client shows a warning and uses the system default. The 60 ms VAD pre-buffer is transmitted when speech starts so word beginnings are not clipped.
+The VAD threshold, input/output volume, and selected devices are user-configurable via the settings dialog and persisted in `settings.yaml` under the operating system's user config directory (`gospeak/`). Press Apply to change devices or input/output volume without reconnecting. Volume runs from 0% (silent) to 100% (unchanged), defaults to 100%, and changes only GoSpeak audio, not the system mixer. Input volume is applied before the meter, VAD, and encoding; output volume is applied once after the saturating speaker mix. The 60 ms VAD pre-buffer is transmitted when speech starts so word beginnings are not clipped.
 
 ## Jitter Buffer
 
@@ -195,7 +195,9 @@ sequenceDiagram
 
 ## Device Selection
 
-Users can select specific input/output audio devices via the settings dialog. Device names are matched against the PortAudio device list at connection time. If the configured device is not found, the system default is used.
+Users can select input/output audio devices in Audio Settings. Names are matched against PortAudio devices that support the selected direction. Apply opens only changed streams and keeps the server connection, channel membership, mute/deafen state, and chat intact. If opening a replacement fails, the previous streams keep running and the client shows the underlying error; failed selections are not saved. Apply can also retry audio setup after an initialization failure.
+
+At connection time, an unavailable saved device falls back to the system default with a warning that includes the original error. Live Apply does not silently fall back. It opens replacements before closing working streams, so a backend that cannot open both at once may reject a switch while keeping the old device. Switching waits for any in-flight native audio read/write; it cannot interrupt a hung native call. Devices are not switched automatically when hardware is plugged in or removed.
 
 ## Multi-Speaker Mixing
 

@@ -98,14 +98,18 @@ func ListOutputDevices() ([]DeviceEntry, error) {
 	return result, nil
 }
 
-// FindDevice returns the *portaudio.DeviceInfo matching by name, or nil.
-func FindDevice(name string) *portaudio.DeviceInfo {
+// FindDevice returns a named device that supports the requested direction.
+func FindDevice(name string, input bool) (*portaudio.DeviceInfo, error) {
 	devices, err := portaudio.Devices()
 	if err != nil {
-		return nil
+		return nil, err
 	}
+	return findDevice(devices, name, input), nil
+}
+
+func findDevice(devices []*portaudio.DeviceInfo, name string, input bool) *portaudio.DeviceInfo {
 	for _, d := range devices {
-		if d.Name == name {
+		if d.Name == name && ((input && d.MaxInputChannels > 0) || (!input && d.MaxOutputChannels > 0)) {
 			return d
 		}
 	}

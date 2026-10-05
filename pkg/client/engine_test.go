@@ -198,33 +198,52 @@ func TestVADPrependsBufferedFramesWhenSpeechStarts(t *testing.T) {
 }
 
 func TestPlayoutMixesConcurrentSpeakersIntoOneFrame(t *testing.T) {
-	clock := &fakeJitterClock{now: time.Unix(0, 0)}
-	first := newTestJitterBuffer(clock)
-	second := newTestJitterBuffer(clock)
-	first.Push(1, []byte("first"))
-	second.Push(1, []byte("second"))
-	clock.Advance(defaultJitterDelay)
-
 	e := NewEngine()
-	e.now = clock.Now
-	e.decoders[1] = &fixedDecoder{frame: []int16{20000, -20000}}
-	e.decoders[2] = &fixedDecoder{frame: []int16{20000, -20000}}
-	e.jitterBufs[1] = first
-	e.jitterBufs[2] = second
-	e.speakerLastSeen[1] = clock.Now()
-	e.speakerLastSeen[2] = clock.Now()
-	player := &recordingPlayer{}
+	for _, volume := range []float64{100, 50, 0} {
+		clock := &fakeJitterClock{now: time.Unix(0, 0)}
+		first := newTestJitterBuffer(clock)
+		second := newTestJitterBuffer(clock)
+		first.Push(1, []byte("first"))
+		second.Push(1, []byte("second"))
+		clock.Advance(defaultJitterDelay)
 
-	e.playJitterFrames(player)
+		e.now = clock.Now
+		e.decoders[1] = &fixedDecoder{frame: []int16{20000, -20000}}
+		e.decoders[2] = &fixedDecoder{frame: []int16{20000, -20000}}
+		e.jitterBufs[1] = first
+		e.jitterBufs[2] = second
+		e.speakerLastSeen[1] = clock.Now()
+		e.speakerLastSeen[2] = clock.Now()
+		player := &recordingPlayer{}
 
-	if got := len(player.frames); got != 1 {
-		t.Fatalf("playback writes = %d, want 1 mixed frame", got)
+		e.SetAudioVolumes(100, volume)
+		e.playJitterFrames(player)
+
+		if got := len(player.frames); got != 1 {
+			t.Fatalf("playback writes = %d, want 1 mixed frame", got)
+		}
+		if got, want := player.frames[0][0], int16(32767*volume/100); got != want {
+			t.Fatalf("mixed positive sample = %d, want %d", got, want)
+		}
+		if got, want := player.frames[0][1], int16(-32768*volume/100); got != want {
+			t.Fatalf("mixed negative sample = %d, want %d", got, want)
+		}
 	}
-	if got, want := player.frames[0][0], int16(32767); got != want {
-		t.Fatalf("mixed positive sample = %d, want %d", got, want)
-	}
-	if got, want := player.frames[0][1], int16(-32768); got != want {
-		t.Fatalf("mixed negative sample = %d, want %d", got, want)
+}
+
+func TestVolumeScaling(t *testing.T) {
+	for _, tc := range []struct {
+		volume float64
+		want   []int16
+	}{
+		{0, []int16{0, 0, 0, 0}}, {50, []int16{-16384, -500, 500, 16383}},
+		{100, []int16{-32768, -1000, 1000, 32767}},
+	} {
+		frame := []int16{-32768, -1000, 1000, 32767}
+		scalePCM(frame, tc.volume)
+		if !slices.Equal(frame, tc.want) {
+			t.Fatalf("volume %v: %v", tc.volume, frame)
+		}
 	}
 }
 

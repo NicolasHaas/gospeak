@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,6 +78,7 @@ type App struct {
 
 	// State
 	audioFailed        bool
+	audioApplying      bool
 	channels           []pb.ChannelInfo
 	selectedChannelID  int64
 	chatChannelID      int64
@@ -111,6 +113,7 @@ func NewApp() *App {
 		hotkeys:   client.NewGlobalHotkeys(),
 	}
 	a.bookmarks.Load() //nolint:errcheck,gosec // best-effort load
+	a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
 	a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 	a.window = a.fyneApp.NewWindow("GoSpeak")
@@ -171,6 +174,7 @@ func (a *App) promptLegacyConfigMigration() {
 				a.bookmarks = legacyBookmarks
 				legacyLoadErr = legacyBookmarks.Load()
 			}
+			a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 			a.engine.SetVADThreshold(a.settings.VADThreshold)
 			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
@@ -183,6 +187,7 @@ func (a *App) promptLegacyConfigMigration() {
 		a.settings = client.LoadSettings()
 		a.bookmarks = client.NewBookmarkStore()
 		loadErr := a.bookmarks.Load()
+		a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 		a.engine.SetVADThreshold(a.settings.VADThreshold)
 		a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
 		a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
@@ -308,7 +313,9 @@ func (a *App) buildUI() {
 			gearBtn := widget.NewButtonWithIcon("", theme.SettingsIcon(), nil)
 			gearBtn.Importance = widget.LowImportance
 			gearBtn.Hide()
-			return container.NewHBox(indent, icon, label, layout.NewSpacer(), gearBtn)
+			joinBtn := widget.NewButtonWithIcon("Join", theme.LoginIcon(), nil)
+			joinBtn.Importance = widget.LowImportance
+			return container.NewHBox(indent, icon, label, layout.NewSpacer(), gearBtn, joinBtn)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			a.updateChannelListItem(id, obj)
@@ -391,7 +398,9 @@ func (a *App) buildUI() {
 	})
 	a.backBtn.Hide()
 	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
-	a.chatPane = container.NewBorder(a.chatMore, nil, nil, nil, a.chatScroll)
+	chatBottom := widget.NewButtonWithIcon("Scroll to bottom", theme.MoveDownIcon(), a.chatScroll.ScrollToBottom)
+	chatBottom.Importance = widget.LowImportance
+	a.chatPane = container.NewBorder(a.chatMore, chatBottom, nil, nil, a.chatScroll)
 	a.chatStack = container.NewStack(a.chatPane, a.screenBox)
 	chatPanel := container.NewBorder(chatHeaderBar, container.NewBorder(nil, nil, nil, a.chatSend, a.chatEntry), nil, nil, a.chatStack)
 
@@ -522,10 +531,20 @@ func (a *App) bindEvents() {
 
 	a.engine.OnAudioFailure = func(err error) {
 		fyne.Do(func() {
+			if err == nil {
+				a.audioFailed = false
+				a.audioReason.SetText("")
+				a.audioReason.Hide()
+				a.vadIndicator.SetText("Voice idle")
+				a.muteBtn.Enable()
+				a.deafenBtn.Enable()
+				a.updateMuteButtons()
+				return
+			}
 			a.audioFailed = true
 			a.vuMeter.SetValue(0)
 			a.vadIndicator.SetText("Audio unavailable")
-			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Check Audio Settings, then reconnect.", err))
+			a.audioReason.SetText(fmt.Sprintf("Audio unavailable: %v. Choose devices in Audio Settings and press Apply.", err))
 			a.audioReason.Show()
 			a.muteBtn.Disable()
 			a.deafenBtn.Disable()
@@ -887,7 +906,7 @@ func (a *App) startGlobalHotkeys() {
 }
 
 const (
-	defaultServerHost  = "gospeak.haas-nicolas.ch"
+	defaultServerHost  = "gospeak.dev"
 	defaultControlPort = "9600"
 	defaultVoicePort   = "9601"
 )
@@ -1335,6 +1354,9 @@ func (a *App) showSettingsDialog() {
 	for _, d := range inputDevices {
 		inputNames = append(inputNames, d.Name)
 	}
+	if a.settings.AudioInput != "" && !slices.Contains(inputNames, a.settings.AudioInput) {
+		inputNames = append(inputNames, a.settings.AudioInput)
+	}
 	inputSelect := widget.NewSelect(inputNames, nil)
 	if a.settings.AudioInput != "" {
 		inputSelect.SetSelected(a.settings.AudioInput)
@@ -1349,12 +1371,24 @@ func (a *App) showSettingsDialog() {
 	for _, d := range outputDevices {
 		outputNames = append(outputNames, d.Name)
 	}
+	if a.settings.AudioOutput != "" && !slices.Contains(outputNames, a.settings.AudioOutput) {
+		outputNames = append(outputNames, a.settings.AudioOutput)
+	}
 	outputSelect := widget.NewSelect(outputNames, nil)
 	if a.settings.AudioOutput != "" {
 		outputSelect.SetSelected(a.settings.AudioOutput)
 	} else {
 		outputSelect.SetSelected("(Default)")
 	}
+
+	inputVolume := widget.NewSlider(0, 100)
+	inputVolume.SetValue(a.settings.InputVolume)
+	inputLabel := widget.NewLabel(fmt.Sprintf("Input volume: %.0f%%", inputVolume.Value))
+	inputVolume.OnChanged = func(v float64) { inputLabel.SetText(fmt.Sprintf("Input volume: %.0f%%", v)) }
+	outputVolume := widget.NewSlider(0, 100)
+	outputVolume.SetValue(a.settings.OutputVolume)
+	outputLabel := widget.NewLabel(fmt.Sprintf("Output volume: %.0f%%", outputVolume.Value))
+	outputVolume.OnChanged = func(v float64) { outputLabel.SetText(fmt.Sprintf("Output volume: %.0f%%", v)) }
 
 	// VAD threshold slider
 	vadSlider := widget.NewSlider(50, 3000)
@@ -1379,6 +1413,8 @@ func (a *App) showSettingsDialog() {
 		inputSelect,
 		widget.NewLabel("Output Device:"),
 		outputSelect,
+		inputLabel, inputVolume,
+		outputLabel, outputVolume,
 		widget.NewSeparator(),
 		vadLabel,
 		vadSlider,
@@ -1392,37 +1428,52 @@ func (a *App) showSettingsDialog() {
 		content.Add(container.NewHBox(widget.NewLabel("Deafen:"), deafenKeySelect))
 	}
 
-	d := dialog.NewCustomConfirm("Settings", "Apply", "Cancel", content,
+	d := dialog.NewCustomConfirm("Settings", "Apply", "Cancel", container.NewVScroll(content),
 		func(ok bool) {
 			if !ok {
 				return
 			}
+			if a.audioApplying {
+				dialog.ShowInformation("Audio settings", "An audio device switch is still in progress.", a.window)
+				return
+			}
+			a.engine.SetAudioVolumes(inputVolume.Value, outputVolume.Value)
+			a.settings.InputVolume, a.settings.OutputVolume = inputVolume.Value, outputVolume.Value
 			a.engine.SetVADThreshold(vadSlider.Value)
 
 			a.settings.VADThreshold = vadSlider.Value
 			a.settings.MuteKey = muteKeySelect.Selected
 			a.settings.DeafenKey = deafenKeySelect.Selected
-			if inputSelect.Selected != "(Default)" {
-				a.settings.AudioInput = inputSelect.Selected
-			} else {
-				a.settings.AudioInput = ""
-			}
-			if outputSelect.Selected != "(Default)" {
-				a.settings.AudioOutput = outputSelect.Selected
-			} else {
-				a.settings.AudioOutput = ""
-			}
-
 			if err := a.settings.Save(); err != nil {
 				slog.Error("save settings", "err", err)
 			}
-			a.engine.SetVADThreshold(a.settings.VADThreshold)
-			a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
+			inputName, outputName := inputSelect.Selected, outputSelect.Selected
+			if inputName == "(Default)" {
+				inputName = ""
+			}
+			if outputName == "(Default)" {
+				outputName = ""
+			}
+			// Native setup must not block Fyne's event loop. Apply is serialized
+			// by the engine and never reconnects the server session.
+			a.audioApplying = true
+			go func() {
+				err := a.engine.ApplyAudioDevices(inputName, outputName)
+				fyne.Do(func() {
+					if err == nil {
+						a.settings.AudioInput, a.settings.AudioOutput = inputName, outputName
+						if saveErr := a.settings.Save(); saveErr != nil {
+							slog.Error("save settings", "err", saveErr)
+						}
+					} else {
+						dialog.ShowError(err, a.window)
+					}
+					a.audioApplying = false
+				})
+			}()
 
 			// Update global hotkeys live
 			a.hotkeys.SetKeys(a.settings.MuteKey, a.settings.DeafenKey)
-
-			dialog.ShowInformation("Settings", "Settings saved. Audio device changes apply on next connection.", a.window)
 		}, a.window)
 	d.Resize(fyne.NewSize(450, 520))
 	d.Show()
@@ -1485,6 +1536,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 	label := box.Objects[2].(*widget.Label)
 	// Objects[3] is layout spacer
 	gearBtn := box.Objects[4].(*widget.Button)
+	joinBtn := box.Objects[5].(*widget.Button)
 
 	item := a.getItem(id)
 	currentChannelID := a.engine.GetChannelID()
@@ -1497,6 +1549,13 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 			icon.SetResource(theme.FolderOpenIcon())
 		} else {
 			icon.SetResource(theme.FolderIcon())
+		}
+		joinBtn.OnTapped = func() { a.joinChannel(item.channelID) }
+		joinBtn.Show()
+		if a.engine.GetState() == client.StateConnected && item.channelID != currentChannelID {
+			joinBtn.Enable()
+		} else {
+			joinBtn.Disable()
 		}
 		userCount := len(item.channel.Users)
 		label.Importance = widget.MediumImportance
@@ -1527,6 +1586,8 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		}
 	} else {
 		icon.SetResource(theme.AccountIcon())
+		joinBtn.Hide()
+		joinBtn.OnTapped = nil
 		indent.SetMinSize(fyne.NewSize(float32(item.depth+1)*20, 1))
 		label.Importance = widget.MediumImportance
 		status := ""
@@ -1573,13 +1634,17 @@ func (a *App) onChannelListSelect(id widget.ListItemID) {
 }
 
 func (a *App) joinSelectedChannel() {
+	a.joinChannel(a.selectedChannelID)
+}
+
+func (a *App) joinChannel(channelID int64) {
 	if a.engine.GetState() != client.StateConnected {
 		return
 	}
-	if a.selectedChannelID == 0 {
+	if channelID == 0 || channelID == a.engine.GetChannelID() {
 		return
 	}
-	if err := a.engine.JoinChannel(a.selectedChannelID); err != nil {
+	if err := a.engine.JoinChannel(channelID); err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
