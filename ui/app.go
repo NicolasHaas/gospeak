@@ -94,13 +94,16 @@ type App struct {
 	watchingScreenFeed bool
 
 	// Bookmarks & Settings
-	bookmarks     *client.BookmarkStore
-	settings      *client.Settings
-	hotkeys       *client.GlobalHotkeys
-	serverSaved   bool   // whether the current connection is saved
-	connectToken  string // token used (or auto-generated) for the current connection
-	connectServer string // control address of current connection
-	connectVoice  string // voice address of current connection
+	bookmarks       *client.BookmarkStore
+	settings        *client.Settings
+	hotkeys         *client.GlobalHotkeys
+	serverSaved     bool   // whether the current connection is saved
+	connectToken    string // token used (or auto-generated) for the current connection
+	connectServer   string // control address of current connection
+	connectVoice    string // voice address of current connection
+	connectAttempt  uint64 // UI-owned credential callback epoch
+	connectPending  bool
+	bookmarkLoadErr error
 }
 
 // NewApp creates a new GoSpeak GUI application.
@@ -115,7 +118,7 @@ func NewApp() *App {
 		settings:  client.LoadSettings(),
 		hotkeys:   client.NewGlobalHotkeys(),
 	}
-	a.bookmarks.Load() //nolint:errcheck,gosec // best-effort load
+	a.bookmarkLoadErr = a.bookmarks.Load()
 	a.engine.SetAudioVolumes(a.settings.InputVolume, a.settings.OutputVolume)
 	a.engine.SetVADThreshold(a.settings.VADThreshold)
 	a.engine.SetAudioDevices(a.settings.AudioInput, a.settings.AudioOutput)
@@ -140,6 +143,9 @@ func (a *App) Run() {
 		a.fyneApp.Quit()
 	})
 	a.window.Show()
+	if a.bookmarkLoadErr != nil {
+		dialog.ShowError(fmt.Errorf("saved servers could not be loaded; the file will not be overwritten: %w", a.bookmarkLoadErr), a.window)
+	}
 	a.promptLegacyConfigMigration()
 	a.fyneApp.Run()
 }
@@ -210,6 +216,7 @@ func (a *App) buildUI() {
 	// --- Toolbar ---
 	a.connectBtn = widget.NewButtonWithIcon("Connect", theme.LoginIcon(), a.showConnectDialog)
 	a.disconnectBtn = widget.NewButtonWithIcon("Disconnect", theme.LogoutIcon(), func() {
+		a.connectAttempt++
 		a.engine.Disconnect()
 	})
 	a.disconnectBtn.Disable()
@@ -664,16 +671,43 @@ func (a *App) bindEvents() {
 		})
 	}
 
-	a.engine.OnAutoToken = func(token string) {
-		a.connectToken = token
+	a.engine.OnAutoToken = a.autoTokenCallback("")
+
+	a.engine.OnExportData = func(dataType, data string) {
 		fyne.Do(func() {
+			a.showExportResult(dataType, data)
+		})
+	}
+
+	a.engine.OnImportResult = func(success bool, message string) {
+		fyne.Do(func() {
+			if success {
+				dialog.ShowInformation("Import", message, a.window)
+			} else {
+				dialog.ShowError(fmt.Errorf("%s", message), a.window)
+			}
+		})
+	}
+}
+
+func (a *App) autoTokenCallback(username string) func(string) {
+	attempt := a.connectAttempt
+	return func(token string) {
+		fyne.Do(func() {
+			if attempt != a.connectAttempt {
+				return
+			}
+			a.connectToken = token
+			saved := false
 			if a.serverSaved {
-				a.saveCurrentBookmark(a.engine.GetUsername())
+				saved = a.saveCurrentBookmark(username) == nil
 			}
 
 			message := "The server generated a personal token for you.\n"
-			if a.serverSaved {
+			if saved {
 				message += "This server is saved, so the token is stored in your bookmark.\n"
+			} else if a.serverSaved {
+				message += "The token could not be saved. Copy it before closing this dialog.\n"
 			} else {
 				message += "Save this token or enable 'Save Server' to keep it.\n"
 			}
@@ -694,22 +728,6 @@ func (a *App) bindEvents() {
 			d := dialog.NewCustom("Personal Token", "Close", content, a.window)
 			d.Resize(fyne.NewSize(520, 180))
 			d.Show()
-		})
-	}
-
-	a.engine.OnExportData = func(dataType, data string) {
-		fyne.Do(func() {
-			a.showExportResult(dataType, data)
-		})
-	}
-
-	a.engine.OnImportResult = func(success bool, message string) {
-		fyne.Do(func() {
-			if success {
-				dialog.ShowInformation("Import", message, a.window)
-			} else {
-				dialog.ShowError(fmt.Errorf("%s", message), a.window)
-			}
 		})
 	}
 }
@@ -1107,6 +1125,9 @@ func (a *App) showConnectDialog() {
 			if !ok {
 				return
 			}
+			if a.connectPending || a.engine.GetState() != client.StateDisconnected {
+				return
+			}
 			controlAddr, controlHost, err := normalizeAddr(serverEntry.Text, defaultControlPort)
 			if err != nil {
 				dialog.ShowError(err, a.window)
@@ -1130,47 +1151,56 @@ func (a *App) showConnectDialog() {
 			}
 
 			token := bookmarkTokenFor(selectedBookmark, controlAddr, username, tokenEntry.Text)
+			a.connectAttempt++
+			attempt := a.connectAttempt
 			a.serverSaved = saveCheck.Checked
 			a.connectToken = token
 			a.connectServer = controlAddr
 			a.connectVoice = voiceAddr
 
 			saveServer := saveCheck.Checked
+			onAutoToken := a.autoTokenCallback(username)
+			bookmark := selectedBookmark // immutable selection, not the live dialog variable
 			var connect func(string)
 			connect = func(serverPin string) {
+				if attempt != a.connectAttempt || a.connectPending {
+					return
+				}
+				a.connectPending = true
 				go func() {
-					if err := a.engine.Connect(controlAddr, voiceAddr, token, username, serverPin); err != nil {
-						var untrusted *client.UntrustedServerError
-						var changed *client.ServerIdentityChangedError
-						if errors.As(err, &untrusted) {
-							fyne.Do(func() {
+					err := a.engine.ConnectWithAutoToken(controlAddr, voiceAddr, token, username, serverPin, onAutoToken)
+					fyne.Do(func() {
+						a.connectPending = false
+						if attempt != a.connectAttempt {
+							return
+						}
+						if err != nil {
+							var untrusted *client.UntrustedServerError
+							var changed *client.ServerIdentityChangedError
+							if errors.As(err, &untrusted) {
 								a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
-							})
-							return
-						}
-						if errors.As(err, &changed) {
-							fyne.Do(func() {
+								return
+							}
+							if errors.As(err, &changed) {
 								a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
-							})
+								return
+							}
+							slog.Error("connect failed", "err", err)
+							dialog.ShowError(fmt.Errorf("connection failed: %v", err), a.window)
 							return
 						}
-						slog.Error("connect failed", "err", err)
-						fyne.Do(func() {
-							dialog.ShowError(fmt.Errorf("connection failed: %v", err), a.window)
-						})
-						return
-					}
-					if saveServer {
-						a.saveCurrentBookmark(username)
-						return
-					}
-					if selectedBookmark != nil {
-						if a.bookmarks.Touch(selectedBookmark.ControlAddr, selectedBookmark.Username, time.Now().Unix()) {
-							if err := a.bookmarks.Save(); err != nil {
-								slog.Error("failed to save bookmark", "err", err)
+						if saveServer {
+							_ = a.saveCurrentBookmark(username) // error is shown by the shared save boundary
+							return
+						}
+						if bookmark != nil {
+							if a.bookmarks.Touch(bookmark.ControlAddr, bookmark.Username, time.Now().Unix()) {
+								if err := a.bookmarks.Save(); err != nil {
+									dialog.ShowError(fmt.Errorf("save bookmark: %w", err), a.window)
+								}
 							}
 						}
-					}
+					})
 				}()
 			}
 			connect(a.bookmarks.PinForAddr(controlAddr))
@@ -1182,6 +1212,7 @@ func (a *App) showConnectDialog() {
 }
 
 func (a *App) confirmServerTrust(controlAddr, received, expected string, connect func(string)) {
+	attempt := a.connectAttempt
 	title := "Trust New Server Identity"
 	confirm := "Trust and Connect"
 	message := fmt.Sprintf("Verify this server fingerprint through a trusted channel before continuing:\n\n%s\n\nServer: %s", received, controlAddr)
@@ -1191,7 +1222,7 @@ func (a *App) confirmServerTrust(controlAddr, received, expected string, connect
 		message = fmt.Sprintf("WARNING: the saved server identity changed. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nSaved: %s\nNew:   %s\n\nServer: %s", expected, received, controlAddr)
 	}
 	dialog.NewCustomConfirm(title, confirm, "Cancel", widget.NewLabel(message), func(ok bool) {
-		if !ok {
+		if !ok || attempt != a.connectAttempt {
 			return
 		}
 		a.bookmarks.TrustServer(controlAddr, received)
@@ -1926,7 +1957,7 @@ func (a *App) showHelpDialog() {
 	d.Show()
 }
 
-func (a *App) saveCurrentBookmark(username string) {
+func (a *App) saveCurrentBookmark(username string) error {
 	name := a.connectServer
 	if username != "" {
 		name = username + "@" + a.connectServer
@@ -1940,6 +1971,8 @@ func (a *App) saveCurrentBookmark(username string) {
 		LastUsed:    time.Now().Unix(),
 	})
 	if err := a.bookmarks.Save(); err != nil {
-		slog.Error("failed to save bookmark", "err", err)
+		dialog.ShowError(fmt.Errorf("save bookmark: %w", err), a.window)
+		return err
 	}
+	return nil
 }

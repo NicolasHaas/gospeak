@@ -332,6 +332,12 @@ func (f *defaultDecoderFactory) NewDecoder() (audio.AudioDecoder, error) {
 
 // Connect authenticates to the server and starts audio/voice pipelines.
 func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin string) error {
+	return e.ConnectWithAutoToken(controlAddr, voiceAddr, token, username, serverPin, e.OnAutoToken)
+}
+
+// ConnectWithAutoToken binds credential delivery to this connection attempt.
+// The callback runs on the same ordered queue as the other engine events.
+func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, serverPin string, onAutoToken func(string)) error {
 	e.lifecycleMu.Lock()
 
 	e.mu.Lock()
@@ -509,7 +515,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
-	if callback := e.OnAutoToken; authResp.AutoToken != "" && callback != nil {
+	if callback := onAutoToken; authResp.AutoToken != "" && callback != nil {
 		e.invokeGenerationCallback(g, func() { callback(authResp.AutoToken) })
 	}
 

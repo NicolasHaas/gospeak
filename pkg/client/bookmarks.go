@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -21,6 +22,7 @@ type Bookmark struct {
 type BookmarkStore struct {
 	path              string
 	legacyPath        string
+	loadErr           error
 	Bookmarks         []Bookmark        `yaml:"bookmarks"`
 	TrustedServerPins map[string]string `yaml:"trusted_server_pins,omitempty"`
 }
@@ -48,7 +50,8 @@ func NewLegacyBookmarkStore() *BookmarkStore {
 
 // Load reads bookmarks from disk. It falls back to the legacy file without
 // migrating it; migration is an explicit user action.
-func (bs *BookmarkStore) Load() error {
+func (bs *BookmarkStore) Load() (err error) {
+	defer func() { bs.loadErr = err }()
 	loaded := BookmarkStore{path: bs.path, legacyPath: bs.legacyPath}
 	bs.Bookmarks = nil
 	bs.TrustedServerPins = nil
@@ -60,12 +63,12 @@ func (bs *BookmarkStore) Load() error {
 	if os.IsNotExist(err) {
 		return nil
 	}
+	bs.path = loaded.path
 	if err != nil {
 		return err
 	}
-	bs.path = loaded.path
 	if err := yaml.Unmarshal(data, &loaded); err != nil {
-		return err
+		return fmt.Errorf("invalid bookmark file")
 	}
 	*bs = loaded
 	return nil
@@ -73,6 +76,9 @@ func (bs *BookmarkStore) Load() error {
 
 // Save writes bookmarks to disk.
 func (bs *BookmarkStore) Save() error {
+	if bs.loadErr != nil {
+		return fmt.Errorf("bookmarks were not loaded; refusing to overwrite: %w", bs.loadErr)
+	}
 	data, err := yaml.Marshal(bs)
 	if err != nil {
 		return err

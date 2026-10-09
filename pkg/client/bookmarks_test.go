@@ -286,15 +286,23 @@ func TestDeclinedBookmarkMigrationKeepsLegacyDestinationAfterParseError(t *testi
 		t.Fatal("invalid legacy bookmarks unexpectedly parsed")
 	}
 	declined.Bookmarks = []Bookmark{{Name: "recovered legacy"}}
+	if err := declined.Save(); err == nil {
+		t.Fatal("save replaced malformed legacy credentials")
+	}
+	assertContentsAndMode(t, currentPath, currentData, 0o600)
+	assertContentsAndMode(t, legacyPath, []byte("bookmarks: [\n"), 0o600)
+	if declined.path != legacyPath {
+		t.Fatal("failed legacy load changed save destination")
+	}
+	if err := os.WriteFile(legacyPath, []byte("bookmarks: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := declined.Load(); err != nil {
+		t.Fatal(err)
+	}
+	declined.Add(Bookmark{Name: "recovered legacy"})
 	if err := declined.Save(); err != nil {
 		t.Fatal(err)
 	}
 	assertContentsAndMode(t, currentPath, currentData, 0o600)
-	reloaded := &BookmarkStore{path: legacyPath, legacyPath: legacyPath}
-	if err := reloaded.Load(); err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Bookmarks) != 1 || reloaded.Bookmarks[0].Name != "recovered legacy" {
-		t.Fatalf("parse-error recovery wrote to wrong destination: %#v", reloaded.Bookmarks)
-	}
 }
