@@ -478,14 +478,17 @@ func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.Voic
 	return true
 }
 
-// UpdateUserState updates muted/deafened for a session.
-func (sm *SessionManager) UpdateUserState(id uint32, muted, deafened bool) {
+// UpdateUserState reports whether muted/deafened changed for an existing session.
+func (sm *SessionManager) UpdateUserState(id uint32, muted, deafened bool) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if s, ok := sm.sessions[id]; ok {
-		s.Muted = muted
-		s.Deafened = deafened
+	s, ok := sm.sessions[id]
+	if !ok || (s.Muted == muted && s.Deafened == deafened) {
+		return false
 	}
+	s.Muted = muted
+	s.Deafened = deafened
+	return true
 }
 
 // SetChannel sets the channel ID for a session.

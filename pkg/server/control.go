@@ -1472,7 +1472,9 @@ func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Co
 }
 
 func (s *Server) handleUserState(handler *ControlHandler, sessionID uint32, upd *pb.UserStateUpdate, st datastore.DataProviderFactory) {
-	s.sessions.UpdateUserState(sessionID, upd.Muted, upd.Deafened)
+	if !s.sessions.UpdateUserState(sessionID, upd.Muted, upd.Deafened) {
+		return
+	}
 
 	// Broadcast updated server state to all clients
 	s.broadcastServerState(st, handler)
