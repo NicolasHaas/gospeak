@@ -125,7 +125,7 @@ func (c *ControlClient) StartReceiving() {
 	go func() {
 		defer close(c.done)
 		for {
-			msg, err := protocol.ReadControlMessage(c.conn)
+			msg, _, err := protocol.ReadControlMessageWithFrameDeadline(c.conn, c.conn.SetReadDeadline)
 			if err != nil {
 				if err == io.EOF || isClosedErr(err) {
 					slog.Debug("control connection closed")

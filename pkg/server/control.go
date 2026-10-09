@@ -1205,12 +1205,13 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		default:
 		}
 
-		// A fixed deadline covers the entire frame; partial reads do not renew it.
+		// Silence keeps the idle horizon; the first byte starts a short,
+		// fixed completion deadline that trickled bytes cannot renew.
 		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Minute)); err != nil {
 			return
 		}
 		reader := io.LimitedReader{R: conn, N: protocol.MaxControlMessage + 4}
-		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(&reader)
+		msg, payloadBytes, err := protocol.ReadControlMessageWithFrameDeadline(&reader, conn.SetReadDeadline)
 		if err != nil {
 			// Only silence is normal idle expiry; an unfinished frame is invalid.
 			if errors.Is(err, os.ErrDeadlineExceeded) && reader.N == protocol.MaxControlMessage+4 {
