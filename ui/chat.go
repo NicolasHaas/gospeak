@@ -13,7 +13,37 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
+func (a *App) startChatLoading() {
+	if a.chatTimer != nil {
+		a.chatTimer.Stop()
+	}
+	a.chatAttempt++
+	attempt := a.chatAttempt
+	a.chatLoading = true
+	a.chatRetry = false
+	// Generic server errors cannot identify the history request. Bound each
+	// attempt instead; old timers must never clear a newer channel or page.
+	a.chatTimer = time.AfterFunc(10*time.Second, func() {
+		fyne.Do(func() { a.expireChatHistory(attempt) })
+	})
+}
+
+func (a *App) expireChatHistory(attempt uint64) {
+	if attempt != a.chatAttempt || !a.chatLoading {
+		return
+	}
+	a.chatLoading = false
+	a.chatRetry = a.chatBeforeID == 0
+	a.renderChat()
+}
+
 func (a *App) resetChat() {
+	if a.chatTimer != nil {
+		a.chatTimer.Stop()
+		a.chatTimer = nil
+	}
+	a.chatAttempt++
+	a.chatRetry = false
 	a.chatChannelID = 0
 	a.chatRows = nil
 	a.chatDeleted = nil
@@ -30,7 +60,7 @@ func (a *App) selectChatChannel(channelID int64) {
 	if a.engine.GetState() != client.StateConnected || channelID <= 0 {
 		return
 	}
-	if channelID == a.chatChannelID {
+	if channelID == a.chatChannelID && !a.chatRetry {
 		a.updateChatContext()
 		return
 	}
@@ -39,15 +69,21 @@ func (a *App) selectChatChannel(channelID int64) {
 		dialog.ShowError(err, a.window)
 		return
 	}
-	a.resetChat()
-	a.chatChannelID = channelID
-	a.chatDeleted = make(map[int64]bool)
-	a.chatLoading = true
+	if channelID != a.chatChannelID {
+		a.resetChat()
+		a.chatChannelID = channelID
+		a.chatDeleted = make(map[int64]bool)
+	}
+	a.startChatLoading()
 	a.updateChatContext()
 	a.renderChat()
 }
 
 func (a *App) loadEarlierChat() {
+	if a.chatRetry {
+		a.selectChatChannel(a.chatChannelID)
+		return
+	}
 	if a.chatLoading || !a.chatHasMore || a.chatBeforeID == 0 {
 		return
 	}
@@ -55,7 +91,7 @@ func (a *App) loadEarlierChat() {
 		dialog.ShowError(err, a.window)
 		return
 	}
-	a.chatLoading = true
+	a.startChatLoading()
 	a.chatMore.Disable()
 }
 
@@ -92,7 +128,12 @@ func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
 	if response.ChannelID != a.chatChannelID || !a.chatLoading {
 		return
 	}
+	if a.chatTimer != nil {
+		a.chatTimer.Stop()
+		a.chatTimer = nil
+	}
 	a.chatLoading = false
+	a.chatRetry = false
 	a.chatHasMore = response.HasMore
 	wasEmpty := len(a.chatRows) == 0
 	if len(response.Messages) > 0 {
@@ -145,6 +186,8 @@ func (a *App) renderChat() {
 		text := "No messages yet."
 		if a.chatLoading {
 			text = "Loading messages..."
+		} else if a.chatRetry {
+			text = "Messages did not load. Retry when the server is available."
 		}
 		rows = append(rows, widget.NewLabel(text))
 	}
@@ -173,7 +216,12 @@ func (a *App) renderChat() {
 	}
 	a.chatBox.Objects = rows
 	a.chatBox.Refresh()
-	if a.chatHasMore && len(a.chatRows) > 0 {
+	if a.chatRetry {
+		a.chatMore.SetText("Retry messages")
+		a.chatMore.Show()
+		a.chatMore.Enable()
+	} else if a.chatHasMore && len(a.chatRows) > 0 {
+		a.chatMore.SetText("Load earlier messages")
 		a.chatMore.Show()
 		if a.chatLoading {
 			a.chatMore.Disable()

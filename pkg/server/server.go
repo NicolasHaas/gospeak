@@ -123,6 +123,9 @@ type Server struct {
 	controlGlobalBudget     *controlMessageLimiter
 	tempChannels            *tempChannelLifecycle
 
+	// ponytail: serialize state snapshots through enqueue; shard if fanout becomes a bottleneck.
+	statePublicationMu sync.Mutex
+
 	// Per-session voice debug counters (reset each debug interval; only used when debug is enabled)
 	voiceDebugEnabled bool
 	voiceStats        map[uint32]*perSessionVoiceStat

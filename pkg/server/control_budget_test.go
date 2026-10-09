@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -230,7 +232,7 @@ func TestGlobalControlBudgetBoundsAggregateUsers(t *testing.T) {
 	}
 }
 
-func TestGlobalControlBudgetDisconnectsAcrossDistinctUsers(t *testing.T) {
+func TestGlobalControlBudgetRefusesWithoutDisconnecting(t *testing.T) {
 	srv, st, _ := newTestServer(t)
 	srv.cfg.AllowNoToken = true
 	srv.controlGlobalBudget = newControlMessageLimiter(1, 1, func() time.Time { return time.Unix(1_700_000_000, 0) })
@@ -267,17 +269,45 @@ func TestGlobalControlBudgetDisconnectsAcrossDistinctUsers(t *testing.T) {
 	if err := protocol.WriteControlMessage(second, &pb.ControlMessage{Ping: &pb.Ping{Timestamp: 2}}); err != nil {
 		t.Fatalf("write second ping: %v", err)
 	}
+	// A rejected heartbeat must not close the shared-budget victim.
+	_ = second.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if response, err := protocol.ReadControlMessage(second); err == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("rejected heartbeat = %#v, %v; want silence", response, err)
+	}
+	_ = second.SetReadDeadline(time.Time{})
+	if err := protocol.WriteControlMessage(second, &pb.ControlMessage{ChannelListRequest: &pb.ChannelListRequest{}}); err != nil {
+		t.Fatalf("write rejected request: %v", err)
+	}
 	response, err := protocol.ReadControlMessage(second)
 	if err != nil || response.ErrorResponse == nil || response.ErrorResponse.Code != 8 {
 		t.Fatalf("global rejection response = %#v, error = %v", response, err)
 	}
 	select {
 	case <-secondDone:
-	case <-time.After(time.Second):
-		t.Fatal("globally rate-limited session was not disconnected")
+		t.Fatal("shared global budget disconnected an innocent session")
+	default:
 	}
 	if got := srv.metrics.ControlGlobalMutationRejections.Load(); got != 1 {
 		t.Fatalf("global mutation rejections = %d, want 1", got)
+	}
+	if got := srv.metrics.ControlGlobalExpensiveRejections.Load(); got != 1 {
+		t.Fatalf("global expensive rejections = %d, want 1", got)
+	}
+	// Refill under the limiter lock and prove the same connection remains usable.
+	srv.controlGlobalBudget.mu.Lock()
+	srv.controlGlobalBudget.tokens = 1
+	srv.controlGlobalBudget.mu.Unlock()
+	if err := protocol.WriteControlMessage(second, &pb.ControlMessage{Ping: &pb.Ping{Timestamp: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if response, err := protocol.ReadControlMessage(second); err != nil || response.Pong == nil || response.Pong.Timestamp != 3 {
+		t.Fatalf("recovered heartbeat = %#v, %v", response, err)
+	}
+	_ = second.Close()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second session did not close")
 	}
 	_ = first.Close()
 	select {

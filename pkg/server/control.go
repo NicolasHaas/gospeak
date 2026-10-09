@@ -133,12 +133,15 @@ type queuedControlMessage struct {
 
 type controlClient struct {
 	net.Conn
-	sessionID uint32
-	peerIP    string
-	sendQueue chan queuedControlMessage
-	done      chan struct{}
-	mu        sync.Mutex
-	closed    bool
+	sessionID   uint32
+	peerIP      string
+	sendQueue   chan queuedControlMessage
+	done        chan struct{}
+	mu          sync.Mutex
+	closed      bool
+	authPending bool // registered for bans, but ordinary publication is not ready
+
+	statePending bool // a suppressed state broadcast needs a post-auth snapshot
 }
 
 func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
@@ -167,7 +170,11 @@ func canonicalControlPeerIP(addr net.Addr) (string, error) {
 }
 
 func (c *controlClient) send(msg *pb.ControlMessage) error {
-	return c.enqueue(queuedControlMessage{message: msg})
+	err := c.enqueue(queuedControlMessage{message: msg})
+	if errors.Is(err, errControlQueueFull) {
+		_ = c.Close()
+	}
+	return err
 }
 
 func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
@@ -187,13 +194,24 @@ func (c *controlClient) enqueue(item queuedControlMessage) error {
 		c.mu.Unlock()
 		return errControlClientClosed
 	}
+	// Keep AuthResponse first; a fresh state snapshot follows readiness to repair
+	// suppressed state broadcasts. Terminal send-and-close still bypasses the gate.
+	if c.authPending && item.message.AuthResponse == nil && item.result == nil {
+		if item.message.ServerStateEvent != nil {
+			c.statePending = true
+		}
+		c.mu.Unlock()
+		return nil
+	}
 	select {
 	case c.sendQueue <- item:
+		if item.message.AuthResponse != nil {
+			c.authPending = false
+		}
 		c.mu.Unlock()
 		return nil
 	default:
 		c.mu.Unlock()
-		_ = c.Close()
 		return errControlQueueFull
 	}
 }
@@ -431,15 +449,21 @@ func (rl *accountProvisionLimiter) finish(key string, success bool) {
 	}
 }
 
+// Authentication admission groups IPv6 by /64; bans remain exact-address.
 func authRateLimitKey(addr net.Addr) string {
+	host := addr.String()
 	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
-		return tcpAddr.IP.String()
+		host = tcpAddr.IP.String()
+	} else if parsed, _, err := net.SplitHostPort(host); err == nil {
+		host = parsed
 	}
-	host, _, err := net.SplitHostPort(addr.String())
-	if err == nil {
-		return host
+	if ip := net.ParseIP(host); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 	}
-	return addr.String()
+	return host
 }
 
 // newControlHandler creates a control handler.
@@ -454,7 +478,12 @@ func newControlHandler(srv *Server, st datastore.DataProviderFactory) *ControlHa
 
 // setConn registers a connection with a dedicated serialized writer.
 func (ch *ControlHandler) setConn(sessionID uint32, conn net.Conn) *controlClient {
+	return ch.registerConn(sessionID, conn, false)
+}
+
+func (ch *ControlHandler) registerConn(sessionID uint32, conn net.Conn, authPending bool) *controlClient {
 	client := newControlClient(sessionID, conn)
+	client.authPending = authPending
 	if !ch.server.startWorker(client.writeLoop) {
 		_ = client.Close()
 		return client
@@ -1046,7 +1075,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}
 	session, banned := s.activateAfterBanChecks(user.ID, peerIP, sessionReservation, persistedBan, persistedIPBan, bypassIPBan, func(session *model.Session) {
-		conn = handler.setConn(session.ID, conn)
+		conn = handler.registerConn(session.ID, conn, true)
 	})
 	banCheckUserID = 0
 	peerIP = ""
@@ -1123,11 +1152,37 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			AutoToken:            autoToken,
 		},
 	}
-	if err := writeControlMessage(conn, authResp); err != nil {
-		slog.Error("auth response write failed")
+	// Refresh authority and publish the first frame in one policy epoch. Enqueue
+	// is bounded and nonblocking; no network operation runs under this lock.
+	s.remoteModerationMu.Lock()
+	currentUser, roleErr := st.NonTx().GetUserByID(user.ID)
+	if roleErr == nil && currentUser != nil {
+		if sessionRole != currentUser.Role {
+			sessionRole = currentUser.Role
+			s.sessions.UpdateRoleByUserID(user.ID, sessionRole)
+		}
+		authResp.AuthResponse.Role = sessionRole.String()
+		err = conn.(*controlClient).enqueue(queuedControlMessage{message: authResp})
+	}
+	s.remoteModerationMu.Unlock()
+	if roleErr != nil || currentUser == nil {
+		conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 3, Message: "internal error"}})
+		return
+	}
+	if err != nil {
+		slog.Error("auth response enqueue failed")
 		return
 	}
 	s.finishPreAuth(preAuthConn)
+	// Readiness is open and moderation is unlocked. Serialize the repair with
+	// other state snapshots so an older in-flight broadcast cannot overtake it.
+	client := conn.(*controlClient)
+	client.mu.Lock()
+	statePending := client.statePending
+	client.mu.Unlock()
+	if statePending {
+		s.sendServerState(st, conn)
+	}
 
 	slog.Debug("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
 	s.metrics.SuccessfulAuths.Add(1)
@@ -1194,13 +1249,14 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		globalDecision := s.controlGlobalBudget.AllowSized(msg, payloadBytes)
 		if !globalDecision.Allowed {
 			s.recordControlBudgetRejection(remoteAddr, "global", globalDecision)
-			response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}
-			if client, ok := conn.(*controlClient); ok {
-				client.sendAndClose(response)
-			} else {
-				_ = writeControlMessage(conn, response)
+			// A shared shortage is not evidence that this sender abused its budget.
+			// Heartbeats need no response: the client does not wait for Pong.
+			if msg.Ping == nil {
+				if err := writeControlMessage(conn, &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}); err != nil {
+					return
+				}
 			}
-			return
+			continue
 		}
 
 		s.handleMessage(handler, sessionID, msg, st, conn)
@@ -1945,15 +2001,27 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 
 // sendServerState sends the full server state to a single connection.
 func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
+	s.statePublicationMu.Lock()
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
-	_ = writeControlMessage(conn, &pb.ControlMessage{
+	msg := &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
-	})
+	}
+	if client, ok := conn.(*controlClient); ok {
+		err := client.enqueue(queuedControlMessage{message: msg})
+		s.statePublicationMu.Unlock()
+		if errors.Is(err, errControlQueueFull) {
+			_ = client.Close()
+		}
+		return
+	}
+	s.statePublicationMu.Unlock()
+	_ = writeControlMessage(conn, msg)
 }
 
 // broadcastServerState sends updated server state to ALL connected sessions.
 func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler *ControlHandler) {
+	s.statePublicationMu.Lock()
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
@@ -1965,8 +2033,15 @@ func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler 
 		clients = append(clients, client)
 	}
 	handler.mu.RUnlock()
+	var overflowed []*controlClient
 	for _, client := range clients {
-		_ = client.send(msg)
+		if errors.Is(client.enqueue(queuedControlMessage{message: msg}), errControlQueueFull) {
+			overflowed = append(overflowed, client)
+		}
+	}
+	s.statePublicationMu.Unlock()
+	for _, client := range overflowed {
+		_ = client.Close()
 	}
 }
 
