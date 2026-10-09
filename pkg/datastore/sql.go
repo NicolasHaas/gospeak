@@ -148,6 +148,9 @@ func sqliteConnectionDSN(dbPath string) (string, error) {
 	query.Del("_pragma")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
+	// Transactions may read before writing: acquire the WAL writer before
+	// taking a snapshot, rather than failing its later upgrade with BUSY_SNAPSHOT.
+	query.Set("_txlock", "immediate")
 	return base + "?" + query.Encode(), nil
 }
 
