@@ -53,10 +53,9 @@ func tlsTrustPolicyForPin(expectedPin string) tlsTrustPolicy {
 }
 
 func tlsTrustPolicyForConnection(expectedPin string, peer *x509.Certificate) tlsTrustPolicy {
-	if expectedPin == "" {
-		return tlsTrustPolicy{mode: tlsTrustSystemPKI}
-	}
-	return tlsTrustPolicy{mode: tlsTrustTOFU, pin: SPKIFingerprint(peer)}
+	trust := tlsTrustPolicyForPin(expectedPin)
+	trust.pin = SPKIFingerprint(peer)
+	return trust
 }
 
 // SPKIFingerprint returns a stable SHA-256 fingerprint of a certificate's
@@ -91,10 +90,11 @@ func newTLSConfigWithTrust(addr string, trust tlsTrustPolicy, roots *x509.CertPo
 		leaf := state.PeerCertificates[0]
 		fingerprint := SPKIFingerprint(leaf)
 
+		// A screen policy also binds PKI to the control connection's exact key.
+		if trust.pin != "" && fingerprint != trust.pin {
+			return &ServerIdentityChangedError{Addr: addr, Expected: trust.pin, Received: fingerprint}
+		}
 		if trust.mode == tlsTrustTOFU {
-			if fingerprint != trust.pin {
-				return &ServerIdentityChangedError{Addr: addr, Expected: trust.pin, Received: fingerprint}
-			}
 			pinnedRoots := x509.NewCertPool()
 			pinnedRoots.AddCert(leaf)
 			if _, err := leaf.Verify(x509.VerifyOptions{
