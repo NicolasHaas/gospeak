@@ -434,12 +434,15 @@ func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.Voic
 	if registration.Counter <= s.VoiceRegistrationCounter {
 		return false
 	}
-	if s.UDPAddr != nil && !udpAddrEqual(s.UDPAddr, addr) && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
-		return false
+	if !udpAddrEqual(s.UDPAddr, addr) {
+		if s.UDPAddr != nil && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
+			return false
+		}
+		// Same-address registration refreshes must not postpone NAT rebinding.
+		s.VoiceEndpointUpdatedAt = now
 	}
 	s.UDPAddr = cloneUDPAddr(addr)
 	s.VoiceRegistrationCounter = registration.Counter
-	s.VoiceEndpointUpdatedAt = now
 	return true
 }
 
