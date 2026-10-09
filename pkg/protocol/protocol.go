@@ -214,12 +214,7 @@ func validateControlEnvelope(data []byte) error {
 		switch v := value.(type) {
 		case json.Delim:
 			if v == '{' || v == '[' {
-				for dec.More() {
-					if err := skipJSONValue(dec); err != nil {
-						return fmt.Errorf("protocol: invalid control envelope: field %q: %w", key, err)
-					}
-				}
-				if _, err := dec.Token(); err != nil {
+				if err := skipJSONContainer(dec); err != nil {
 					return fmt.Errorf("protocol: invalid control envelope: field %q: %w", key, err)
 				}
 			}
@@ -241,22 +236,26 @@ func validateControlEnvelope(data []byte) error {
 	return nil
 }
 
-// skipJSONValue consumes one JSON value from the decoder, ensuring its raw
-// bytes are fully parsed and validated by the standard library.
-func skipJSONValue(dec *json.Decoder) error {
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if delim, ok := token.(json.Delim); ok {
-		if delim == '{' || delim == '[' {
-			for dec.More() {
-				if err := skipJSONValue(dec); err != nil {
-					return err
+// maxControlJSONDepth includes the envelope object.
+const maxControlJSONDepth = 32
+
+// skipJSONContainer consumes an opened payload container without recursion.
+func skipJSONContainer(dec *json.Decoder) error {
+	depth := 2 // envelope and payload
+	for depth > 1 {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := token.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+				if depth > maxControlJSONDepth {
+					return errors.New("control JSON nesting too deep")
 				}
-			}
-			if _, err := dec.Token(); err != nil {
-				return err
+			case '}', ']':
+				depth--
 			}
 		}
 	}

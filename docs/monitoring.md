@@ -31,7 +31,13 @@ capacity claims and startup-lifetime high-water utilization for:
 Authentication usage is the sum of failed attempts and in-flight checks
 against the 30-attempt, one-minute source window. Account-provisioning usage is
 the sum of successful creations and in-flight reservations against the
-120-account, one-hour source window.
+120-account, one-hour source window. These limits and pre-authentication
+admission use one IPv4 address or one IPv6 /64 as the source group. IPv4-mapped
+IPv6 uses the same group as IPv4. People sharing a /64 share these budgets,
+including the default eight simultaneous pre-authentication connections per
+plane. IP bans still match only the selected exact address. Trackers remain
+bounded and reject new groups while full; /64 grouping does not prevent
+exhaustion by attackers controlling many prefixes.
 
 Each account may hold up to eight of the server's 1,024 authenticated session
 slots by default. Pending session reservations count toward capacity but are
@@ -53,10 +59,12 @@ Message costs are weighted by work:
   and server-wide changes cost five points;
 - encoded size can raise the cost by one point per 16 KiB.
 
-Configured bursts are never normalized below five points. Exhausting any
-applicable bucket returns an error and disconnects the session. A depleted
-account bucket survives reconnects until it refills, so reconnecting cannot
-restore its burst.
+Configured bursts are never normalized below five points. Exhausting a session
+or account bucket returns an error and disconnects that sender. Exhausting the
+shared server bucket refuses only the message: requests receive error code 8,
+while heartbeats are silently dropped without closing the connection. Local
+budgets still charge refused messages. A depleted account bucket survives
+reconnects until it refills, so reconnecting cannot restore its burst.
 
 ## Rejections, labels, and logs
 

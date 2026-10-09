@@ -86,6 +86,9 @@ type App struct {
 	chatDeleted        map[int64]bool
 	chatHasMore        bool
 	chatLoading        bool
+	chatRetry          bool
+	chatAttempt        uint64
+	chatTimer          *time.Timer
 	chatBeforeID       int64
 	activeScreenShare  *pb.ScreenShareEvent
 	watchingScreenFeed bool
@@ -949,6 +952,22 @@ func deriveVoiceAddr(controlAddr string) string {
 	return net.JoinHostPort(host, defaultVoicePort)
 }
 
+func bookmarkTargets(b *client.Bookmark, address, username string) bool {
+	if b == nil {
+		return false
+	}
+	stored, _, storedErr := normalizeAddr(b.ControlAddr, defaultControlPort)
+	target, _, targetErr := normalizeAddr(address, defaultControlPort)
+	return storedErr == nil && targetErr == nil && stored == target && strings.TrimSpace(b.Username) == strings.TrimSpace(username)
+}
+
+func bookmarkTokenFor(b *client.Bookmark, address, username, token string) string {
+	if b != nil && token == b.Token && !bookmarkTargets(b, address, username) {
+		return ""
+	}
+	return token
+}
+
 func (a *App) showConnectDialog() {
 	serverEntry := widget.NewEntry()
 	serverEntry.SetPlaceHolder(defaultServerHost)
@@ -1011,6 +1030,14 @@ func (a *App) showConnectDialog() {
 	}
 
 	var selectedBookmark *client.Bookmark
+	clearMismatchedToken := func(string) {
+		if selectedBookmark != nil && !bookmarkTargets(selectedBookmark, serverEntry.Text, usernameEntry.Text) {
+			tokenEntry.SetText(bookmarkTokenFor(selectedBookmark, serverEntry.Text, usernameEntry.Text, tokenEntry.Text))
+			selectedBookmark = nil
+		}
+	}
+	serverEntry.OnChanged = clearMismatchedToken
+	usernameEntry.OnChanged = clearMismatchedToken
 	resetToNew := func() {
 		selectedBookmark = nil
 		serverEntry.SetText(defaultServerHost)
@@ -1021,10 +1048,11 @@ func (a *App) showConnectDialog() {
 		advancedAccordion.Close(0)
 	}
 	applyBookmark := func(b client.Bookmark) {
-		selectedBookmark = &b
+		selectedBookmark = nil
 		serverEntry.SetText(displayControlInput(b.ControlAddr))
 		usernameEntry.SetText(b.Username)
 		tokenEntry.SetText(b.Token)
+		selectedBookmark = &b
 		saveCheck.SetChecked(true)
 
 		derivedVoice := deriveVoiceAddr(b.ControlAddr)
@@ -1101,7 +1129,7 @@ func (a *App) showConnectDialog() {
 				voiceAddr = net.JoinHostPort(controlHost, defaultVoicePort)
 			}
 
-			token := tokenEntry.Text
+			token := bookmarkTokenFor(selectedBookmark, controlAddr, username, tokenEntry.Text)
 			a.serverSaved = saveCheck.Checked
 			a.connectToken = token
 			a.connectServer = controlAddr
