@@ -2262,13 +2262,32 @@ func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) 
 
 func (e *Engine) handleScreenPacketGeneration(g *connectionGeneration, pkt *protocol.ScreenPacket) {
 	e.callbackMu.Lock()
-	defer e.callbackMu.Unlock()
 	e.mu.RLock()
 	current := e.generation == g && e.state == StateConnected
 	e.mu.RUnlock()
-	if current {
-		e.handleScreenPacket(g, pkt)
+	if !current {
+		e.callbackMu.Unlock()
+		return
 	}
+	frameData, ok := e.decryptScreenPacket(pkt)
+	e.screenMu.Lock()
+	cipher, share := e.screenCipher, e.activeScreenShare
+	e.screenMu.Unlock()
+	e.callbackMu.Unlock()
+	if !ok {
+		return
+	}
+	frame, err := protocol.UnmarshalScreenFrame(frameData)
+	if err != nil {
+		slog.Debug("screen frame unmarshal error", "err", err)
+		return
+	}
+	img, err := decodeScreenImage(frame)
+	if err != nil {
+		slog.Debug("screen frame decode error", "err", err)
+		return
+	}
+	e.publishDecodedScreenFrame(g, cipher, share, img)
 }
 
 func (e *Engine) decryptScreenPacket(pkt *protocol.ScreenPacket) ([]byte, bool) {
@@ -2290,19 +2309,16 @@ func (e *Engine) decryptScreenPacket(pkt *protocol.ScreenPacket) ([]byte, bool) 
 	return frameData, true
 }
 
-func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.ScreenPacket) {
-	frameData, ok := e.decryptScreenPacket(pkt)
-	if !ok {
-		return
-	}
-	frame, err := protocol.UnmarshalScreenFrame(frameData)
-	if err != nil {
-		slog.Debug("screen frame unmarshal error", "err", err)
-		return
-	}
-	img, err := decodeScreenImage(frame)
-	if err != nil {
-		slog.Debug("screen frame decode error", "err", err)
+func (e *Engine) publishDecodedScreenFrame(g *connectionGeneration, cipher *gospeakCrypto.VoiceCipher, share *pb.ScreenShareEvent, img image.Image) {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	e.screenMu.Lock()
+	authorized := e.screenCipher == cipher && e.activeScreenShare == share && share != nil && share.Active
+	e.screenMu.Unlock()
+	if !current || !authorized {
 		return
 	}
 	if callback := e.OnScreenFrame; callback != nil {
