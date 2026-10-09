@@ -174,24 +174,9 @@ forever; the next talk spurt starts a fresh jitter window.
 
 ## PortAudio Initialization
 
-PortAudio initialization can be slow, especially on Windows. GoSpeak uses **async pre-initialization** to avoid blocking the GUI:
+PortAudio initialization can be slow, especially on Windows. `ui.NewApp` starts it in the background. Connection-time audio setup waits for that attempt in a connection-generation worker, not on the GUI thread.
 
-```mermaid
-sequenceDiagram
-    participant Main as main()
-    participant Pre as PreInitAudio()
-    participant GUI as Fyne GUI
-    participant User as User Action
-
-    Main->>Pre: Start in background goroutine
-    Main->>GUI: Launch immediately (no delay)
-    Pre->>Pre: portaudio.Initialize()
-    Pre->>Pre: Enumerate devices
-    Pre->>Pre: Signal ready (sync.Once)
-    User->>GUI: Click "Connect"
-    GUI->>Pre: WaitPreInit() blocks until ready
-    Note over GUI: Proceeds once PortAudio is initialized
-```
+Initialization errors are logged. If opening the audio streams fails, control and chat stay connected and the client reports that audio is unavailable.
 
 ## Device Selection
 

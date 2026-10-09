@@ -10,11 +10,7 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
-var defaultBackend CaptureBackend = screencaptureBackend{}
-
-type screencaptureBackend struct{}
-
-func (screencaptureBackend) CaptureDisplay(displayIndex int) (*image.RGBA, error) {
+func CaptureDisplay(displayIndex int) (*image.RGBA, error) {
 	if displayIndex < 0 || displayIndex >= screenshot.NumActiveDisplays() {
 		return nil, fmt.Errorf("display %d not available", displayIndex)
 	}
