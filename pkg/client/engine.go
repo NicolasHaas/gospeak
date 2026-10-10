@@ -1989,6 +1989,14 @@ func (e *Engine) Unban(banID int64) error {
 
 // Disconnect disconnects from the server.
 func (e *Engine) Disconnect() {
+	if done := e.DisconnectAsync(); done != nil {
+		<-done
+	}
+}
+
+// DisconnectAsync cancels the current generation without waiting for native
+// workers. Its completion channel is nil when there is no generation to stop.
+func (e *Engine) DisconnectAsync() <-chan struct{} {
 	e.mu.RLock()
 	g := e.generation
 	if g == nil {
@@ -1997,8 +2005,9 @@ func (e *Engine) Disconnect() {
 	e.mu.RUnlock()
 	if g != nil {
 		e.requestDisconnect(g, "user disconnected")
-		<-g.done
+		return g.done
 	}
+	return nil
 }
 
 // GetState returns the current connection state.

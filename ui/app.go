@@ -217,7 +217,9 @@ func (a *App) buildUI() {
 	a.connectBtn = widget.NewButtonWithIcon("Connect", theme.LoginIcon(), a.showConnectDialog)
 	a.disconnectBtn = widget.NewButtonWithIcon("Disconnect", theme.LogoutIcon(), func() {
 		a.connectAttempt++
-		a.engine.Disconnect()
+		a.disconnectBtn.Disable()
+		a.statusLabel.SetText("Disconnecting...")
+		a.engine.DisconnectAsync()
 	})
 	a.disconnectBtn.Disable()
 	a.disconnectBtn.Hide()
