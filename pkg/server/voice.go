@@ -9,7 +9,11 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
-const voiceRebindInterval = 5 * time.Second
+const (
+	voiceRebindInterval   = 5 * time.Second
+	voicePacketsPerSecond = 50 // one packet per 20 ms audio frame
+	voicePacketBurst      = 2 * voicePacketsPerSecond
+)
 
 // StartVoice starts the UDP voice forwarder.
 func (s *Server) StartVoice() error {
@@ -155,6 +159,10 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 // recording its sequence. It returns the sender's current channel when the
 // packet is safe to relay.
 func (s *Server) acceptVoicePacket(pkt *protocol.VoicePacket, remoteAddr *net.UDPAddr) (int64, bool) {
+	return s.acceptVoicePacketAt(pkt, remoteAddr, time.Now())
+}
+
+func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.UDPAddr, now time.Time) (int64, bool) {
 	if pkt == nil || s.voiceCipher == nil {
 		return 0, false
 	}
@@ -183,6 +191,9 @@ func (s *Server) acceptVoicePacket(pkt *protocol.VoicePacket, remoteAddr *net.UD
 	}
 	packetChannel = uint64(actualChannel) //nolint:gosec // positivity is checked immediately above
 	if packetChannel != pkt.ChannelID {
+		return 0, false
+	}
+	if !s.sessions.allowVoicePacket(pkt.SessionID, remoteAddr, protocol.VoiceHeaderSize+len(pkt.Payload), now) {
 		return 0, false
 	}
 	return actualChannel, true

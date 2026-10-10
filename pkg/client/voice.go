@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
+	"time"
 
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
@@ -15,7 +17,7 @@ var ErrVoiceSequenceExhausted = errors.New("client: voice sequence exhausted; re
 
 // VoiceClient manages the UDP voice connection.
 type VoiceClient struct {
-	conn                *net.UDPConn
+	conn                net.Conn
 	serverAddr          *net.UDPAddr
 	sessionID           uint32
 	channelID           uint64
@@ -122,13 +124,16 @@ func (v *VoiceClient) StartReceiving() {
 		for {
 			n, err := v.conn.Read(buf)
 			if err != nil {
-				select {
-				case <-v.done:
-					return
-				default:
-					slog.Debug("voice read error", "err", err)
-					return
+				// A connected UDP socket can report a transient ICMP port-unreachable.
+				// Pace retries; other errors (including expired deadlines) remain terminal.
+				if errors.Is(err, syscall.ECONNREFUSED) {
+					time.Sleep(10 * time.Millisecond)
+					continue
 				}
+				if !errors.Is(err, net.ErrClosed) {
+					slog.Debug("voice read error", "err", err)
+				}
+				return
 			}
 
 			pkt, err := protocol.UnmarshalVoicePacket(buf[:n])

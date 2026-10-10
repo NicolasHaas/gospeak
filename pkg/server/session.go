@@ -20,7 +20,7 @@ import (
 type SessionManager struct {
 	mu               sync.RWMutex
 	sessions         map[uint32]*model.Session // sessionID -> session
-	voiceReplay      map[uint32]*protocol.ReplayWindow
+	voiceReplay      map[uint32]*voiceReceiveState
 	maxSessions      int
 	maxPerUser       int
 	pending          int
@@ -30,6 +30,12 @@ type SessionManager struct {
 	nextSessionID    uint32
 	issuedSessionIDs uint64
 	sessionIDSeeded  bool
+}
+
+type voiceReceiveState struct {
+	protocol.ReplayWindow
+	packets, bytes float64
+	updated        time.Time
 }
 
 var (
@@ -93,7 +99,7 @@ func NewSessionManager() *SessionManager {
 func NewSessionManagerWithLimits(maxSessions, maxPerUser int) *SessionManager {
 	return &SessionManager{
 		sessions:      make(map[uint32]*model.Session),
-		voiceReplay:   make(map[uint32]*protocol.ReplayWindow),
+		voiceReplay:   make(map[uint32]*voiceReceiveState),
 		pendingByUser: make(map[int64]int),
 		maxSessions:   maxSessions,
 		maxPerUser:    maxPerUser,
@@ -403,7 +409,7 @@ func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAd
 	}
 	window := sm.voiceReplay[id]
 	if window == nil {
-		window = &protocol.ReplayWindow{}
+		window = &voiceReceiveState{}
 		sm.voiceReplay[id] = window
 	}
 	if !window.Accept(sequence) {
@@ -423,6 +429,32 @@ func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAd
 	}, true
 }
 
+// allowVoicePacket charges only authenticated, replay-accepted packets.
+func (sm *SessionManager) allowVoicePacket(id uint32, addr *net.UDPAddr, packetBytes int, now time.Time) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	session, state := sm.sessions[id], sm.voiceReplay[id]
+	if session == nil || state == nil || session.Muted || !udpAddrEqual(session.UDPAddr, addr) || packetBytes <= 0 {
+		return false
+	}
+	const byteBurst = voicePacketBurst * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
+	const bytesPerSecond = voicePacketsPerSecond * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
+	if state.updated.IsZero() {
+		state.packets, state.bytes, state.updated = voicePacketBurst, byteBurst, now
+	}
+	if elapsed := now.Sub(state.updated).Seconds(); elapsed > 0 {
+		state.packets = min(voicePacketBurst, state.packets+elapsed*voicePacketsPerSecond)
+		state.bytes = min(byteBurst, state.bytes+elapsed*bytesPerSecond)
+		state.updated = now
+	}
+	if state.packets < 1 || state.bytes < float64(packetBytes) {
+		return false
+	}
+	state.packets--
+	state.bytes -= float64(packetBytes)
+	return true
+}
+
 // RegisterUDPAddr authenticates and atomically updates a session's UDP endpoint.
 func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.VoiceRegistration, addr *net.UDPAddr, now time.Time, rebindInterval time.Duration) bool {
 	sm.mu.Lock()
@@ -434,23 +466,29 @@ func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.Voic
 	if registration.Counter <= s.VoiceRegistrationCounter {
 		return false
 	}
-	if s.UDPAddr != nil && !udpAddrEqual(s.UDPAddr, addr) && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
-		return false
+	if !udpAddrEqual(s.UDPAddr, addr) {
+		if s.UDPAddr != nil && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
+			return false
+		}
+		// Same-address registration refreshes must not postpone NAT rebinding.
+		s.VoiceEndpointUpdatedAt = now
 	}
 	s.UDPAddr = cloneUDPAddr(addr)
 	s.VoiceRegistrationCounter = registration.Counter
-	s.VoiceEndpointUpdatedAt = now
 	return true
 }
 
-// UpdateUserState updates muted/deafened for a session.
-func (sm *SessionManager) UpdateUserState(id uint32, muted, deafened bool) {
+// UpdateUserState reports whether muted/deafened changed for an existing session.
+func (sm *SessionManager) UpdateUserState(id uint32, muted, deafened bool) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if s, ok := sm.sessions[id]; ok {
-		s.Muted = muted
-		s.Deafened = deafened
+	s, ok := sm.sessions[id]
+	if !ok || (s.Muted == muted && s.Deafened == deafened) {
+		return false
 	}
+	s.Muted = muted
+	s.Deafened = deafened
+	return true
 }
 
 // SetChannel sets the channel ID for a session.

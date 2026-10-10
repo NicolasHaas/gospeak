@@ -85,9 +85,9 @@ func TestTLSConfigRejectsExpiredPinnedCertificate(t *testing.T) {
 	}
 }
 
-func TestCrossPlaneTLSSystemPKIUsesScreenHostnameVerification(t *testing.T) {
+func TestCrossPlaneTLSSystemPKIRequiresControlKey(t *testing.T) {
 	root, rootKey := newTestCertificate(t, nil, nil, true, "root", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-	controlLeaf, _ := newTestCertificate(t, root, rootKey, false, "server.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	controlLeaf, controlKey := newTestCertificate(t, root, rootKey, false, "server.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	screenLeaf, _ := newTestCertificate(t, root, rootKey, false, "server.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	roots := x509.NewCertPool()
 	roots.AddCert(root)
@@ -97,13 +97,50 @@ func TestCrossPlaneTLSSystemPKIUsesScreenHostnameVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.VerifyConnection(connectionState(screenLeaf, root)); err != nil {
-		t.Fatalf("screen VerifyConnection() = %v, want system-PKI certificate accepted", err)
+	var changed *ServerIdentityChangedError
+	if err := cfg.VerifyConnection(connectionState(screenLeaf, root)); !errors.As(err, &changed) {
+		t.Fatalf("screen VerifyConnection() = %v, want different PKI key rejected", err)
+	}
+	if err := cfg.VerifyConnection(connectionState(controlLeaf, root)); err != nil {
+		t.Fatalf("screen VerifyConnection() = %v, want control key accepted", err)
 	}
 
-	wrongHostLeaf, _ := newTestCertificate(t, root, rootKey, false, "other.test", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-	if err := cfg.VerifyConnection(connectionState(wrongHostLeaf, root)); err == nil {
-		t.Fatal("screen VerifyConnection() = nil, want hostname mismatch rejected")
+	for _, tc := range []struct {
+		name, certHost, dialHost   string
+		expired, untrusted, accept bool
+	}{
+		{"renewed same key", "server.test", "server.test", false, false, true},
+		{"advertised different host same key", "screen.test", "screen.test", false, false, true},
+		{"wrong hostname same key", "other.test", "server.test", false, false, false},
+		{"expired same key", "server.test", "server.test", true, false, false},
+		{"untrusted same key", "server.test", "server.test", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := *controlLeaf
+			template.DNSNames = []string{tc.certHost}
+			if tc.expired {
+				template.NotBefore, template.NotAfter = time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)
+			}
+			der, err := x509.CreateCertificate(rand.Reader, &template, root, &controlKey.PublicKey, rootKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaf, err := x509.ParseCertificate(der)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := roots
+			if tc.untrusted {
+				pool = x509.NewCertPool()
+			}
+			cfg, err := newTLSConfigWithTrust(tc.dialHost+":9603", trust, pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.VerifyConnection(connectionState(leaf, root)); (err == nil) != tc.accept {
+				t.Fatalf("VerifyConnection = %v, want acceptance %v", err, tc.accept)
+			}
+		})
 	}
 }
 

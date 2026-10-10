@@ -148,6 +148,9 @@ func sqliteConnectionDSN(dbPath string) (string, error) {
 	query.Del("_pragma")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
+	// Transactions may read before writing: acquire the WAL writer before
+	// taking a snapshot, rather than failing its later upgrade with BUSY_SNAPSHOT.
+	query.Set("_txlock", "immediate")
 	return base + "?" + query.Encode(), nil
 }
 
@@ -503,6 +506,12 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: `CREATE TRIGGER IF NOT EXISTS require_message_channel BEFORE INSERT ON messages
 					WHEN NOT EXISTS (SELECT 1 FROM channels WHERE id = NEW.channel_id)
 					BEGIN SELECT RAISE(ABORT, 'message channel missing'); END`},
+			},
+		},
+		{
+			version: 12,
+			steps: []migrationStep{
+				{statement: "CREATE INDEX IF NOT EXISTS idx_tokens_created_by_kind ON tokens(created_by, kind)"},
 			},
 		},
 	}
@@ -1259,7 +1268,7 @@ func (s *baseProvider) IsUserBanned(userID int64) (bool, error) {
 	var count int
 
 	err := s.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM bans WHERE user_id = ? AND (expires_at IS NULL OR expires_at > datetime('now'))",
+		"SELECT COUNT(*) FROM bans WHERE user_id = ? AND user_id > 0 AND (expires_at IS NULL OR expires_at > datetime('now'))",
 		userID).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("datastore: check ban: %w", err)

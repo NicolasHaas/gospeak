@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
@@ -140,6 +141,28 @@ func WriteControlMessage(w io.Writer, msg *pb.ControlMessage) error {
 func ReadControlMessage(r io.Reader) (*pb.ControlMessage, error) {
 	msg, _, err := ReadControlMessageWithSize(r)
 	return msg, err
+}
+
+// ReadControlMessageWithFrameDeadline preserves the caller's idle deadline until
+// the first byte, then allows five seconds to finish the entire frame. Callers
+// with a stricter total deadline (such as authentication) use the plain reader.
+// The completion deadline is cleared before returning a complete message.
+func ReadControlMessageWithFrameDeadline(r io.Reader, setDeadline func(time.Time) error) (*pb.ControlMessage, int, error) {
+	var first [1]byte
+	if _, err := io.ReadFull(r, first[:]); err != nil {
+		return nil, 0, fmt.Errorf("protocol: read length: %w", err)
+	}
+	if err := setDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return nil, 0, fmt.Errorf("protocol: set frame deadline: %w", err)
+	}
+	msg, size, err := ReadControlMessageWithSize(io.MultiReader(bytes.NewReader(first[:]), r))
+	if err != nil {
+		return nil, size, err
+	}
+	if err := setDeadline(time.Time{}); err != nil {
+		return nil, size, fmt.Errorf("protocol: clear frame deadline: %w", err)
+	}
+	return msg, size, nil
 }
 
 // ReadControlMessageWithSize reads a control message and reports its encoded

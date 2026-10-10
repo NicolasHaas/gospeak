@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -560,9 +561,11 @@ func (ch *ControlHandler) clientsForIP(ip string) map[uint32]*controlClient {
 }
 
 func sendAndCloseClients(clients map[uint32]*controlClient, msg *pb.ControlMessage) {
+	var closing sync.WaitGroup
 	for _, client := range clients {
-		client.sendAndClose(msg)
+		closing.Go(func() { client.sendAndClose(msg) })
 	}
+	closing.Wait()
 }
 
 // broadcastToChannel sends a control message to all sessions in a channel.
@@ -634,15 +637,9 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 
 	if !s.startWorker(func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := s.acceptConn(ln, preAuthControl)
 			if err != nil {
-				select {
-				case <-s.ctx.Done():
-					return
-				default:
-					slog.Error("accept error", "err", err)
-					continue
-				}
+				return
 			}
 			if !s.admitPreAuthConn(conn, preAuthControl) {
 				continue
@@ -1205,12 +1202,13 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		default:
 		}
 
-		// A fixed deadline covers the entire frame; partial reads do not renew it.
+		// Silence keeps the idle horizon; the first byte starts a short,
+		// fixed completion deadline that trickled bytes cannot renew.
 		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Minute)); err != nil {
 			return
 		}
 		reader := io.LimitedReader{R: conn, N: protocol.MaxControlMessage + 4}
-		msg, payloadBytes, err := protocol.ReadControlMessageWithSize(&reader)
+		msg, payloadBytes, err := protocol.ReadControlMessageWithFrameDeadline(&reader, conn.SetReadDeadline)
 		if err != nil {
 			// Only silence is normal idle expiry; an unfinished frame is invalid.
 			if errors.Is(err, os.ErrDeadlineExceeded) && reader.N == protocol.MaxControlMessage+4 {
@@ -1471,7 +1469,9 @@ func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Co
 }
 
 func (s *Server) handleUserState(handler *ControlHandler, sessionID uint32, upd *pb.UserStateUpdate, st datastore.DataProviderFactory) {
-	s.sessions.UpdateUserState(sessionID, upd.Muted, upd.Deafened)
+	if !s.sessions.UpdateUserState(sessionID, upd.Muted, upd.Deafened) {
+		return
+	}
 
 	// Broadcast updated server state to all clients
 	s.broadcastServerState(st, handler)
@@ -2157,12 +2157,18 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 		return
 	}
 
-	_ = writeControlMessage(conn, &pb.ControlMessage{
+	response := &pb.ControlMessage{
 		ExportDataResp: &pb.ExportDataResponse{
 			Type: req.Type,
 			Data: string(data),
 		},
-	})
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil || len(encoded) > protocol.MaxControlMessage {
+		sendError(conn, 31, "export too large")
+		return
+	}
+	_ = writeControlMessage(conn, response)
 }
 
 func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRequest, st datastore.DataProviderFactory, conn net.Conn, handler *ControlHandler) {

@@ -271,6 +271,7 @@ func TestChatStorageMigratesExistingMessages(t *testing.T) {
 	_, err = raw.ExecContext(context.Background(), `
 		CREATE TABLE schema_migrations (version INTEGER NOT NULL);
 		INSERT INTO schema_migrations VALUES (10);
+		CREATE TABLE tokens (id INTEGER PRIMARY KEY, created_by INTEGER NOT NULL, kind INTEGER NOT NULL);
 		CREATE TABLE channels (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
 			sender_id INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
