@@ -72,7 +72,18 @@ func (c *ControlClient) SetEventHandler(handler EventHandler) {
 func (c *ControlClient) Send(msg *pb.ControlMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return protocol.WriteControlMessage(c.conn, msg)
+	if err := c.conn.SetWriteDeadline(time.Now().Add(connectTimeout)); err != nil {
+		return fmt.Errorf("client: set control write deadline: %w", err)
+	}
+	writeErr := protocol.WriteControlMessage(c.conn, msg)
+	clearErr := c.conn.SetWriteDeadline(time.Time{})
+	if writeErr != nil {
+		return writeErr
+	}
+	if clearErr != nil {
+		return fmt.Errorf("client: clear control write deadline: %w", clearErr)
+	}
+	return nil
 }
 
 // Authenticate sends an auth request and returns the auth response.
