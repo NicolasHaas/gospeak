@@ -40,6 +40,8 @@ type tlsCertificateSource struct {
 	cert      *tls.Certificate
 	leaf      *x509.Certificate
 	load      func(Config, time.Time) (tls.Certificate, error)
+	retryAt   time.Time
+	renewErr  error
 }
 
 func newServerTLSConfig(cfg Config) (*tls.Config, error) {
@@ -87,10 +89,17 @@ func (s *tlsCertificateSource) getCertificateAt(now time.Time) (*tls.Certificate
 	if s.leaf.NotAfter.After(now.Add(automaticCertRenewBefore)) {
 		return s.cert, nil
 	}
-	cert, err := s.load(s.cfg, now)
+	cert, err := tls.Certificate{}, s.renewErr
+	if !now.Before(s.retryAt) {
+		cert, err = s.load(s.cfg, now)
+		if err != nil {
+			s.retryAt = now.Add(time.Minute)
+			s.renewErr = err
+			slog.Warn("automatic TLS certificate renewal failed", "err", err, "expires", s.leaf.NotAfter)
+		}
+	}
 	if err != nil {
 		if _, validityErr := validCertificateLeaf(*s.cert, now); validityErr == nil {
-			slog.Warn("automatic TLS certificate renewal failed; continuing with valid cached certificate", "err", err, "expires", s.leaf.NotAfter)
 			return s.cert, nil
 		}
 		return nil, fmt.Errorf("renew automatic TLS certificate after cached certificate became invalid: %w", err)
