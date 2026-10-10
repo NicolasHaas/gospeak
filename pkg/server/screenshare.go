@@ -70,9 +70,7 @@ func (m *ScreenShareManager) Start(channelID int64, sessionID uint32, userID int
 	if err != nil {
 		return nil, fmt.Errorf("initialize screen share cipher: %w", err)
 	}
-	if active, ok := m.activeByChannel[channelID]; ok && active.SessionID == sessionID {
-		m.stopBySessionLocked(sessionID)
-	}
+	m.stopBySessionLocked(sessionID)
 
 	event := &pb.ScreenShareEvent{
 		ChannelID:     channelID,
