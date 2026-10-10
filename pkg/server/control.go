@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2160,12 +2161,18 @@ func (s *Server) handleExportData(sessionID uint32, req *pb.ExportDataRequest, s
 		return
 	}
 
-	_ = writeControlMessage(conn, &pb.ControlMessage{
+	response := &pb.ControlMessage{
 		ExportDataResp: &pb.ExportDataResponse{
 			Type: req.Type,
 			Data: string(data),
 		},
-	})
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil || len(encoded) > protocol.MaxControlMessage {
+		sendError(conn, 31, "export too large")
+		return
+	}
+	_ = writeControlMessage(conn, response)
 }
 
 func (s *Server) handleImportChannels(sessionID uint32, req *pb.ImportChannelsRequest, st datastore.DataProviderFactory, conn net.Conn, handler *ControlHandler) {
