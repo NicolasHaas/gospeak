@@ -508,6 +508,12 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 					BEGIN SELECT RAISE(ABORT, 'message channel missing'); END`},
 			},
 		},
+		{
+			version: 12,
+			steps: []migrationStep{
+				{statement: "CREATE INDEX IF NOT EXISTS idx_tokens_created_by_kind ON tokens(created_by, kind)"},
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -1262,7 +1268,7 @@ func (s *baseProvider) IsUserBanned(userID int64) (bool, error) {
 	var count int
 
 	err := s.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM bans WHERE user_id = ? AND (expires_at IS NULL OR expires_at > datetime('now'))",
+		"SELECT COUNT(*) FROM bans WHERE user_id = ? AND user_id > 0 AND (expires_at IS NULL OR expires_at > datetime('now'))",
 		userID).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("datastore: check ban: %w", err)
