@@ -561,9 +561,11 @@ func (ch *ControlHandler) clientsForIP(ip string) map[uint32]*controlClient {
 }
 
 func sendAndCloseClients(clients map[uint32]*controlClient, msg *pb.ControlMessage) {
+	var closing sync.WaitGroup
 	for _, client := range clients {
-		client.sendAndClose(msg)
+		closing.Go(func() { client.sendAndClose(msg) })
 	}
+	closing.Wait()
 }
 
 // broadcastToChannel sends a control message to all sessions in a channel.
