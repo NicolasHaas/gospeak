@@ -635,15 +635,9 @@ func (s *Server) StartControl(st datastore.DataProviderFactory) error {
 
 	if !s.startWorker(func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := s.acceptConn(ln, preAuthControl)
 			if err != nil {
-				select {
-				case <-s.ctx.Done():
-					return
-				default:
-					slog.Error("accept error", "err", err)
-					continue
-				}
+				return
 			}
 			if !s.admitPreAuthConn(conn, preAuthControl) {
 				continue

@@ -48,15 +48,9 @@ func (s *Server) StartScreen() error {
 
 	if !s.startWorker(func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := s.acceptConn(ln, preAuthScreen)
 			if err != nil {
-				select {
-				case <-s.ctx.Done():
-					return
-				default:
-					slog.Error("screen accept error", "err", err)
-					continue
-				}
+				return
 			}
 			if !s.admitPreAuthConn(conn, preAuthScreen) {
 				continue
