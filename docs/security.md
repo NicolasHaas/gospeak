@@ -53,7 +53,7 @@ graph TB
 ## Control Plane Security (TLS 1.3)
 
 - The control plane uses **TLS 1.3** (the latest version) for all TCP connections
-- Updated clients send a control Ping every 60 seconds. The server closes authenticated control connections after five minutes without a complete valid message; partial frames do not extend that deadline. Older clients that remain silent on the control plane must reconnect, even if they are still sending voice packets.
+- Clients send a control Ping every 60 seconds. The server closes authenticated control connections after five minutes without a complete valid message; voice and screen traffic do not renew this idle deadline. After authentication, both client and server allow five seconds to finish a control frame after its first plaintext byte arrives. Partial traffic does not extend the completion deadline.
 - On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
 - The automatic certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
 - The first new TLS connection within 30 days of expiry renews it, even if the server has stayed up continuously. Renewal keeps the existing private key, so saved TOFU fingerprints remain valid. If renewal fails while the cached certificate is still valid, GoSpeak serves that certificate and retries on a later connection; it fails closed after expiry
@@ -75,7 +75,7 @@ tlsCfg := &tls.Config{
 }
 ```
 
-The client uses `VerifyConnection` as the mandatory verification path. Public certificates are checked against the operating-system roots and requested hostname. For a saved self-signed server, the callback compares the peer's SHA-256 SPKI fingerprint to the stored pin and also rejects certificates outside their validity period. `InsecureSkipVerify` is set only to delegate the built-in verification to that non-optional callback; it never means unconditional acceptance.
+The client uses `VerifyConnection` as the mandatory verification path. Public certificates are checked against the operating-system roots and requested hostname. Screen connections also require the same SHA-256 SPKI fingerprint as the authenticated control connection, including in system-PKI mode. Control and screen TLS endpoints must use the same public key. For a saved self-signed server, the callback compares the peer's SHA-256 SPKI fingerprint to the stored pin and also rejects certificates outside their validity period. `InsecureSkipVerify` is set only to delegate the built-in verification to that non-optional callback; it never means unconditional acceptance.
 
 ### Self-Signed Upgrade and Recovery
 
@@ -109,6 +109,10 @@ sequenceDiagram
 The shared media key does not authorize a UDP source address. Each control session receives a separate random 256-bit registration key in `AuthResponse`, protected by TLS. The client sends an HMAC-SHA-256 registration proof immediately and every five seconds. A monotonic 64-bit counter makes accepted proofs one-use, and the server rate-limits authenticated endpoint changes to one per five seconds. Ordinary voice packets never establish or change the endpoint.
 
 This prevents another client from binding a victim's visible session ID to the attacker's UDP address. It does not prevent an on-path attacker from dropping UDP traffic, and it does not add NAT traversal: connectivity remains direct UDP with no STUN or TURN service.
+
+### Voice forwarding limits
+
+Each session has packet and byte budgets for authenticated, replay-accepted voice traffic. The packet budget refills at 50 packets per second and holds a burst of 100 packets. The byte budget refills at 50 times the maximum voice packet size per second and holds 100 times that size; it counts the voice header and encrypted payload. Packets that exceed either budget are dropped before forwarding. These limits bound per-session forwarding, not aggregate bandwidth or packet-authentication CPU.
 
 ### Encryption Process
 

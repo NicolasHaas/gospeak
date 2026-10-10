@@ -332,6 +332,12 @@ func (f *defaultDecoderFactory) NewDecoder() (audio.AudioDecoder, error) {
 
 // Connect authenticates to the server and starts audio/voice pipelines.
 func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin string) error {
+	return e.ConnectWithAutoToken(controlAddr, voiceAddr, token, username, serverPin, e.OnAutoToken)
+}
+
+// ConnectWithAutoToken binds credential delivery to this connection attempt.
+// The callback runs on the same ordered queue as the other engine events.
+func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, serverPin string, onAutoToken func(string)) error {
 	e.lifecycleMu.Lock()
 
 	e.mu.Lock()
@@ -509,7 +515,7 @@ func (e *Engine) Connect(controlAddr, voiceAddr, token, username, serverPin stri
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
-	if callback := e.OnAutoToken; authResp.AutoToken != "" && callback != nil {
+	if callback := onAutoToken; authResp.AutoToken != "" && callback != nil {
 		e.invokeGenerationCallback(g, func() { callback(authResp.AutoToken) })
 	}
 
@@ -1983,6 +1989,14 @@ func (e *Engine) Unban(banID int64) error {
 
 // Disconnect disconnects from the server.
 func (e *Engine) Disconnect() {
+	if done := e.DisconnectAsync(); done != nil {
+		<-done
+	}
+}
+
+// DisconnectAsync cancels the current generation without waiting for native
+// workers. Its completion channel is nil when there is no generation to stop.
+func (e *Engine) DisconnectAsync() <-chan struct{} {
 	e.mu.RLock()
 	g := e.generation
 	if g == nil {
@@ -1991,8 +2005,9 @@ func (e *Engine) Disconnect() {
 	e.mu.RUnlock()
 	if g != nil {
 		e.requestDisconnect(g, "user disconnected")
-		<-g.done
+		return g.done
 	}
+	return nil
 }
 
 // GetState returns the current connection state.
@@ -2256,13 +2271,32 @@ func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) 
 
 func (e *Engine) handleScreenPacketGeneration(g *connectionGeneration, pkt *protocol.ScreenPacket) {
 	e.callbackMu.Lock()
-	defer e.callbackMu.Unlock()
 	e.mu.RLock()
 	current := e.generation == g && e.state == StateConnected
 	e.mu.RUnlock()
-	if current {
-		e.handleScreenPacket(g, pkt)
+	if !current {
+		e.callbackMu.Unlock()
+		return
 	}
+	frameData, ok := e.decryptScreenPacket(pkt)
+	e.screenMu.Lock()
+	cipher, share := e.screenCipher, e.activeScreenShare
+	e.screenMu.Unlock()
+	e.callbackMu.Unlock()
+	if !ok {
+		return
+	}
+	frame, err := protocol.UnmarshalScreenFrame(frameData)
+	if err != nil {
+		slog.Debug("screen frame unmarshal error", "err", err)
+		return
+	}
+	img, err := decodeScreenImage(frame)
+	if err != nil {
+		slog.Debug("screen frame decode error", "err", err)
+		return
+	}
+	e.publishDecodedScreenFrame(g, cipher, share, img)
 }
 
 func (e *Engine) decryptScreenPacket(pkt *protocol.ScreenPacket) ([]byte, bool) {
@@ -2284,19 +2318,16 @@ func (e *Engine) decryptScreenPacket(pkt *protocol.ScreenPacket) ([]byte, bool) 
 	return frameData, true
 }
 
-func (e *Engine) handleScreenPacket(g *connectionGeneration, pkt *protocol.ScreenPacket) {
-	frameData, ok := e.decryptScreenPacket(pkt)
-	if !ok {
-		return
-	}
-	frame, err := protocol.UnmarshalScreenFrame(frameData)
-	if err != nil {
-		slog.Debug("screen frame unmarshal error", "err", err)
-		return
-	}
-	img, err := decodeScreenImage(frame)
-	if err != nil {
-		slog.Debug("screen frame decode error", "err", err)
+func (e *Engine) publishDecodedScreenFrame(g *connectionGeneration, cipher *gospeakCrypto.VoiceCipher, share *pb.ScreenShareEvent, img image.Image) {
+	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	e.mu.RLock()
+	current := e.generation == g && e.state == StateConnected
+	e.mu.RUnlock()
+	e.screenMu.Lock()
+	authorized := e.screenCipher == cipher && e.activeScreenShare == share && share != nil && share.Active
+	e.screenMu.Unlock()
+	if !current || !authorized {
 		return
 	}
 	if callback := e.OnScreenFrame; callback != nil {
