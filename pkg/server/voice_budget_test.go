@@ -24,7 +24,9 @@ func TestAuthenticatedVoiceBudgetBoundsBurst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !srv.handleVoiceRegistration(registration, remote, time.Now()) {
+	now := time.Unix(1000, 0)
+	// The verified registration consumes one packet token from the burst.
+	if !srv.handleVoiceRegistration(registration, remote, now) {
 		t.Fatal("registration failed")
 	}
 	srv.channels.Join(session.ID, 7)
@@ -34,24 +36,25 @@ func TestAuthenticatedVoiceBudgetBoundsBurst(t *testing.T) {
 		pkt.Payload = cipher.Encrypt(pkt.SessionID, pkt.SeqNum, pkt.MarshalHeader(), []byte("opus"))
 		return pkt
 	}
-	now := time.Unix(1000, 0)
+	stateBefore := len(srv.sessions.voiceReplay)
 	forged := packet(777)
 	forged.Payload[0] ^= 0xff
-	if _, ok := srv.acceptVoicePacketAt(forged, remote, now); ok || len(srv.sessions.voiceReplay) != 0 {
+	if _, ok := srv.acceptVoicePacketAt(forged, remote, now); ok || len(srv.sessions.voiceReplay) != stateBefore {
 		t.Fatal("forged packet created pacing/replay state")
 	}
-	for sequence := uint32(1); sequence <= 100; sequence++ {
+	// One burst token was spent on registration: 99 remain at this instant.
+	for sequence := uint32(1); sequence <= 99; sequence++ {
 		if _, ok := srv.acceptVoicePacketAt(packet(sequence), remote, now); !ok {
 			t.Fatalf("bounded burst rejected packet %d", sequence)
 		}
 	}
-	if _, ok := srv.acceptVoicePacketAt(packet(101), remote, now); ok {
+	if _, ok := srv.acceptVoicePacketAt(packet(100), remote, now); ok {
 		t.Fatal("unbounded authenticated burst accepted")
 	}
-	if _, ok := srv.acceptVoicePacketAt(packet(101), remote, now.Add(20*time.Millisecond)); ok {
+	if _, ok := srv.acceptVoicePacketAt(packet(100), remote, now.Add(20*time.Millisecond)); ok {
 		t.Fatal("rate-rejected authenticated sequence replayed after refill")
 	}
-	for sequence := uint32(102); sequence <= 202; sequence++ {
+	for sequence := uint32(101); sequence <= 201; sequence++ {
 		now = now.Add(20 * time.Millisecond)
 		if _, ok := srv.acceptVoicePacketAt(packet(sequence), remote, now); !ok {
 			t.Fatalf("normal 50Hz packet %d rejected", sequence)

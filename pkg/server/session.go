@@ -437,25 +437,12 @@ func (sm *SessionManager) allowVoicePacket(id uint32, addr *net.UDPAddr, packetB
 	if session == nil || state == nil || session.Muted || !udpAddrEqual(session.UDPAddr, addr) || packetBytes <= 0 {
 		return false
 	}
-	const byteBurst = voicePacketBurst * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
-	const bytesPerSecond = voicePacketsPerSecond * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
-	if state.updated.IsZero() {
-		state.packets, state.bytes, state.updated = voicePacketBurst, byteBurst, now
-	}
-	if elapsed := now.Sub(state.updated).Seconds(); elapsed > 0 {
-		state.packets = min(voicePacketBurst, state.packets+elapsed*voicePacketsPerSecond)
-		state.bytes = min(byteBurst, state.bytes+elapsed*bytesPerSecond)
-		state.updated = now
-	}
-	if state.packets < 1 || state.bytes < float64(packetBytes) {
-		return false
-	}
-	state.packets--
-	state.bytes -= float64(packetBytes)
-	return true
+	return state.charge(packetBytes, now)
 }
 
 // RegisterUDPAddr authenticates and atomically updates a session's UDP endpoint.
+// Verified registrations are charged to the session's voice packet budget so a
+// key holder cannot bypass packet pacing with a registration flood.
 func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.VoiceRegistration, addr *net.UDPAddr, now time.Time, rebindInterval time.Duration) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -466,15 +453,56 @@ func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.Voic
 	if registration.Counter <= s.VoiceRegistrationCounter {
 		return false
 	}
-	if !udpAddrEqual(s.UDPAddr, addr) {
+	rebound := !udpAddrEqual(s.UDPAddr, addr)
+	if rebound {
 		if s.UDPAddr != nil && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
 			return false
 		}
+	}
+	// Charge the session's voice packet budget after verification so a key
+	// holder cannot bypass packet pacing with a registration flood; forged or
+	// rejected registrations create no replay/budget state. The charge runs
+	// before any mutation, so a budget-refused rebind consumes no rebind
+	// headroom.
+	if !sm.chargeRegistrationToken(id, now) {
+		return false
+	}
+	if rebound {
 		// Same-address registration refreshes must not postpone NAT rebinding.
 		s.VoiceEndpointUpdatedAt = now
 	}
 	s.UDPAddr = cloneUDPAddr(addr)
 	s.VoiceRegistrationCounter = registration.Counter
+	return true
+}
+
+func (sm *SessionManager) chargeRegistrationToken(id uint32, now time.Time) bool {
+	state := sm.voiceReplay[id]
+	if state == nil {
+		state = &voiceReceiveState{}
+		sm.voiceReplay[id] = state
+	}
+	return state.charge(protocol.VoiceHeaderSize+protocol.MaxVoicePayload, now)
+}
+
+// charge consumes one packet token and its bytes from the shared voice-plane
+// budget, refilling at the legal 50 Hz rate up to the burst bound.
+func (state *voiceReceiveState) charge(packetBytes int, now time.Time) bool {
+	const packetBudgetBytes = voicePacketBurst * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
+	const budgetBytesPerSecond = voicePacketsPerSecond * (protocol.VoiceHeaderSize + protocol.MaxVoicePayload)
+	if state.updated.IsZero() {
+		state.packets, state.bytes, state.updated = voicePacketBurst, packetBudgetBytes, now
+	}
+	if elapsed := now.Sub(state.updated).Seconds(); elapsed > 0 {
+		state.packets = min(voicePacketBurst, state.packets+elapsed*voicePacketsPerSecond)
+		state.bytes = min(float64(packetBudgetBytes), state.bytes+elapsed*budgetBytesPerSecond)
+		state.updated = now
+	}
+	if state.packets < 1 || state.bytes < float64(packetBytes) {
+		return false
+	}
+	state.packets--
+	state.bytes -= float64(packetBytes)
 	return true
 }
 
