@@ -71,7 +71,7 @@ is never written to normal logs.
 
 ```bash
 # Extract binaries from container build
-docker compose --profile build run builder
+docker compose --profile build run --build builder
 
 # Run server
 ./bin/gospeak-server -open -screen-share   # -open allows token-less connections
