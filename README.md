@@ -24,6 +24,21 @@ GoSpeak uses a client-server SFU model, not peer-to-peer connections. TLS handle
 
 > **Note:** The server generates the media encryption keys and distributes them to clients over authenticated TLS. It verifies incoming media packets and forwards their original ciphertext without decoding the audio or images. This protects traffic in transit, but it is not end-to-end encryption: a compromised server could decrypt the media. So host your own within a community you trust! See the [security threat model](docs/security.md).
 
+## Screenshots
+
+![GoSpeak desktop client with Lobby chat, connected users and voice controls](docs/images/client.png)
+
+<details>
+<summary>Full monitoring dashboard screenshots</summary>
+
+![GoSpeak Grafana dashboard with connections, authentication, voice traffic and chat activity](docs/images/monitoring.png)
+
+![Screen-sharing activity, pre-authentication capacity, authentication and account-provisioning budgets, and rejection counters](docs/images/capacity.png)
+
+![Authenticated-session utilization and control-message budget usage and configuration](docs/images/control-budgets.png)
+
+</details>
+
 ## Quick Start
 
 ### Run the Server (Container)
