@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -12,6 +13,9 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/client"
 	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
+
+// maxChatTombstones bounds deletion markers retained for the selected channel.
+const maxChatTombstones = 1000
 
 func (a *App) startChatLoading() {
 	if a.chatTimer != nil {
@@ -169,6 +173,20 @@ func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
 func (a *App) removeChatMessage(event pb.ChatDeleteEvent) {
 	if event.ChannelID != a.chatChannelID {
 		return
+	}
+	// ponytail: keep tombstones for the newest 1000 IDs; a full reset-and-refill
+	// only at the boundary keeps the map bounded against hostile delete floods
+	// while older tombstones (already invisible under the 500-row view) expire.
+	if len(a.chatDeleted) >= maxChatTombstones {
+		ids := make([]int64, 0, len(a.chatDeleted))
+		for id := range a.chatDeleted {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		clear(a.chatDeleted)
+		for _, id := range ids[len(ids)-maxChatTombstones+1:] {
+			a.chatDeleted[id] = true
+		}
 	}
 	a.chatDeleted[event.MessageID] = true
 	for i, row := range a.chatRows {
