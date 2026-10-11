@@ -49,15 +49,19 @@ func TestAuthRateLimiterPrunesExpiredEntriesAndStaysBounded(t *testing.T) {
 		}
 		limiter.RecordFailure(key)
 	}
-	if limiter.Allow("192.0.2.3") {
-		t.Fatal("Allow at entry capacity = true, want false")
+	// At capacity with only idle unexpired entries, a fresh source is still
+	// admitted: the soonest-expiring idle entry is evicted rather than locking
+	// out new sources for the rest of the window (rotation-flood defense).
+	if !limiter.Allow("192.0.2.3") {
+		t.Fatal("fresh source rejected at idle entry capacity")
 	}
 	if got := len(limiter.entries); got != 2 {
 		t.Fatalf("entry count = %d, want 2", got)
 	}
 
+	limiter.RecordFailure("192.0.2.3")
 	now = now.Add(time.Minute + time.Nanosecond)
-	if !limiter.Allow("192.0.2.3") {
+	if !limiter.Allow("192.0.2.4") {
 		t.Fatal("Allow after entries expired = false, want true")
 	}
 	if got := len(limiter.entries); got != 1 {
