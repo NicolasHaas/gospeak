@@ -11,6 +11,7 @@ import (
 
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
+	"github.com/NicolasHaas/gospeak/pkg/version"
 )
 
 const metricsShutdownTimeout = 5 * time.Second
@@ -123,6 +124,7 @@ func (s *Server) Run() error {
 
 func (s *Server) runningLogArgs() []any {
 	args := []any{
+		"version", version.String(),
 		"control", s.cfg.ControlAddr,
 		"voice", s.cfg.VoiceAddr,
 	}
