@@ -70,9 +70,9 @@ Very rough math (assume ~64 kbps per audio stream including overhead):
 
 12h/day usage estimates (simple model, not a guarantee):
 
-- 10 active users, 1-2 speakers: ~0.6-1.3 Mbps => ~1.9-4.2 TB/month
-- 50 active users, 3-5 speakers: ~3.0-5.0 Mbps => ~9.7-16.2 TB/month
-- 100 active users, 5-10 speakers: ~6.0-10.0 Mbps => ~19.4-32.4 TB/month
+- 10 active users, 1-2 speakers: ~0.6-1.3 Mbps => ~0.1-0.2 TB/month
+- 50 active users, 3-5 speakers: ~9.6-16.0 Mbps => ~1.6-2.6 TB/month
+- 100 active users, 5-10 speakers: ~32.0-64.0 Mbps => ~5.2-10.4 TB/month
 
 You should be able to handle around 100 active users at ~12h/day in common cases.
 
@@ -99,6 +99,9 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
 | `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
+| `-media-cipher` | `aes128` | Voice and screen AEAD: `aes128`, `aes256`, or `chacha20` |
+| `-chat-history-limit` | `500` | Messages retained per channel (`0` disables persistence, 1..10000 retains history) |
+| `-chat-max-age` | `720h` | Maximum message age (`0` disables expiry) |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |

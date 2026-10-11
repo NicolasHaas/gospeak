@@ -7,7 +7,8 @@
 
 services:
   prometheus:
-    image: prom/prometheus:latest
+    # v3.15.0 pinned by digest; bump deliberately after reviewing upstream changes.
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     container_name: gospeak-prometheus
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -15,7 +16,8 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    # 13.2.3 pinned by digest; bump deliberately after reviewing upstream changes.
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     container_name: gospeak-grafana
     ports:
       - "127.0.0.1:3000:3000"

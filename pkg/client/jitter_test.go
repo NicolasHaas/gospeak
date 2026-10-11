@@ -80,6 +80,20 @@ func TestJitterBufferHandlesSequenceWrap(t *testing.T) {
 	assertJitterFrame(t, jb, 0, []byte("zero"))
 }
 
+func TestJitterBufferBoundsDescendingPreflood(t *testing.T) {
+	clock := &fakeJitterClock{now: time.Unix(0, 0)}
+	jb := newTestJitterBuffer(clock)
+
+	// A strictly descending run before the first Pop must not grow the map
+	// beyond the frame bound; only bounded reorder may move the cursor back.
+	for seq := uint32(2000); seq >= uint32(2000)-50; seq-- {
+		jb.Push(seq, []byte("flood"))
+		if got := jb.buffered(); got > maxJitterFrames {
+			t.Fatalf("buffered frames after descending push %d = %d, want at most %d", seq, got, maxJitterFrames)
+		}
+	}
+}
+
 func TestJitterBufferBoundsAndResyncsLargeJump(t *testing.T) {
 	clock := &fakeJitterClock{now: time.Unix(0, 0)}
 	jb := newTestJitterBuffer(clock)

@@ -69,11 +69,14 @@ func (jb *JitterBuffer) Push(seqNum uint32, payload []byte) {
 	distance := seqNum - jb.nextSeq
 	switch {
 	case sequenceBefore(seqNum, jb.nextSeq):
-		if jb.started || uint32(jb.nextSeq-seqNum) >= jb.maxFrames {
+		backwards := uint32(jb.nextSeq - seqNum)
+		if jb.started || backwards >= jb.maxFrames || len(jb.frames) >= int(jb.maxFrames) {
 			return
 		}
 		// Before playout starts, permit a bounded packet to move the initial
-		// cursor backwards. This is the normal N+1-before-N reorder case.
+		// cursor backwards. This is the normal N+1-before-N reorder case. The
+		// map-size bound keeps a descending sequence flood from growing the
+		// buffer past the frame bound before the first playout tick.
 		jb.nextSeq = seqNum
 	case distance >= jb.maxFrames:
 		jb.startAt(seqNum, now)

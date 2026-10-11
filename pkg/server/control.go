@@ -319,7 +319,24 @@ func (rl *authRateLimiter) allowWithDetailsLocked(key string) (allowed bool, rea
 				}
 			}
 			if len(rl.entries) >= rl.maxEntries {
-				return false, "tracker_capacity", len(rl.entries), rl.maxEntries
+				// The tracker is full of live entries. Evict the idle entry
+				// that expires soonest so a rotating source flood cannot pin
+				// all slots and lock out fresh legitimate sources for a whole
+				// window; concurrent reservations remain bounded by pre-auth
+				// admission, so in-flight entries still form the hard ceiling.
+				victimKey := ""
+				var victimReset time.Time
+				for entryKey, candidate := range rl.entries {
+					if candidate.inFlight == 0 && (victimKey == "" || candidate.resetAt.Before(victimReset)) {
+						victimKey, victimReset = entryKey, candidate.resetAt
+					}
+				}
+				if victimKey != "" {
+					delete(rl.entries, victimKey)
+				}
+				if len(rl.entries) >= rl.maxEntries {
+					return false, "tracker_capacity", len(rl.entries), rl.maxEntries
+				}
 			}
 		}
 		entry = &authEntry{resetAt: now.Add(rl.window)}

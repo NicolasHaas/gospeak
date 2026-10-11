@@ -172,6 +172,10 @@ COPY --from=builder /out/gospeak-client-lin /out/
 # ============================================================
 FROM scratch AS server
 
+LABEL org.opencontainers.image.source="https://github.com/NicolasHaas/gospeak" \
+      org.opencontainers.image.licenses="AGPL-3.0" \
+      org.opencontainers.image.description="GoSpeak server: privacy-focused voice communication SFU"
+
 COPY --from=builder /out/gospeak-server /gospeak-server
 
 EXPOSE 9600/tcp 9601/udp 9603/tcp

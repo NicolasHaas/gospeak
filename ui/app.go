@@ -104,6 +104,26 @@ type App struct {
 	connectAttempt  uint64 // UI-owned credential callback epoch
 	connectPending  bool
 	bookmarkLoadErr error
+
+	// errorDialog is the single reused modal for server errors; consecutive
+	// errors update its text instead of stacking dialogs.
+	errorDialog  *dialog.CustomDialog
+	errorLabel   *widget.Label
+	errorVisible bool
+}
+
+// showError surfaces an error, coalescing consecutive errors into one dialog.
+func (a *App) showError(err error) {
+	if a.errorVisible {
+		a.errorLabel.SetText(err.Error())
+		a.errorLabel.Refresh()
+		return
+	}
+	a.errorLabel = widget.NewLabel(err.Error())
+	a.errorDialog = dialog.NewCustom("Error", "OK", a.errorLabel, a.window)
+	a.errorDialog.SetOnClosed(func() { a.errorVisible = false })
+	a.errorVisible = true
+	a.errorDialog.Show()
 }
 
 // NewApp creates a new GoSpeak GUI application.
@@ -512,7 +532,7 @@ func (a *App) bindEvents() {
 
 	a.engine.OnError = func(err error) {
 		fyne.Do(func() {
-			dialog.ShowError(err, a.window)
+			a.showError(err)
 		})
 	}
 
