@@ -714,21 +714,24 @@ func (a *App) bindEvents() {
 
 func (a *App) autoTokenCallback(username string) func(string) {
 	attempt := a.connectAttempt
+	server, voice, save := a.connectServer, a.connectVoice, a.serverSaved
 	return func(token string) {
 		fyne.Do(func() {
-			if attempt != a.connectAttempt {
-				return
+			if attempt == a.connectAttempt {
+				a.connectToken = token
 			}
-			a.connectToken = token
 			saved := false
-			if a.serverSaved {
-				saved = a.saveCurrentBookmark(username) == nil
+			if save {
+				saved = a.saveBookmark(client.Bookmark{
+					Name: username + "@" + server, ControlAddr: server, VoiceAddr: voice,
+					Username: username, Token: token, LastUsed: time.Now().Unix(),
+				}) == nil
 			}
 
-			message := "The server generated a personal token for you.\n"
+			message := "Personal token for " + username + "@" + server + ".\n"
 			if saved {
 				message += "This server is saved, so the token is stored in your bookmark.\n"
-			} else if a.serverSaved {
+			} else if save {
 				message += "The token could not be saved. Copy it before closing this dialog.\n"
 			} else {
 				message += "Save this token or enable 'Save Server' to keep it.\n"
@@ -1984,7 +1987,7 @@ func (a *App) saveCurrentBookmark(username string) error {
 	if username != "" {
 		name = username + "@" + a.connectServer
 	}
-	a.bookmarks.Add(client.Bookmark{
+	return a.saveBookmark(client.Bookmark{
 		Name:        name,
 		ControlAddr: a.connectServer,
 		VoiceAddr:   a.connectVoice,
@@ -1992,6 +1995,10 @@ func (a *App) saveCurrentBookmark(username string) error {
 		Token:       a.connectToken,
 		LastUsed:    time.Now().Unix(),
 	})
+}
+
+func (a *App) saveBookmark(bookmark client.Bookmark) error {
+	a.bookmarks.Add(bookmark)
 	if err := a.bookmarks.Save(); err != nil {
 		dialog.ShowError(fmt.Errorf("save bookmark: %w", err), a.window)
 		return err

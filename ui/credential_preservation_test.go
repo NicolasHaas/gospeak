@@ -60,6 +60,12 @@ func TestAutoTokenOwnedByUIQueue(t *testing.T) {
 	if a.connectToken != "fixture-other" || a.bookmarks.FindByAddr(a.connectServer) != nil {
 		t.Fatal("stale callback changed replacement credentials")
 	}
+	if err := loaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if b := loaded.FindByAddr("example.test:9600"); b == nil || b.Username != "fixture-user" || b.Token != "fixture-stale" || b.VoiceAddr != "voice.test:9701" {
+		t.Fatal("canceled attempt lost the credential for its original account")
+	}
 	// Declining persistence still updates memory and displays the token.
 	a.serverSaved = false
 	a.autoTokenCallback("other-user")("fixture-unsaved")

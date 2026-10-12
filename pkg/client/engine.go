@@ -397,10 +397,22 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 		return fail(fmt.Errorf("connection canceled"))
 	}
 
+	// Reserve delivery before the server can commit a new personal credential.
+	// This event belongs to the attempt, not to its cancelable media generation.
+	tokenReady := make(chan string, 1)
+	defer close(tokenReady)
+	if onAutoToken != nil && !e.enqueueCallback(func() {
+		if personalToken := <-tokenReady; personalToken != "" {
+			onAutoToken(personalToken)
+		}
+	}, true) {
+		return fail(fmt.Errorf("personal credential callback queue is full; authentication not attempted"))
+	}
 	authResp, err := ctrl.Authenticate(token, username)
 	if err != nil {
 		return fail(err)
 	}
+	tokenReady <- authResp.AutoToken
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
@@ -523,10 +535,6 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
-	if callback := onAutoToken; authResp.AutoToken != "" && callback != nil {
-		e.invokeGenerationCallback(g, func() { callback(authResp.AutoToken) })
-	}
-
 	g.mu.Lock()
 	e.mu.RLock()
 	current = g.ctx.Err() == nil && e.generation == g && e.state == StateConnected
