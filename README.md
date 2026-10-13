@@ -1,5 +1,8 @@
 # GoSpeak
 
+[![GetMerged Scorecard](https://getmerged.abhishekco.de/api/badge/NicolasHaas/gospeak)](https://getmerged.abhishekco.de/NicolasHaas/gospeak)
+
+
 GoSpeak is a self-hosted voice server and desktop client inspired by TeamSpeak, with an emphasis on auditable code and minimal dependencies. It is written in Go, using the standard library where practical and native Opus and PortAudio through CGO for audio.
 
 GoSpeak uses a client-server SFU model, not peer-to-peer connections. TLS handles control and text chat, UDP carries encrypted voice through the server, and an optional TCP/TLS relay in the same server handles screen sharing. Clients send UDP to the server's known, reachable endpoint, so ordinary client NAT does not require STUN or TURN.
