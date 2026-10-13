@@ -110,7 +110,7 @@ runcmd:
   - [ systemctl, enable, --now, fail2ban ]
   - [ systemctl, enable, --now, dnf-automatic.timer ]
   - [ systemctl, daemon-reload ]
-  - [ systemctl, enable, --now, gospeak.service ]
+  - [ systemctl, start, gospeak.service ]
   - [ systemctl, enable, --now, podman-auto-update.timer ]
   - [ systemctl, enable, --now, podman-image-prune.timer ]
   - [ systemctl, restart, sshd ]

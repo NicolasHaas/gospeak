@@ -428,7 +428,20 @@ func (rl *accountProvisionLimiter) reserveWithDetailsLocked(key string) (reserve
 				}
 			}
 			if len(rl.entries) >= rl.maxEntries {
-				return false, "tracker_capacity", len(rl.entries), rl.maxEntries
+				// Match the auth tracker: only idle entries may yield their slot.
+				victimKey := ""
+				var victimReset time.Time
+				for entryKey, candidate := range rl.entries {
+					if candidate.inFlight == 0 && (victimKey == "" || candidate.resetAt.Before(victimReset)) {
+						victimKey, victimReset = entryKey, candidate.resetAt
+					}
+				}
+				if victimKey != "" {
+					delete(rl.entries, victimKey)
+				}
+				if len(rl.entries) >= rl.maxEntries {
+					return false, "tracker_capacity", len(rl.entries), rl.maxEntries
+				}
 			}
 		}
 		entry = &accountProvisionEntry{resetAt: now.Add(rl.window)}

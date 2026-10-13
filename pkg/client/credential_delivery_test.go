@@ -54,7 +54,7 @@ func TestConnectionBoundAutoTokenUsesOrderedCallbackQueue(t *testing.T) {
 	if err := e.ConnectWithAutoToken(listener.Addr().String(), "127.0.0.1:9601", "fixture-invite", "fixture-user", SPKIFingerprint(certificate.Certificate()), callback); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"connected", "fixture-personal"} {
+	for _, want := range []string{"fixture-personal", "connected"} {
 		select {
 		case got := <-events:
 			if got != want {

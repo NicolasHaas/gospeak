@@ -44,6 +44,12 @@ const (
 	callbackRMS callbackKind = iota
 	callbackVoiceActivity
 	callbackScreenFrame
+	callbackToken
+	callbackRole
+	callbackBans
+	callbackUnban
+	callbackExport
+	callbackImport
 )
 
 type latestCallbackKey struct {
@@ -100,27 +106,29 @@ type connectionGeneration struct {
 	wg     sync.WaitGroup
 	done   chan struct{}
 
-	disconnectOnce  sync.Once
-	terminalErrOnce sync.Once
-	doneOnce        sync.Once
-	mu              sync.Mutex
-	control         *ControlClient
-	voice           *VoiceClient
-	screen          *ScreenClient
-	cipher          *gospeakCrypto.VoiceCipher
-	audio           *audioResources
-	keepaliveNow    chan struct{}
-	pendingJoins    map[int64]uint32
+	disconnectOnce   sync.Once
+	terminalErrOnce  sync.Once
+	doneOnce         sync.Once
+	mu               sync.Mutex
+	control          *ControlClient
+	voice            *VoiceClient
+	screen           *ScreenClient
+	cipher           *gospeakCrypto.VoiceCipher
+	audio            *audioResources
+	keepaliveNow     chan struct{}
+	pendingJoins     map[int64]uint32
+	pendingResponses map[callbackKind]uint32
 }
 
 func newConnectionGeneration() *connectionGeneration {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connectionGeneration{
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan struct{}),
-		keepaliveNow: make(chan struct{}, 1),
-		pendingJoins: make(map[int64]uint32),
+		ctx:              ctx,
+		cancel:           cancel,
+		done:             make(chan struct{}),
+		keepaliveNow:     make(chan struct{}, 1),
+		pendingJoins:     make(map[int64]uint32),
+		pendingResponses: make(map[callbackKind]uint32),
 	}
 }
 
@@ -389,10 +397,22 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 		return fail(fmt.Errorf("connection canceled"))
 	}
 
+	// Reserve delivery before the server can commit a new personal credential.
+	// This event belongs to the attempt, not to its cancelable media generation.
+	tokenReady := make(chan string, 1)
+	defer close(tokenReady)
+	if onAutoToken != nil && !e.enqueueCallback(func() {
+		if personalToken := <-tokenReady; personalToken != "" {
+			onAutoToken(personalToken)
+		}
+	}, true) {
+		return fail(fmt.Errorf("personal credential callback queue is full; authentication not attempted"))
+	}
 	authResp, err := ctrl.Authenticate(token, username)
 	if err != nil {
 		return fail(err)
 	}
+	tokenReady <- authResp.AutoToken
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
@@ -515,10 +535,6 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 	if g.ctx.Err() != nil {
 		return fail(fmt.Errorf("connection canceled"))
 	}
-	if callback := onAutoToken; authResp.AutoToken != "" && callback != nil {
-		e.invokeGenerationCallback(g, func() { callback(authResp.AutoToken) })
-	}
-
 	g.mu.Lock()
 	e.mu.RLock()
 	current = g.ctx.Err() == nil && e.generation == g && e.state == StateConnected
@@ -1274,6 +1290,9 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		// Ping/pong handled silently
 
 	case msg.CreateTokenResp != nil:
+		if !g.consumeResponse(callbackToken) {
+			return
+		}
 		slog.Debug("token created")
 		if callback := e.OnTokenCreated; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.CreateTokenResp.Token) })
@@ -1302,11 +1321,17 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		e.handleScreenShareEvent(g, msg.ScreenShareEvent)
 
 	case msg.SetUserRoleResp != nil:
+		if !g.consumeResponse(callbackRole) {
+			return
+		}
 		if callback := e.OnRoleChanged; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.SetUserRoleResp.Success, msg.SetUserRoleResp.Message) })
 		}
 
 	case msg.ListBansResp != nil:
+		if !g.consumeResponse(callbackBans) {
+			return
+		}
 		if callback := e.OnBanList; callback != nil {
 			bans := append([]pb.BanInfo(nil), msg.ListBansResp.Bans...)
 			hasMore := msg.ListBansResp.HasMore
@@ -1314,16 +1339,25 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		}
 
 	case msg.UnbanResp != nil:
+		if !g.consumeResponse(callbackUnban) {
+			return
+		}
 		if callback := e.OnUnban; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.UnbanResp.Success) })
 		}
 
 	case msg.ExportDataResp != nil:
+		if !g.consumeResponse(callbackExport) {
+			return
+		}
 		if callback := e.OnExportData; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.ExportDataResp.Type, msg.ExportDataResp.Data) })
 		}
 
 	case msg.ImportChannelsResp != nil:
+		if !g.consumeResponse(callbackImport) {
+			return
+		}
 		if callback := e.OnImportResult; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() {
 				callback(msg.ImportChannelsResp.Success, msg.ImportChannelsResp.Message)
@@ -1338,6 +1372,33 @@ func (e *Engine) beginControlOperation() (*connectionGeneration, *ControlClient,
 		return nil, nil, false
 	}
 	return g, ctrl, true
+}
+
+func (g *connectionGeneration) consumeResponse(kind callbackKind) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	count := g.pendingResponses[kind]
+	if count <= 1 {
+		delete(g.pendingResponses, kind)
+	} else {
+		g.pendingResponses[kind] = count - 1
+	}
+	return count > 0 && g.ctx.Err() == nil
+}
+
+func (g *connectionGeneration) sendRequest(ctrl *ControlClient, kind callbackKind, msg *pb.ControlMessage) error {
+	g.mu.Lock()
+	if g.ctx.Err() != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("connection canceled")
+	}
+	g.pendingResponses[kind]++
+	g.mu.Unlock()
+	if err := ctrl.Send(msg); err != nil {
+		g.consumeResponse(kind)
+		return err
+	}
+	return nil
 }
 
 // JoinChannel sends a request to join a channel. Local channel state changes
@@ -1669,7 +1730,7 @@ func (e *Engine) ExportData(dataType string) error {
 	}
 	defer g.wg.Done()
 
-	return ctrl.Send(&pb.ControlMessage{
+	return g.sendRequest(ctrl, callbackExport, &pb.ControlMessage{
 		ExportDataReq: &pb.ExportDataRequest{Type: dataType},
 	})
 }
@@ -1682,7 +1743,7 @@ func (e *Engine) ImportChannels(yamlData string) error {
 	}
 	defer g.wg.Done()
 
-	return ctrl.Send(&pb.ControlMessage{
+	return g.sendRequest(ctrl, callbackImport, &pb.ControlMessage{
 		ImportChannelsReq: &pb.ImportChannelsRequest{YAML: yamlData},
 	})
 }
@@ -1695,7 +1756,7 @@ func (e *Engine) CreateToken(role string, maxUses int, expiresInSeconds int64) e
 	}
 	defer g.wg.Done()
 
-	return ctrl.Send(&pb.ControlMessage{
+	return g.sendRequest(ctrl, callbackToken, &pb.ControlMessage{
 		CreateTokenReq: &pb.CreateTokenRequest{
 			Role:             role,
 			MaxUses:          int32(maxUses), //nolint:gosec // practical token limits fit int32
@@ -1905,7 +1966,7 @@ func (e *Engine) SetUserRole(targetUserID int64, newRole string) error {
 	}
 	defer g.wg.Done()
 
-	return ctrl.Send(&pb.ControlMessage{
+	return g.sendRequest(ctrl, callbackRole, &pb.ControlMessage{
 		SetUserRoleReq: &pb.SetUserRoleRequest{
 			TargetUserID: targetUserID,
 			NewRole:      newRole,
@@ -1971,7 +2032,7 @@ func (e *Engine) ListBansAfter(afterID int64) error {
 		return fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
-	return ctrl.Send(&pb.ControlMessage{ListBansReq: &pb.ListBansRequest{AfterID: afterID, Limit: 100}})
+	return g.sendRequest(ctrl, callbackBans, &pb.ControlMessage{ListBansReq: &pb.ListBansRequest{AfterID: afterID, Limit: 100}})
 }
 
 // Unban removes one ban by ID (admin only).
@@ -1984,7 +2045,7 @@ func (e *Engine) Unban(banID int64) error {
 		return fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
-	return ctrl.Send(&pb.ControlMessage{UnbanReq: &pb.UnbanRequest{BanID: banID}})
+	return g.sendRequest(ctrl, callbackUnban, &pb.ControlMessage{UnbanReq: &pb.UnbanRequest{BanID: banID}})
 }
 
 // Disconnect disconnects from the server.
