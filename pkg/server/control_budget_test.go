@@ -87,7 +87,7 @@ func TestControlMessageBudgetDisconnectsFloodingSession(t *testing.T) {
 	srv.cfg.AllowNoToken = true
 	srv.cfg.ControlMessageBurst = 2
 	srv.cfg.ControlMessagesPerSec = 1
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	t.Cleanup(func() { _ = clientConn.Close() })
 	done := make(chan struct{})
 	go func() {
@@ -239,7 +239,7 @@ func TestGlobalControlBudgetRefusesWithoutDisconnecting(t *testing.T) {
 	srv.controlGlobalBudget.highWater = &srv.metrics.ControlGlobalBudgetHighWater
 
 	connect := func(username string) (net.Conn, <-chan struct{}) {
-		serverConn, clientConn := net.Pipe()
+		serverConn, clientConn := newControlPipe()
 		done := make(chan struct{})
 		go func() {
 			srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -441,7 +441,7 @@ func TestControlUserBudgetCannotBeResetByReauthentication(t *testing.T) {
 
 	connect := func(token string) (net.Conn, <-chan struct{}, *pb.AuthResponse) {
 		t.Helper()
-		serverConn, clientConn := net.Pipe()
+		serverConn, clientConn := newControlPipe()
 		done := make(chan struct{})
 		go func() {
 			srv.handleControlConn(newControlHandler(srv, st), serverConn, st)

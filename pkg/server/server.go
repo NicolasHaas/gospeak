@@ -34,6 +34,7 @@ type Config struct {
 	MaxPreAuthConnections       int           // maximum concurrent unauthenticated connections per TCP plane
 	MaxSessions                 int           // maximum concurrent authenticated sessions
 	MaxSessionsPerUser          int           // maximum concurrent sessions for one account
+	MaxSessionsPerSource        int           // pending and active sessions per IPv4 address / IPv6 /64
 	ControlMessageBurst         int           // maximum control-message cost burst per session
 	ControlMessagesPerSec       int           // control-message cost replenished per second per session
 	ControlGlobalBurst          int           // maximum server-wide control-message cost burst
@@ -66,6 +67,7 @@ func DefaultConfig() Config {
 		MaxPreAuthConnections:       64,
 		MaxSessions:                 1024,
 		MaxSessionsPerUser:          8,
+		MaxSessionsPerSource:        64,
 		ControlMessageBurst:         60,
 		ControlMessagesPerSec:       20,
 		ControlGlobalBurst:          300,
@@ -149,6 +151,9 @@ func New(cfg Config, deps Dependencies) *Server {
 	if cfg.MaxSessionsPerUser <= 0 {
 		cfg.MaxSessionsPerUser = 8
 	}
+	if cfg.MaxSessionsPerSource <= 0 {
+		cfg.MaxSessionsPerSource = 64
+	}
 	if cfg.ControlMessageBurst <= 0 {
 		cfg.ControlMessageBurst = 60
 	} else if cfg.ControlMessageBurst < controlExpensiveCost {
@@ -174,7 +179,7 @@ func New(cfg Config, deps Dependencies) *Server {
 	controlGlobalBudget.highWater = &metrics.ControlGlobalBudgetHighWater
 	return &Server{
 		cfg:                     cfg,
-		sessions:                NewSessionManagerWithLimits(cfg.MaxSessions, cfg.MaxSessionsPerUser),
+		sessions:                NewSessionManagerWithLimits(cfg.MaxSessions, cfg.MaxSessionsPerUser, cfg.MaxSessionsPerSource),
 		channels:                NewChannelManager(),
 		screenShare:             NewScreenShareManager(cfg.MediaCipher),
 		metrics:                 metrics,

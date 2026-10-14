@@ -31,6 +31,7 @@ func main() {
 	flag.DurationVar(&cfg.ChatMaxAge, "chat-max-age", cfg.ChatMaxAge, "Maximum message age (0 disables expiry)")
 	flag.IntVar(&cfg.MaxSessions, "max-sessions", cfg.MaxSessions, "Maximum concurrent authenticated sessions")
 	flag.IntVar(&cfg.MaxSessionsPerUser, "max-sessions-per-user", cfg.MaxSessionsPerUser, "Maximum concurrent sessions per account")
+	flag.IntVar(&cfg.MaxSessionsPerSource, "max-sessions-per-source", cfg.MaxSessionsPerSource, "Maximum active plus pending sessions per IPv4 address or IPv6 /64")
 	flag.IntVar(&cfg.ControlMessageBurst, "control-message-burst", cfg.ControlMessageBurst, "Maximum control-message cost burst per session and account (minimum 5)")
 	flag.IntVar(&cfg.ControlMessagesPerSec, "control-messages-per-second", cfg.ControlMessagesPerSec, "Per-session and per-account control-message cost replenished per second")
 	flag.IntVar(&cfg.ControlGlobalBurst, "control-global-burst", cfg.ControlGlobalBurst, "Maximum server-wide control-message cost burst (minimum 5)")

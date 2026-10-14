@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
+
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -21,7 +21,7 @@ import (
 
 func TestSessionManagerEnforcesPerUserLimitAtomically(t *testing.T) {
 	const attempts = 32
-	manager := NewSessionManagerWithLimits(64, 2)
+	manager := NewSessionManagerWithLimits(64, 2, 64)
 	start := make(chan struct{})
 	var admitted atomic.Int64
 	var wg sync.WaitGroup
@@ -31,7 +31,7 @@ func TestSessionManagerEnforcesPerUserLimitAtomically(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := manager.Create(42, "alice", model.RoleUser)
+			_, err := manager.Create(42, "alice", model.RoleUser, "127.0.0.1")
 			switch {
 			case err == nil:
 				admitted.Add(1)
@@ -53,20 +53,20 @@ func TestSessionManagerEnforcesPerUserLimitAtomically(t *testing.T) {
 }
 
 func TestSessionManagerEnforcesGlobalLimitAndReleasesCapacity(t *testing.T) {
-	manager := NewSessionManagerWithLimits(2, 2)
-	first, err := manager.Create(1, "alice", model.RoleUser)
+	manager := NewSessionManagerWithLimits(2, 2, 64)
+	first, err := manager.Create(1, "alice", model.RoleUser, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
-	if _, err := manager.Create(2, "bob", model.RoleUser); err != nil {
+	if _, err := manager.Create(2, "bob", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create(second): %v", err)
 	}
-	if _, err := manager.Create(3, "carol", model.RoleUser); !errors.Is(err, ErrGlobalSessionLimitReached) {
+	if _, err := manager.Create(3, "carol", model.RoleUser, "127.0.0.1"); !errors.Is(err, ErrGlobalSessionLimitReached) {
 		t.Fatalf("Create(over global limit) error = %v, want %v", err, ErrGlobalSessionLimitReached)
 	}
 
 	manager.Remove(first.ID)
-	if _, err := manager.Create(3, "carol", model.RoleUser); err != nil {
+	if _, err := manager.Create(3, "carol", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create(after release): %v", err)
 	}
 	snapshot := manager.CapacitySnapshot()
@@ -81,10 +81,10 @@ func TestServerWiresConfiguredSessionLimits(t *testing.T) {
 	cfg.MaxSessionsPerUser = 1
 	srv := New(cfg, Dependencies{})
 
-	if _, err := srv.sessions.Create(1, "alice", model.RoleUser); err != nil {
+	if _, err := srv.sessions.Create(1, "alice", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
-	if _, err := srv.sessions.Create(2, "bob", model.RoleUser); !errors.Is(err, ErrGlobalSessionLimitReached) {
+	if _, err := srv.sessions.Create(2, "bob", model.RoleUser, "127.0.0.1"); !errors.Is(err, ErrGlobalSessionLimitReached) {
 		t.Fatalf("Create(second) error = %v, want %v", err, ErrGlobalSessionLimitReached)
 	}
 	if srv.controlUserBudgets.maxEntries < cfg.MaxSessions {
@@ -110,10 +110,10 @@ func TestSessionCapacityRejectionsAreClassifiedExactlyOnce(t *testing.T) {
 			cfg.MaxSessions = tc.maxSessions
 			cfg.MaxSessionsPerUser = tc.maxPerUser
 			srv := New(cfg, Dependencies{})
-			if _, err := srv.sessions.Create(1, "alice", model.RoleUser); err != nil {
+			if _, err := srv.sessions.Create(1, "alice", model.RoleUser, "127.0.0.1"); err != nil {
 				t.Fatalf("Create first session: %v", err)
 			}
-			_, err := srv.sessions.Create(tc.secondUserID, "second", model.RoleUser)
+			_, err := srv.sessions.Create(tc.secondUserID, "second", model.RoleUser, "127.0.0.1")
 			if err == nil {
 				t.Fatal("Create above limit unexpectedly succeeded")
 			}
@@ -131,8 +131,8 @@ func TestSessionCapacityRejectionsAreClassifiedExactlyOnce(t *testing.T) {
 func TestSessionCapacityPreventsIrreversibleOpenAccountProvisioning(t *testing.T) {
 	srv, st, _ := newTestServer(t)
 	srv.cfg.AllowNoToken = true
-	srv.sessions = NewSessionManagerWithLimits(1, 1)
-	if _, err := srv.sessions.Create(1, "occupant", model.RoleUser); err != nil {
+	srv.sessions = NewSessionManagerWithLimits(1, 1, 64)
+	if _, err := srv.sessions.Create(1, "occupant", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create occupying session: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestSessionCapacityPreventsIrreversibleOpenAccountProvisioning(t *testing.T
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 	go func() {
 		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -182,8 +182,8 @@ func TestSessionCapacityPreventsIrreversibleOpenAccountProvisioning(t *testing.T
 
 func TestInvalidCredentialDoesNotBypassAuthenticationBudgetAtSessionCapacity(t *testing.T) {
 	srv, st, _ := newTestServer(t)
-	srv.sessions = NewSessionManagerWithLimits(1, 1)
-	if _, err := srv.sessions.Create(1, "occupant", model.RoleUser); err != nil {
+	srv.sessions = NewSessionManagerWithLimits(1, 1, 64)
+	if _, err := srv.sessions.Create(1, "occupant", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create occupying session: %v", err)
 	}
 
@@ -202,8 +202,8 @@ func TestInvalidCredentialDoesNotBypassAuthenticationBudgetAtSessionCapacity(t *
 
 func TestSessionCapacityRollsBackInviteProvisioning(t *testing.T) {
 	srv, st, _ := newTestServer(t)
-	srv.sessions = NewSessionManagerWithLimits(1, 1)
-	occupant, err := srv.sessions.Create(1, "occupant", model.RoleUser)
+	srv.sessions = NewSessionManagerWithLimits(1, 1, 64)
+	occupant, err := srv.sessions.Create(1, "occupant", model.RoleUser, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create occupying session: %v", err)
 	}
@@ -267,8 +267,8 @@ func TestSessionPreparationFailureRollsBackProvisioning(t *testing.T) {
 }
 
 func TestPreparedSessionRetainsReservationUntilActivation(t *testing.T) {
-	manager := NewSessionManagerWithLimits(1, 1)
-	reservation, err := manager.Reserve(7)
+	manager := NewSessionManagerWithLimits(1, 1, 64)
+	reservation, err := manager.Reserve(7, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -292,8 +292,8 @@ func TestPreparedSessionRetainsReservationUntilActivation(t *testing.T) {
 }
 
 func TestSessionReservationReleaseRestoresCapacity(t *testing.T) {
-	manager := NewSessionManagerWithLimits(1, 1)
-	reservation, err := manager.Reserve(0)
+	manager := NewSessionManagerWithLimits(1, 1, 64)
+	reservation, err := manager.Reserve(0, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSessionReservationReleaseRestoresCapacity(t *testing.T) {
 		t.Fatalf("pending reservation snapshot = %#v", snapshot)
 	}
 	reservation.Release()
-	if _, err := manager.Create(2, "replacement", model.RoleUser); err != nil {
+	if _, err := manager.Create(2, "replacement", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create after reservation release: %v", err)
 	}
 }
@@ -314,7 +314,7 @@ func TestSessionCapacityMetricsAreExported(t *testing.T) {
 	cfg.MaxSessions = 7
 	cfg.MaxSessionsPerUser = 2
 	srv := New(cfg, Dependencies{})
-	if _, err := srv.sessions.Create(1, "alice", model.RoleUser); err != nil {
+	if _, err := srv.sessions.Create(1, "alice", model.RoleUser, "127.0.0.1"); err != nil {
 		t.Fatalf("Create session: %v", err)
 	}
 	srv.metrics.SessionUserRejections.Add(1)
@@ -328,6 +328,11 @@ func TestSessionCapacityMetricsAreExported(t *testing.T) {
 		"gospeak_session_capacity_high_water 1",
 		"gospeak_session_limit 7",
 		"gospeak_session_user_limit 2",
+		"gospeak_session_source_limit 64",
+		"gospeak_session_source_capacity_max 1",
+		"gospeak_session_source_capacity_high_water 1",
+		"gospeak_session_active_sources 1",
+		`gospeak_session_rejections_total{reason="source"} 0`,
 		`gospeak_session_rejections_total{reason="user"} 1`,
 	} {
 		if !strings.Contains(body, want) {

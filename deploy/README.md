@@ -95,6 +95,7 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` bind address; disabled by default |
 | `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
+| `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
 | `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
@@ -108,6 +109,12 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-log-format` | `text` | Log format: `text` or `json` |
 
 Channel files use a single `channels:` YAML document; nested channels use the same `channels:` key. The parser rejects unknown fields, aliases, merges, oversized files, and duplicate sibling names. An upgrade also stops if the existing database already has two channels with the same name under one parent; back up the database and resolve those conflicts rather than deleting an arbitrary row.
+
+The supplied Compose and cloud-init commands inherit the source limit of 64.
+For a larger shared NAT, add `-max-sessions-per-source <limit>` to the Compose
+`command` list or the cloud-init Quadlet `Exec` line. This limits pending and
+active sessions across accounts without changing `-open` or exact-address bans.
+See [capacity semantics](../docs/monitoring.md#capacity-semantics).
 
 ## Ports
 

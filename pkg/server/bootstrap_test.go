@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
+
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,7 +50,7 @@ func readBootstrapToken(t *testing.T, path string) string {
 
 func authenticateBootstrap(t *testing.T, srv *Server, st datastore.DataProviderFactory, username, token string) (*pb.AuthResponse, error) {
 	t.Helper()
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 	go func() {
 		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -120,6 +120,7 @@ func TestBootstrapProvisioningRollsBackSessionPreparationFailure(t *testing.T) {
 	if user, err := st.NonTx().GetUserByUsername("bootstrap-prepare"); err != nil || user != nil {
 		t.Fatalf("session-preparation-rejected bootstrap user persisted: user=%#v err=%v", user, err)
 	}
+	requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 
 	srv.sessions.issuedSessionIDs = 0
 	response, err := authenticateBootstrap(t, srv, st, "bootstrap-prepare", rawToken)
@@ -135,7 +136,7 @@ func TestBootstrapProvisioningRetriesAfterAuthResponseWriteFailure(t *testing.T)
 	}
 	rawToken := readBootstrapToken(t, credentialPath)
 
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 	go func() {
 		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -154,6 +155,7 @@ func TestBootstrapProvisioningRetriesAfterAuthResponseWriteFailure(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("control handler did not return after failed AuthResponse write")
 	}
+	requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 
 	firstRetry, err := authenticateBootstrap(t, srv, st, "bootstrap-admin", rawToken)
 	if err != nil {
@@ -330,6 +332,7 @@ func TestBootstrapProvisioningRollsBackControlBudgetTrackerFailure(t *testing.T)
 	if got := srv.metrics.ControlUserTrackerRejections.Load(); got != 1 {
 		t.Fatalf("control user tracker rejections = %d, want 1", got)
 	}
+	requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 
 	now = now.Add(2 * time.Second)
 	if _, err := authenticateBootstrap(t, srv, st, "bootstrap-budget-retry", bootstrapToken); err != nil {
@@ -362,6 +365,7 @@ func TestBootstrapProvisioningRollsBackPersonalTokenStoreFailure(t *testing.T) {
 	if len(users) != 0 {
 		t.Fatalf("users after rolled-back provisioning = %d, want 0", len(users))
 	}
+	requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 	if _, err := provider.DB.ExecContext(context.Background(), `DROP TRIGGER fail_bootstrap_personal_token`); err != nil {
 		t.Fatalf("drop failure trigger: %v", err)
 	}
@@ -518,7 +522,7 @@ func TestBootstrapProvisioningRetrySurvivesRestart(t *testing.T) {
 		t.Fatalf("ensureAdminToken() error = %v", err)
 	}
 	rawToken := readBootstrapToken(t, credentialPath)
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 	go func() {
 		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -566,7 +570,7 @@ func TestOrdinarySingleUseInviteRemainsConsumedAfterResponseFailure(t *testing.T
 	if err := st.NonTx().CreateToken(crypto.HashToken(rawToken), model.RoleUser, 0, creator.ID, 1, st.NonTx().ZeroTime()); err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 	go func() {
 		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
@@ -594,7 +598,7 @@ func TestHandleCreateTokenRejectsNegativeMaxUses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
-	session, err := srv.sessions.Create(admin.ID, admin.Username, admin.Role)
+	session, err := srv.sessions.Create(admin.ID, admin.Username, admin.Role, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create() session error = %v", err)
 	}

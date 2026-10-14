@@ -243,7 +243,7 @@ func TestPendingIPBanWinsActivationRaceExceptBootstrapBypass(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	const ip = "192.0.2.99"
 
-	reservation, err := srv.sessions.Reserve(10)
+	reservation, err := srv.sessions.Reserve(10, ip)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestPendingIPBanWinsActivationRaceExceptBootstrapBypass(t *testing.T) {
 		t.Fatalf("activation = (%#v, %t), want blocked", session, banned)
 	}
 
-	bootstrapReservation, err := srv.sessions.Reserve(11)
+	bootstrapReservation, err := srv.sessions.Reserve(11, ip)
 	if err != nil {
 		t.Fatalf("Reserve bootstrap: %v", err)
 	}

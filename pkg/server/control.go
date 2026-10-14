@@ -161,6 +161,9 @@ func canonicalControlPeerIP(addr net.Addr) (string, error) {
 		return "", fmt.Errorf("missing peer address")
 	}
 	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		if tcpAddr.Zone != "" {
+			return "", fmt.Errorf("scoped IP addresses are not supported")
+		}
 		return model.CanonicalIPAddress(tcpAddr.IP.String())
 	}
 	host, _, err := net.SplitHostPort(addr.String())
@@ -488,11 +491,11 @@ func authRateLimitKey(addr net.Addr) string {
 	} else if parsed, _, err := net.SplitHostPort(host); err == nil {
 		host = parsed
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			return ipv4.String()
+	if source, err := sessionSourceGroup(host); err == nil {
+		if source.Addr().Is4() {
+			return source.Addr().String()
 		}
-		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+		return source.String()
 	}
 	return host
 }
@@ -812,7 +815,11 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		sendError(conn, 1, "unsupported media cipher")
 		return
 	}
-	peerIP, _ := canonicalControlPeerIP(conn.RemoteAddr())
+	peerIP, err := canonicalControlPeerIP(conn.RemoteAddr())
+	if err != nil {
+		sendError(conn, 2, "authentication failed")
+		return
+	}
 	var persistedIPBan bool
 	if peerIP != "" {
 		s.beginIPBanCheck(peerIP)
@@ -835,13 +842,6 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	if tokenHash != "" {
 		user, err = st.NonTx().GetUserByPersonalTokenHash(tokenHash)
 		if err != nil {
-			sendError(conn, 3, "internal error")
-			return
-		}
-	}
-	if user != nil {
-		if err := s.finalizeBootstrapCredential(st, user.ID); err != nil {
-			slog.Error("finalize bootstrap credential", "err", err)
 			sendError(conn, 3, "internal error")
 			return
 		}
@@ -887,7 +887,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				return
 			}
 			if bootstrapMatch {
-				sessionReservation, err = s.sessions.Reserve(0)
+				sessionReservation, err = s.sessions.Reserve(0, peerIP)
 				if err != nil {
 					if !rejectSessionCapacity(err) {
 						slog.Error("reserve session", "err", err)
@@ -1009,7 +1009,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				return
 			}
 			if sessionReservation == nil {
-				sessionReservation, err = s.sessions.Reserve(user.ID)
+				sessionReservation, err = s.sessions.Reserve(user.ID, peerIP)
 				if err == nil {
 					defer sessionReservation.Release()
 				}
@@ -1073,7 +1073,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 
 	if sessionReservation == nil {
-		sessionReservation, err = s.sessions.Reserve(user.ID)
+		sessionReservation, err = s.sessions.Reserve(user.ID, peerIP)
 		if err != nil {
 			if !rejectSessionCapacity(err) {
 				slog.Error("reserve existing user session", "err", err)
@@ -1082,6 +1082,13 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 		defer sessionReservation.Release()
+	}
+	if autoToken == "" {
+		if err := s.finalizeBootstrapCredential(st, user.ID); err != nil {
+			slog.Error("finalize bootstrap credential", "err", err)
+			sendError(conn, 3, "internal error")
+			return
+		}
 	}
 
 	// Prepare all fallible resources before provisioning commits, then activate.

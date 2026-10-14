@@ -88,7 +88,7 @@ func requireSingleSuccessfulStart(t *testing.T, plane string, results [2]error) 
 
 func TestRejectedControlConnectionDoesNotLeakActiveMetric(t *testing.T) {
 	srv, st, _ := newTestServer(t)
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 
 	go func() {
@@ -358,7 +358,7 @@ func TestAuthResponseGatesScreenCredentials(t *testing.T) {
 			srv.cfg.AllowNoToken = true
 			srv.cfg.EnableScreenShare = tc.enabled
 			srv.cfg.ScreenAddr = "screen.example:9603"
-			serverConn, clientConn := net.Pipe()
+			serverConn, clientConn := newControlPipe()
 			done := make(chan struct{})
 
 			go func() {
@@ -421,7 +421,7 @@ func TestAuthResponseGatesScreenCredentials(t *testing.T) {
 func TestAuthenticatedControlConnectionBalancesMetrics(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	srv.cfg.AllowNoToken = true
-	serverConn, clientConn := net.Pipe()
+	serverConn, clientConn := newControlPipe()
 	done := make(chan struct{})
 
 	go func() {

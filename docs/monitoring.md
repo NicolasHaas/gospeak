@@ -43,6 +43,23 @@ Each account may hold up to eight of the server's 1,024 authenticated session
 slots by default. Pending session reservations count toward capacity but are
 reported separately from active authenticated sessions.
 
+One IPv4 address or IPv6 /64 may hold up to 64 active and pending sessions
+across all accounts. IPv4-mapped IPv6 shares the IPv4 limit. This accommodates
+64 users with one session each behind shared NAT; multiple sessions per user
+share that allowance. Set `-max-sessions-per-source` higher when a trusted NAT
+needs more. Non-positive values use 64. The cap bounds one source's occupancy,
+not fair service across sources or protection against attackers with many
+prefixes. Exact-address IP bans and `-open` authentication are unchanged.
+
+Source capacity denial returns error code 3 without committing a new account
+or consuming an invite. Disconnect and failed session preparation release the
+claim; reconnect must claim capacity again. Empty source entries are removed.
+`gospeak_session_source_capacity_max`,
+`gospeak_session_source_capacity_high_water`, `gospeak_session_source_limit`,
+and `gospeak_session_active_sources` expose source pressure without addresses.
+`gospeak_session_rejections_total{reason="source"}` counts denials. Global and
+per-account session limits still apply.
+
 Control messages are charged against three token buckets:
 
 | Scope | Default burst | Default refill |
@@ -88,6 +105,7 @@ The principal capacity flags are:
 
 - `-max-sessions`
 - `-max-sessions-per-user`
+- `-max-sessions-per-source`
 - `-control-message-burst`
 - `-control-messages-per-second`
 - `-control-global-burst`

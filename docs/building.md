@@ -145,6 +145,7 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-metrics` | *(empty)* | HTTP bind address for Prometheus `/metrics` and `/healthz`; disabled by default |
 | `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
+| `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
 | `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |

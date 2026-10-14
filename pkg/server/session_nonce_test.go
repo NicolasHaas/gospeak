@@ -13,7 +13,7 @@ import (
 
 func mustCreateSession(t *testing.T, sessions *SessionManager, userID int64, username string, role model.Role) *model.Session {
 	t.Helper()
-	session, err := sessions.Create(userID, username, role)
+	session, err := sessions.Create(userID, username, role, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create session: %v", err)
 	}
@@ -22,7 +22,7 @@ func mustCreateSession(t *testing.T, sessions *SessionManager, userID int64, use
 
 func mustCreateScopedSession(t *testing.T, sessions *SessionManager, userID int64, username string, role model.Role, channelScope int64) *model.Session {
 	t.Helper()
-	session, err := sessions.CreateWithChannelScope(userID, username, role, channelScope)
+	session, err := sessions.CreateWithChannelScope(userID, username, role, channelScope, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create scoped session: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestSessionIDExhaustionFailsClosed(t *testing.T) {
 	sessions.sessionIDSeeded = true
 	sessions.issuedSessionIDs = usableSessionIDs
 
-	_, err := sessions.Create(1, "user", model.RoleUser)
+	_, err := sessions.Create(1, "user", model.RoleUser, "127.0.0.1")
 	if !errors.Is(err, ErrSessionIDExhausted) {
 		t.Fatalf("Create error = %v, want %v", err, ErrSessionIDExhausted)
 	}

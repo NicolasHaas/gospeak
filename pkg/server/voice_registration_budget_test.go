@@ -13,7 +13,7 @@ import (
 // budget: an authenticated key holder must not bypass the pacing budget by
 // flooding registration datagrams.
 func TestVoiceRegistrationChargedToVoiceBudget(t *testing.T) {
-	sm := NewSessionManagerWithLimits(8, 2)
+	sm := NewSessionManagerWithLimits(8, 2, 64)
 	session := mustCreateSession(t, sm, 1, "speaker", 0)
 	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 	now := time.Unix(1000, 0)
@@ -50,7 +50,7 @@ func TestVoiceRegistrationChargedToVoiceBudget(t *testing.T) {
 // The charge happens after HMAC verification: forged registrations neither
 // consume budget nor mutate the session.
 func TestForgedRegistrationConsumesNoBudget(t *testing.T) {
-	sm := NewSessionManagerWithLimits(8, 2)
+	sm := NewSessionManagerWithLimits(8, 2, 64)
 	session := mustCreateSession(t, sm, 1, "speaker", 0)
 	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 	now := time.Unix(1000, 0)
@@ -86,7 +86,7 @@ func mustUnmarshalRegistration(t *testing.T, data []byte) *protocol.VoiceRegistr
 // headroom: the next attempt after refill succeeds without waiting another
 // full rebind interval.
 func TestRefusedRebindDoesNotConsumeRebindWindow(t *testing.T) {
-	sm := NewSessionManagerWithLimits(8, 2)
+	sm := NewSessionManagerWithLimits(8, 2, 64)
 	session := mustCreateSession(t, sm, 1, "speaker", 0)
 	addrA := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 	addrB := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: 50000}

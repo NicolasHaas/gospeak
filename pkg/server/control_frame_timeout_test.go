@@ -25,7 +25,7 @@ func (c *frameDeadlineConn) SetReadDeadline(at time.Time) error {
 func TestControlFrameDeadlineStartsAtFirstByte(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	srv.cfg.AllowNoToken = true
-	server, peer := net.Pipe()
+	server, peer := newControlPipe()
 	defer peer.Close() //nolint:errcheck
 	conn := &frameDeadlineConn{server, make(chan time.Time, 8)}
 	done := make(chan struct{})
