@@ -71,6 +71,18 @@ func newTestServerWithConfig(t *testing.T, configure func(*Config)) (*Server, da
 	})
 	srv := New(cfg, Dependencies{Store: st})
 	handler := newControlHandler(srv, st)
+	t.Cleanup(func() {
+		handler.mu.RLock()
+		clients := make([]*controlClient, 0, len(handler.connMap))
+		for _, client := range handler.connMap {
+			clients = append(clients, client)
+		}
+		handler.mu.RUnlock()
+		for _, client := range clients {
+			_ = client.Close()
+		}
+		srv.Shutdown()
+	})
 	return srv, st, handler
 }
 

@@ -137,10 +137,12 @@ func (s *Server) runningLogArgs() []any {
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown() {
 	s.shutdownOnce.Do(func() {
+		s.statePublicationMu.Lock()
 		s.workerMu.Lock()
 		s.stopping = true
 		s.cancel()
 		s.workerMu.Unlock()
+		s.statePublicationMu.Unlock()
 
 		s.metricsMu.Lock()
 		metricsHTTP := s.metricsHTTP

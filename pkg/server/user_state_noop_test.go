@@ -9,6 +9,7 @@ import (
 
 func TestUserStateBroadcastOnlyOnChange(t *testing.T) {
 	srv, st, handler := newTestServer(t)
+	handler.statePublisher.Do(func() {})
 	session := mustCreateSession(t, srv.sessions, 1, "state", model.RoleUser)
 	client := newControlClient(session.ID, &nopConn{})
 	handler.connMap[session.ID] = client
@@ -26,8 +27,12 @@ func TestUserStateBroadcastOnlyOnChange(t *testing.T) {
 		{session.ID + 1, true, true, false},
 	} {
 		srv.handleUserState(handler, tc.id, &pb.UserStateUpdate{Muted: tc.muted, Deafened: tc.deafened}, st)
+		srv.flushServerState(st, handler)
 		select {
 		case item := <-client.sendQueue:
+			client.mu.Lock()
+			client.pendingState = nil // emulate the writer taking ownership
+			client.mu.Unlock()
 			if !tc.changed || item.message.ServerStateEvent == nil {
 				t.Fatalf("unexpected state broadcast for %+v", tc)
 			}
