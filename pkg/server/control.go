@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -102,12 +103,13 @@ func (s *Server) activateAfterBanChecks(userID int64, ip string, reservation *Se
 
 // ControlHandler handles TCP/TLS control plane connections.
 type ControlHandler struct {
-	server        *Server
-	store         datastore.DataProviderFactory
-	mu            sync.RWMutex
-	connMap       map[uint32]*controlClient // sessionID -> serialized outbound connection
-	chatSelection map[uint32]int64          // explicit text channel; absent = legacy voice channel
-
+	server         *Server
+	store          datastore.DataProviderFactory
+	mu             sync.RWMutex
+	connMap        map[uint32]*controlClient // sessionID -> serialized outbound connection
+	chatSelection  map[uint32]int64          // explicit text channel; absent = legacy voice channel
+	stateDirty     atomic.Bool
+	statePublisher sync.Once
 }
 
 const (
@@ -136,13 +138,14 @@ type controlClient struct {
 	net.Conn
 	sessionID   uint32
 	peerIP      string
-	sendQueue   chan queuedControlMessage
+	sendQueue   chan *queuedControlMessage
 	done        chan struct{}
 	mu          sync.Mutex
 	closed      bool
 	authPending bool // registered for bans, but ordinary publication is not ready
 
-	statePending bool // a suppressed state broadcast needs a post-auth snapshot
+	statePending bool                  // a suppressed state broadcast needs a post-auth snapshot
+	pendingState *queuedControlMessage // replaceable suffix, protected by mu
 }
 
 func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
@@ -151,7 +154,7 @@ func newControlClient(sessionID uint32, conn net.Conn) *controlClient {
 		Conn:      conn,
 		sessionID: sessionID,
 		peerIP:    peerIP,
-		sendQueue: make(chan queuedControlMessage, controlSendQueueSize),
+		sendQueue: make(chan *queuedControlMessage, controlSendQueueSize),
 		done:      make(chan struct{}),
 	}
 }
@@ -207,8 +210,20 @@ func (c *controlClient) enqueue(item queuedControlMessage) error {
 		c.mu.Unlock()
 		return nil
 	}
+	replaceable := item.message.ServerStateEvent != nil && item.result == nil
+	if replaceable && c.pendingState != nil {
+		c.pendingState.message = item.message
+		c.mu.Unlock()
+		return nil
+	}
 	select {
-	case c.sendQueue <- item:
+	case c.sendQueue <- &item:
+		// Reliable messages seal the preceding snapshot. Never move a newer
+		// post-ACK state into a slot before that ACK.
+		c.pendingState = nil
+		if replaceable {
+			c.pendingState = &item
+		}
 		if item.message.AuthResponse != nil {
 			c.authPending = false
 		}
@@ -225,7 +240,17 @@ func (c *controlClient) writeLoop() {
 		select {
 		case <-c.done:
 			return
-		case item := <-c.sendQueue:
+		case queued := <-c.sendQueue:
+			c.mu.Lock()
+			if c.closed {
+				c.mu.Unlock()
+				return
+			}
+			item := *queued
+			if c.pendingState == queued {
+				c.pendingState = nil
+			}
+			c.mu.Unlock()
 			err := c.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
 			if err == nil {
 				err = protocol.WriteControlMessage(c.Conn, item.message)
@@ -1155,8 +1180,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			s.cleanupTempChannel(chID, st)
 		}
 
-		// Broadcast updated state to all remaining clients
-		s.broadcastServerState(st, handler)
+		if chID > 0 {
+			s.broadcastServerState(st, handler)
+		}
 	}()
 
 	// Build channel list
@@ -1375,14 +1401,11 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 }
 
 func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, req *pb.JoinChannelRequest, st datastore.DataProviderFactory, conn net.Conn) {
+	response := &pb.ControlMessage{ChannelJoinResponse: &pb.ChannelJoinResponse{ChannelID: req.ChannelID}}
 	respond := func(success bool, message string) {
-		if err := writeControlMessage(conn, &pb.ControlMessage{
-			ChannelJoinResponse: &pb.ChannelJoinResponse{
-				ChannelID: req.ChannelID,
-				Success:   success,
-				Message:   message,
-			},
-		}); err != nil {
+		response.ChannelJoinResponse.Success = success
+		response.ChannelJoinResponse.Message = message
+		if err := writeControlMessage(conn, response); err != nil {
 			slog.Warn("send channel join response", "session", sessionID, "err", err)
 		}
 	}
@@ -1402,7 +1425,21 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		return
 	}
 
+	// Publish membership and its ACK in one snapshot epoch. Enqueue only;
+	// direct test connections write after the publication lock is released.
+	s.statePublicationMu.Lock()
+	if s.ctx.Err() != nil {
+		s.statePublicationMu.Unlock()
+		return
+	}
 	prevCh, joined, err := s.tempChannels.tryJoin(ch, session.ID, s.channels, s.sessions, st)
+	client, queued := conn.(*controlClient)
+	var ackErr error
+	if joined && queued {
+		response.ChannelJoinResponse.Success = true
+		ackErr = client.enqueue(queuedControlMessage{message: response})
+	}
+	s.statePublicationMu.Unlock()
 	if err != nil {
 		slog.Warn("join channel", "session", sessionID, "channel", ch.ID, "err", err)
 		respond(false, "channel not found")
@@ -1412,8 +1449,17 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		respond(false, "channel is full")
 		return
 	}
-	if prevCh == ch.ID {
+	if queued {
+		if ackErr != nil {
+			slog.Warn("send channel join response", "session", sessionID, "err", ackErr)
+			if errors.Is(ackErr, errControlQueueFull) {
+				_ = client.Close()
+			}
+		}
+	} else {
 		respond(true, "")
+	}
+	if prevCh == ch.ID {
 		return
 	}
 	if prevCh > 0 {
@@ -1422,7 +1468,6 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		}
 	}
 	s.screenShare.Unsubscribe(session.ID)
-	respond(true, "")
 
 	// Notify old channel
 	if prevCh > 0 {
@@ -1451,8 +1496,6 @@ func (s *Server) handleJoinChannel(handler *ControlHandler, sessionID uint32, re
 		},
 	}, session.ID)
 
-	// Send full server state to the joining user
-	s.sendServerState(st, conn)
 	if active, ok := s.screenShare.ActiveForChannel(ch.ID); ok {
 		handler.sendToSession(session.ID, &pb.ControlMessage{ScreenShareEvent: active})
 	}
@@ -1493,8 +1536,9 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 		s.cleanupTempChannel(chID, st)
 	}
 
-	// Broadcast updated state to ALL clients
-	s.broadcastServerState(st, handler)
+	if chID > 0 {
+		s.broadcastServerState(st, handler)
+	}
 }
 
 func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Conn) {
@@ -2039,6 +2083,10 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 // sendServerState sends the full server state to a single connection.
 func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
 	s.statePublicationMu.Lock()
+	if s.ctx.Err() != nil {
+		s.statePublicationMu.Unlock()
+		return
+	}
 	channels, _ := st.NonTx().ListChannels()
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
@@ -2056,10 +2104,46 @@ func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn
 	_ = writeControlMessage(conn, msg)
 }
 
-// broadcastServerState sends updated server state to ALL connected sessions.
+// broadcastServerState marks a mutation for the bounded periodic publisher.
 func (s *Server) broadcastServerState(st datastore.DataProviderFactory, handler *ControlHandler) {
+	handler.stateDirty.Store(true)
+	handler.statePublisher.Do(func() {
+		s.startWorker(func() {
+			ticker := time.NewTicker(statePublicationInterval)
+			defer ticker.Stop()
+			s.runStatePublisher(st, handler, ticker.C)
+		})
+	})
+}
+
+func (s *Server) runStatePublisher(st datastore.DataProviderFactory, handler *ControlHandler, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticks:
+			s.flushServerState(st, handler)
+		}
+	}
+}
+
+const statePublicationInterval = 100 * time.Millisecond
+
+func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *ControlHandler) {
+	if !handler.stateDirty.Swap(false) {
+		return
+	}
 	s.statePublicationMu.Lock()
-	channels, _ := st.NonTx().ListChannels()
+	if s.ctx.Err() != nil {
+		s.statePublicationMu.Unlock()
+		return
+	}
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		handler.stateDirty.Store(true)
+		s.statePublicationMu.Unlock()
+		return
+	}
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},

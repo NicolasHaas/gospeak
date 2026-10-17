@@ -19,7 +19,7 @@ func TestSendAndCloseClientsFlushesConcurrently(t *testing.T) {
 		clients[id] = client
 		go func() {
 			item := <-client.sendQueue
-			queued <- item
+			queued <- *item
 			<-release
 			item.result <- nil
 		}()

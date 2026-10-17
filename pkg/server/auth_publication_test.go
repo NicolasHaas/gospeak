@@ -212,6 +212,7 @@ func TestAuthenticationFirstPublicationAfterDemotion(t *testing.T) {
 
 func TestAuthenticationRepairsSuppressedChannelState(t *testing.T) {
 	srv, st, handler := newTestServer(t)
+	handler.statePublisher.Do(func() {}) // force suppression before AuthResponse, not a ticker race
 	srv.cfg.AllowNoToken = true
 	actorUser, err := st.NonTx().CreateUser("snapshot-actor", model.RoleAdmin)
 	if err != nil {
@@ -243,6 +244,7 @@ func TestAuthenticationRepairsSuppressedChannelState(t *testing.T) {
 	// Both real mutations publish after the AuthResponse snapshot was built.
 	srv.handleCreateChannel(actor.ID, &pb.CreateChannelRequest{Name: "created-during-auth"}, st, &bufferConn{}, handler)
 	srv.handleDeleteChannel(actor.ID, &pb.DeleteChannelRequest{ChannelID: deleted.ID}, st, &bufferConn{}, handler)
+	srv.flushServerState(st, handler)
 	release.Do(func() { close(f.release) })
 	var got result
 	select {
