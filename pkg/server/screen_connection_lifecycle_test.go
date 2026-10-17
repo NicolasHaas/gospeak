@@ -29,7 +29,7 @@ func TestControlDisconnectClosesOwnedScreenConnection(t *testing.T) {
 		cfg.AllowNoToken = true
 		cfg.EnableScreenShare = true
 	})
-	controlServer, controlClient := net.Pipe()
+	controlServer, controlClient := newControlPipe()
 	controlDone := make(chan struct{})
 	go func() {
 		srv.handleControlConn(handler, controlServer, st)

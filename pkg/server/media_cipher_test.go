@@ -29,7 +29,7 @@ func TestMediaCipherAuthenticationAndScreenShare(t *testing.T) {
 				t.Fatal(err)
 			}
 			srv.voiceCipher = voiceCipher
-			serverConn, clientConn := net.Pipe()
+			serverConn, clientConn := newControlPipe()
 			done := make(chan struct{})
 			go func() { srv.handleControlConn(handler, serverConn, st); close(done) }()
 			defer func() { _ = clientConn.Close(); <-done; srv.Shutdown() }()
@@ -83,7 +83,7 @@ func TestMediaCipherMismatchRejectsBeforeProvisioning(t *testing.T) {
 		srv, st, handler := newTestServer(t)
 		srv.cfg.AllowNoToken = true
 		srv.cfg.MediaCipher = "aes256"
-		serverConn, clientConn := net.Pipe()
+		serverConn, clientConn := newControlPipe()
 		done := make(chan struct{})
 		go func() { srv.handleControlConn(handler, serverConn, st); close(done) }()
 		if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{

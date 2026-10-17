@@ -3,7 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
-	"net"
+
 	"testing"
 	"time"
 
@@ -56,7 +56,7 @@ func TestLoginRoleRefreshFailsClosed(t *testing.T) {
 		t.Run(fmt.Sprint(lookupErr), func(t *testing.T) {
 			srv, st, handler := newTestServer(t)
 			srv.cfg.AllowNoToken = true
-			serverConn, peer := net.Pipe()
+			serverConn, peer := newControlPipe()
 			_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
 			done := make(chan struct{})
 			go func() {
@@ -79,6 +79,7 @@ func TestLoginRoleRefreshFailsClosed(t *testing.T) {
 			if srv.sessions.Count() != 0 || srv.sessions.CapacitySnapshot().CapacityUsed != 0 {
 				t.Fatal("failed role refresh retained session capacity")
 			}
+			requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 		})
 	}
 }
@@ -98,7 +99,7 @@ func TestLoginCannotPublishRoleReadBeforeDemotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	probe := roleLoginFactory{DataProviderFactory: st, reached: make(chan struct{}), release: make(chan struct{})}
-	serverConn, peer := net.Pipe()
+	serverConn, peer := newControlPipe()
 	_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
 	done := make(chan struct{})
 	go func() { srv.handleControlConn(handler, serverConn, probe); close(done) }()

@@ -240,7 +240,7 @@ func TestBanCommittedDuringAuthenticationPreventsPreparedSessionActivation(t *te
 		t.Fatalf("CreateUser(target): %v", err)
 	}
 	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
-	reservation, err := srv.sessions.Reserve(targetUser.ID)
+	reservation, err := srv.sessions.Reserve(targetUser.ID, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Reserve(target): %v", err)
 	}
@@ -275,7 +275,7 @@ func TestBanStartedDuringActivationClosesAtomicallyRegisteredConnection(t *testi
 		t.Fatalf("CreateUser(target): %v", err)
 	}
 	admin := mustCreateSession(t, srv.sessions, adminUser.ID, adminUser.Username, adminUser.Role)
-	reservation, err := srv.sessions.Reserve(targetUser.ID)
+	reservation, err := srv.sessions.Reserve(targetUser.ID, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Reserve(target): %v", err)
 	}

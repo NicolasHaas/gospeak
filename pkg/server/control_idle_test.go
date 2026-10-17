@@ -26,7 +26,7 @@ func (c *idleDeadlineConn) SetReadDeadline(at time.Time) error {
 func TestControlIdleDeadlineResetsOnlyForCompleteMessage(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	srv.cfg.AllowNoToken = true
-	server, peer := net.Pipe()
+	server, peer := newControlPipe()
 	defer peer.Close() //nolint:errcheck
 	conn := &idleDeadlineConn{server, make(chan time.Time, 4)}
 	done := make(chan struct{})
@@ -93,7 +93,7 @@ func TestControlIdleExpiryAccounting(t *testing.T) {
 			t.Cleanup(func() { slog.SetDefault(previous) })
 			srv, st, handler := newTestServer(t)
 			srv.cfg.AllowNoToken = true
-			server, peer := net.Pipe()
+			server, peer := newControlPipe()
 			defer peer.Close() //nolint:errcheck
 			conn := &idleDeadlineConn{server, make(chan time.Time, 4)}
 			done := make(chan struct{})
@@ -138,7 +138,7 @@ func TestControlIdleExpiryAccounting(t *testing.T) {
 func TestShutdownUnblocksAuthenticatedControlRead(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	srv.cfg.AllowNoToken = true
-	server, peer := net.Pipe()
+	server, peer := newControlPipe()
 	defer peer.Close() //nolint:errcheck
 	done := make(chan struct{})
 	srv.startWorker(func() { defer close(done); srv.handleControlConn(handler, server, st) })
@@ -159,4 +159,5 @@ func TestShutdownUnblocksAuthenticatedControlRead(t *testing.T) {
 	if srv.metrics.ActiveConnections.Load() != 0 {
 		t.Fatal("active connection leaked")
 	}
+	requireSourceCapacity(t, srv.sessions, 0, 0, 0)
 }

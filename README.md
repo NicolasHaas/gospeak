@@ -165,6 +165,7 @@ Screen sharing is disabled by default; enable it with `-screen-share`.
 | `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` HTTP bind address; opt in with a trusted bind such as `127.0.0.1:9602` |
 | `-max-sessions` | `1024` | Maximum concurrent authenticated sessions |
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account |
+| `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-account control-message cost burst |
 | `-control-messages-per-second` | `20` | Per-session and aggregate per-account control-message cost replenished each second |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst |

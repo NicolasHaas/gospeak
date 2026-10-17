@@ -182,6 +182,9 @@ func (s *Server) recordSessionRejection(remote string, err error) {
 	case errors.Is(err, ErrUserSessionLimitReached):
 		reason = "user"
 		s.metrics.SessionUserRejections.Add(1)
+	case errors.Is(err, ErrSourceSessionLimitReached):
+		reason = "source"
+		s.metrics.SessionSourceRejections.Add(1)
 	default:
 		return
 	}

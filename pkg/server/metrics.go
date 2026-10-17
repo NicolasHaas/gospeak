@@ -38,6 +38,7 @@ type Metrics struct {
 	AccountProvisionSourceHighWater   atomic.Int64
 	SessionGlobalRejections           atomic.Int64
 	SessionUserRejections             atomic.Int64
+	SessionSourceRejections           atomic.Int64
 	ControlSessionMutationRejections  atomic.Int64
 	ControlSessionChatRejections      atomic.Int64
 	ControlSessionExpensiveRejections atomic.Int64

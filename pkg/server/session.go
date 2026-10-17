@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -23,10 +24,14 @@ type SessionManager struct {
 	voiceReplay      map[uint32]*voiceReceiveState
 	maxSessions      int
 	maxPerUser       int
+	maxPerSource     int
+	bySource         map[netip.Prefix]int // pending and active claims
+	sessionSources   map[uint32]netip.Prefix
 	pending          int
 	pendingByUser    map[int64]int
 	highWater        int
 	userHighWater    int
+	sourceHighWater  int
 	nextSessionID    uint32
 	issuedSessionIDs uint64
 	sessionIDSeeded  bool
@@ -42,6 +47,7 @@ var (
 	ErrSessionIDExhausted        = errors.New("server: session ID space exhausted")
 	ErrGlobalSessionLimitReached = errors.New("server: global session limit reached")
 	ErrUserSessionLimitReached   = errors.New("server: per-user session limit reached")
+	ErrSourceSessionLimitReached = errors.New("server: per-source session limit reached")
 )
 
 // SessionCapacityError reports the synchronized occupancy that rejected a session.
@@ -56,19 +62,24 @@ func (err *SessionCapacityError) Unwrap() error { return err.Cause }
 
 // SessionCapacitySnapshot is a synchronized view of authenticated session use.
 type SessionCapacitySnapshot struct {
-	Active                int
-	CapacityUsed          int
-	MaxUserCapacity       int
-	GlobalLimit           int
-	PerUserLimit          int
-	CapacityHighWater     int
-	UserCapacityHighWater int
+	Active                  int
+	CapacityUsed            int
+	MaxUserCapacity         int
+	GlobalLimit             int
+	PerUserLimit            int
+	CapacityHighWater       int
+	UserCapacityHighWater   int
+	MaxSourceCapacity       int
+	PerSourceLimit          int
+	SourceCapacityHighWater int
+	ActiveSources           int
 }
 
 // SessionReservation owns pending capacity until it creates a session or is released.
 type SessionReservation struct {
 	manager  *SessionManager
 	userID   int64
+	source   netip.Prefix
 	active   bool
 	prepared *model.Session
 }
@@ -91,29 +102,32 @@ type SessionSnapshot struct {
 
 // NewSessionManager creates a new session manager.
 func NewSessionManager() *SessionManager {
-	return NewSessionManagerWithLimits(0, 0)
+	return NewSessionManagerWithLimits(0, 0, 0)
 }
 
-// NewSessionManagerWithLimits creates a session manager with optional global
-// and per-user limits. Non-positive limits are disabled.
-func NewSessionManagerWithLimits(maxSessions, maxPerUser int) *SessionManager {
+// NewSessionManagerWithLimits creates a session manager with optional global,
+// per-user and per-source limits. Non-positive limits are disabled.
+func NewSessionManagerWithLimits(maxSessions, maxPerUser, maxPerSource int) *SessionManager {
 	return &SessionManager{
-		sessions:      make(map[uint32]*model.Session),
-		voiceReplay:   make(map[uint32]*voiceReceiveState),
-		pendingByUser: make(map[int64]int),
-		maxSessions:   maxSessions,
-		maxPerUser:    maxPerUser,
+		sessions:       make(map[uint32]*model.Session),
+		voiceReplay:    make(map[uint32]*voiceReceiveState),
+		pendingByUser:  make(map[int64]int),
+		maxSessions:    maxSessions,
+		maxPerUser:     maxPerUser,
+		maxPerSource:   maxPerSource,
+		bySource:       make(map[netip.Prefix]int),
+		sessionSources: make(map[uint32]netip.Prefix),
 	}
 }
 
 // Create creates a new session for an authenticated user.
-func (sm *SessionManager) Create(userID int64, username string, role model.Role) (*model.Session, error) {
-	return sm.CreateWithChannelScope(userID, username, role, 0)
+func (sm *SessionManager) Create(userID int64, username string, role model.Role, sourceIP string) (*model.Session, error) {
+	return sm.CreateWithChannelScope(userID, username, role, 0, sourceIP)
 }
 
 // CreateWithChannelScope creates a session with a persistent invite restriction.
-func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, role model.Role, channelScope int64) (*model.Session, error) {
-	reservation, err := sm.Reserve(userID)
+func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, role model.Role, channelScope int64, sourceIP string) (*model.Session, error) {
+	reservation, err := sm.Reserve(userID, sourceIP)
 	if err != nil {
 		return nil, err
 	}
@@ -121,9 +135,13 @@ func (sm *SessionManager) CreateWithChannelScope(userID int64, username string, 
 	return reservation.Create(username, role, channelScope)
 }
 
-// Reserve atomically claims session capacity. A zero user ID reserves only
-// global capacity and must be bound before Create.
-func (sm *SessionManager) Reserve(userID int64) (*SessionReservation, error) {
+// Reserve atomically claims global, account and source capacity. A zero user ID
+// must be bound before Prepare. Source IPs are exact addresses, not CIDRs.
+func (sm *SessionManager) Reserve(userID int64, sourceIP string) (*SessionReservation, error) {
+	source, err := sessionSourceGroup(sourceIP)
+	if err != nil {
+		return nil, err
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	globalUsage := len(sm.sessions) + sm.pending
@@ -133,6 +151,11 @@ func (sm *SessionManager) Reserve(userID int64) (*SessionReservation, error) {
 	if err := sm.checkUserCapacityLocked(userID); err != nil {
 		return nil, err
 	}
+	if usage := sm.bySource[source]; sm.maxPerSource > 0 && usage >= sm.maxPerSource {
+		return nil, &SessionCapacityError{Cause: ErrSourceSessionLimitReached, Current: usage, Limit: sm.maxPerSource}
+	}
+	sm.bySource[source]++
+	sm.sourceHighWater = max(sm.sourceHighWater, sm.bySource[source])
 	sm.pending++
 	if userID != 0 {
 		sm.pendingByUser[userID]++
@@ -143,7 +166,20 @@ func (sm *SessionManager) Reserve(userID int64) (*SessionReservation, error) {
 	if usage := sm.userUsageLocked(userID); usage > sm.userHighWater {
 		sm.userHighWater = usage
 	}
-	return &SessionReservation{manager: sm, userID: userID, active: true}, nil
+	return &SessionReservation{manager: sm, userID: userID, source: source, active: true}, nil
+}
+
+func sessionSourceGroup(sourceIP string) (netip.Prefix, error) {
+	addr, err := netip.ParseAddr(sourceIP)
+	if err != nil || addr.Zone() != "" {
+		return netip.Prefix{}, errors.New("server: invalid session source IP")
+	}
+	addr = addr.Unmap()
+	bits := 64
+	if addr.Is4() {
+		bits = 32
+	}
+	return netip.PrefixFrom(addr, bits).Masked(), nil
 }
 
 func (sm *SessionManager) checkUserCapacityLocked(userID int64) error {
@@ -170,7 +206,7 @@ func (sm *SessionManager) userUsageLocked(userID int64) int {
 	return usage
 }
 
-// BindUser adds the per-user claim to a global-only reservation.
+// BindUser adds the per-user claim to a global/source reservation.
 func (reservation *SessionReservation) BindUser(userID int64) error {
 	if reservation == nil || reservation.manager == nil || userID == 0 {
 		return errors.New("server: invalid session reservation")
@@ -253,6 +289,8 @@ func (reservation *SessionReservation) Activate() *model.Session {
 	sess := reservation.prepared
 	userID := reservation.userID
 	sm.sessions[sess.ID] = sess
+	sm.sessionSources[sess.ID] = reservation.source
+	sm.bySource[reservation.source]++ // transfer the claim before releasing pending capacity
 	sm.releaseReservationLocked(reservation)
 	if len(sm.sessions) > sm.highWater {
 		sm.highWater = len(sm.sessions)
@@ -298,11 +336,19 @@ func (sm *SessionManager) releaseReservationLocked(reservation *SessionReservati
 	}
 	reservation.active = false
 	sm.pending--
+	sm.releaseSourceLocked(reservation.source)
 	if reservation.userID != 0 {
 		sm.pendingByUser[reservation.userID]--
 		if sm.pendingByUser[reservation.userID] == 0 {
 			delete(sm.pendingByUser, reservation.userID)
 		}
+	}
+}
+
+func (sm *SessionManager) releaseSourceLocked(source netip.Prefix) {
+	sm.bySource[source]--
+	if sm.bySource[source] == 0 {
+		delete(sm.bySource, source)
 	}
 }
 
@@ -393,6 +439,10 @@ func (sm *SessionManager) ValidateScreenAuth(sessionID uint32, token string) boo
 func (sm *SessionManager) Remove(id uint32) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if source, ok := sm.sessionSources[id]; ok {
+		sm.releaseSourceLocked(source)
+		delete(sm.sessionSources, id)
+	}
 	delete(sm.sessions, id)
 	delete(sm.voiceReplay, id)
 }
@@ -579,14 +629,22 @@ func (sm *SessionManager) CapacitySnapshot() SessionCapacitySnapshot {
 			maxByUser = byUser[session.UserID]
 		}
 	}
+	maxBySource := 0
+	for _, count := range sm.bySource {
+		maxBySource = max(maxBySource, count)
+	}
 	return SessionCapacitySnapshot{
-		Active:                len(sm.sessions),
-		CapacityUsed:          len(sm.sessions) + sm.pending,
-		MaxUserCapacity:       maxByUser,
-		GlobalLimit:           sm.maxSessions,
-		PerUserLimit:          sm.maxPerUser,
-		CapacityHighWater:     sm.highWater,
-		UserCapacityHighWater: sm.userHighWater,
+		MaxSourceCapacity:       maxBySource,
+		PerSourceLimit:          sm.maxPerSource,
+		SourceCapacityHighWater: sm.sourceHighWater,
+		ActiveSources:           len(sm.bySource),
+		Active:                  len(sm.sessions),
+		CapacityUsed:            len(sm.sessions) + sm.pending,
+		MaxUserCapacity:         maxByUser,
+		GlobalLimit:             sm.maxSessions,
+		PerUserLimit:            sm.maxPerUser,
+		CapacityHighWater:       sm.highWater,
+		UserCapacityHighWater:   sm.userHighWater,
 	}
 }
 

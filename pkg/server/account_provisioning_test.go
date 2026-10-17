@@ -13,35 +13,18 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
-	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
 func authenticateControl(t *testing.T, srv *Server, st datastore.DataProviderFactory, username, token string) *pb.ControlMessage {
 	t.Helper()
-	serverConn, clientConn := net.Pipe()
-	done := make(chan struct{})
-	go func() {
-		srv.handleControlConn(newControlHandler(srv, st), serverConn, st)
-		close(done)
-	}()
+	return authenticateSource(t, srv, st, username, token, "127.0.0.1")
+}
 
-	if err := protocol.WriteControlMessage(clientConn, &pb.ControlMessage{
-		AuthRequest: &pb.AuthRequest{Username: username, Token: token, MediaCiphers: []string{"aes128"}},
-	}); err != nil {
-		t.Fatalf("write AuthRequest: %v", err)
-	}
-	response, err := protocol.ReadControlMessage(clientConn)
-	if err != nil {
-		t.Fatalf("read auth response: %v", err)
-	}
-	_ = clientConn.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("control handler did not return after client close")
-	}
-	return response
+// Give in-memory control peers a valid, fictional source identity.
+func newControlPipe() (net.Conn, net.Conn) {
+	server, peer := net.Pipe()
+	return remoteAddrConn{Conn: server, remote: testAddr("127.0.0.1:1234")}, peer
 }
 
 func expectControlRejectedBeforeAuth(t *testing.T, srv *Server, st datastore.DataProviderFactory) {
