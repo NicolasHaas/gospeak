@@ -94,6 +94,31 @@ sequenceDiagram
     end
 ```
 
+### State publication
+
+The authentication response includes the initial channel snapshot and remains
+first on the connection. Channel join acknowledgements and chat, errors and
+other reliable events remain FIFO. Changed membership, user state, channels
+and roles mark the full server state dirty. One server-owned publisher checks
+that mark every 100 ms; a burst before a tick needs only one snapshot and
+fanout. A mutation during a flush marks the next tick dirty again.
+
+Each client's existing 64-entry writer queue replaces its pending state with
+the latest snapshot until a reliable message is enqueued. That message seals
+the preceding state: later snapshots cannot move ahead of its acknowledgement
+or event. An in-flight write is immutable. Reliable messages are never replaced;
+a full reliable backlog still disconnects the slow client. Explicit channel
+list replies and post-authentication repairs remain immediate.
+
+Join membership and its successful acknowledgement enqueue share the snapshot
+publication lock. A concurrent flush therefore cannot expose the joining
+client's new membership before that client's acknowledgement. Socket writes
+remain outside the publication lock.
+
+This bounds mutation-driven snapshot work, not the full-state fanout cost.
+Each recipient still receives a full snapshot, subject to the 512 KiB frame
+limit. Coalescing alone does not establish a 500-user capacity guarantee.
+
 ### Channel Operations
 
 ```mermaid

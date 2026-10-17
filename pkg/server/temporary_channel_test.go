@@ -222,6 +222,7 @@ func TestTemporaryChannelSweepDeletesEmptyAndPreservesOccupiedChannels(t *testin
 			}
 		})
 		srv := New(cfg, Dependencies{Store: st})
+		t.Cleanup(srv.Shutdown)
 		handler := newControlHandler(srv, st)
 		now := channel.CreatedAt.Add(time.Minute)
 		srv.tempChannels.now = func() time.Time { return now }
