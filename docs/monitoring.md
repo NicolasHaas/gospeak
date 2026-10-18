@@ -83,6 +83,17 @@ while heartbeats are silently dropped without closing the connection. Local
 budgets still charge refused messages. A depleted account bucket survives
 reconnects until it refills, so reconnecting cannot restore its burst.
 
+When the ordinary server-wide bucket is empty, authenticated kick and ban
+requests with current server-owned role permission may use a shared 20-point
+reserve, refilled at five points per second. This permits four normal requests
+in a burst and one per second; encoded size can raise their cost. Account and
+session budgets still charge first. Target permissions, self-action and
+bootstrap-owner checks still apply; invalid role-qualified attempts also pay.
+The reserve excludes other traffic and administration, survives reconnects,
+and uses the same error/retry contract when empty. Global-budget metrics
+measure the ordinary bucket. The reserve provides bounded moderation recovery.
+Ordinary accounts and sources continue to share the server-wide bucket.
+
 ## Rejections, labels, and logs
 
 Rejection metrics use bounded reason and scope labels. They never expose source

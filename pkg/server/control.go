@@ -1307,7 +1307,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 
-		globalDecision := s.controlGlobalBudget.AllowSized(msg, payloadBytes)
+		globalDecision := s.allowGlobalControl(sessionID, msg, payloadBytes)
 		if !globalDecision.Allowed {
 			s.recordControlBudgetRejection(remoteAddr, "global", globalDecision)
 			// A shared shortage is not evidence that this sender abused its budget.

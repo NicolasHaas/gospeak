@@ -123,6 +123,7 @@ type Server struct {
 	controlBudgets          map[uint32]*controlMessageLimiter
 	controlUserBudgets      *controlUserBudgetManager
 	controlGlobalBudget     *controlMessageLimiter
+	controlModerationBudget *controlMessageLimiter
 	tempChannels            *tempChannelLifecycle
 
 	// ponytail: serialize state snapshots through enqueue; shard if fanout becomes a bottleneck.
@@ -201,6 +202,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		controlBudgets:          make(map[uint32]*controlMessageLimiter),
 		controlUserBudgets:      controlUserBudgets,
 		controlGlobalBudget:     controlGlobalBudget,
+		controlModerationBudget: newControlMessageLimiter(controlModerationBurst, controlModerationRefill, time.Now),
 		tempChannels:            newTempChannelLifecycle(cfg.AllowNoToken),
 		ctx:                     ctx,
 		cancel:                  cancel,
