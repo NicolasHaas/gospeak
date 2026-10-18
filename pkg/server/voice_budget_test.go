@@ -25,8 +25,8 @@ func TestAuthenticatedVoiceBudgetBoundsBurst(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1000, 0)
-	// The verified registration consumes one packet token from the burst.
-	if !srv.handleVoiceRegistration(registration, remote, now) {
+	// The request and returned proof consume two tokens from the burst.
+	if !registerVoiceForTest(t, srv, registration, remote, now) {
 		t.Fatal("registration failed")
 	}
 	srv.channels.Join(session.ID, 7)
@@ -42,8 +42,8 @@ func TestAuthenticatedVoiceBudgetBoundsBurst(t *testing.T) {
 	if _, ok := srv.acceptVoicePacketAt(forged, remote, now); ok || len(srv.sessions.voiceReplay) != stateBefore {
 		t.Fatal("forged packet created pacing/replay state")
 	}
-	// One burst token was spent on registration: 99 remain at this instant.
-	for sequence := uint32(1); sequence <= 99; sequence++ {
+	// Two tokens were spent on registration: 98 remain at this instant.
+	for sequence := uint32(1); sequence <= 98; sequence++ {
 		if _, ok := srv.acceptVoicePacketAt(packet(sequence), remote, now); !ok {
 			t.Fatalf("bounded burst rejected packet %d", sequence)
 		}
@@ -62,11 +62,11 @@ func TestAuthenticatedVoiceBudgetBoundsBurst(t *testing.T) {
 	}
 	state := srv.sessions.voiceReplay[session.ID]
 	state.packets, state.bytes = 1, 0
-	if srv.sessions.allowVoicePacket(session.ID, remote, protocol.VoiceHeaderSize+protocol.MaxVoicePayload, now) || state.packets != 1 {
+	if srv.sessions.allowVoicePacket(session.ID, remote, 7, protocol.VoiceHeaderSize+protocol.MaxVoicePayload, now) || state.packets != 1 {
 		t.Fatal("byte-budget refusal consumed packet credit or allowed bytes")
 	}
 	now = now.Add(20 * time.Millisecond)
-	if !srv.sessions.allowVoicePacket(session.ID, remote, protocol.VoiceHeaderSize+protocol.MaxVoicePayload, now) {
+	if !srv.sessions.allowVoicePacket(session.ID, remote, 7, protocol.VoiceHeaderSize+protocol.MaxVoicePayload, now) {
 		t.Fatal("byte budget did not refill at maximum legal 50Hz rate")
 	}
 	srv.sessions.Remove(session.ID)

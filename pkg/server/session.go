@@ -35,13 +35,22 @@ type SessionManager struct {
 	nextSessionID    uint32
 	issuedSessionIDs uint64
 	sessionIDSeeded  bool
+	voiceClosed      bool
 }
 
 type voiceReceiveState struct {
 	protocol.ReplayWindow
 	packets, bytes float64
 	updated        time.Time
+	challenge      [16]byte
+	challengeAddr  *net.UDPAddr
+	challengeUntil time.Time
 }
+
+const (
+	voiceChallengeTTL = 3 * time.Second
+	voiceEndpointTTL  = 30 * time.Second
+)
 
 var (
 	ErrSessionIDExhausted        = errors.New("server: session ID space exhausted")
@@ -380,6 +389,10 @@ func (sm *SessionManager) nextIDLocked() (uint32, error) {
 
 // GetSnapshot returns an immutable snapshot of the session by session ID.
 func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) {
+	return sm.getSnapshotAt(sessionID, time.Now())
+}
+
+func (sm *SessionManager) getSnapshotAt(sessionID uint32, now time.Time) (SessionSnapshot, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	s, ok := sm.sessions[sessionID]
@@ -394,7 +407,7 @@ func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) 
 		ChannelScope:    s.ChannelScope,
 		ChannelID:       s.ChannelID,
 		ScreenAuthToken: s.ScreenAuthToken,
-		UDPAddr:         cloneUDPAddr(s.UDPAddr),
+		UDPAddr:         cloneUDPAddr(sm.voiceEndpointLocked(s, now)),
 		Muted:           s.Muted,
 		Deafened:        s.Deafened,
 	}, true
@@ -402,6 +415,7 @@ func (sm *SessionManager) GetSnapshot(sessionID uint32) (SessionSnapshot, bool) 
 
 // GetAllByUserIDSnapshots retrieves immutable snapshots for every session of a user.
 func (sm *SessionManager) GetAllByUserIDSnapshots(userID int64) []SessionSnapshot {
+	now := time.Now()
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	snapshots := make([]SessionSnapshot, 0)
@@ -415,7 +429,7 @@ func (sm *SessionManager) GetAllByUserIDSnapshots(userID int64) []SessionSnapsho
 				ChannelScope:    s.ChannelScope,
 				ChannelID:       s.ChannelID,
 				ScreenAuthToken: s.ScreenAuthToken,
-				UDPAddr:         cloneUDPAddr(s.UDPAddr),
+				UDPAddr:         cloneUDPAddr(sm.voiceEndpointLocked(s, now)),
 				Muted:           s.Muted,
 				Deafened:        s.Deafened,
 			})
@@ -450,11 +464,11 @@ func (sm *SessionManager) Remove(id uint32) {
 // AcceptVoiceSequence atomically rechecks an authenticated packet's endpoint
 // and records its sequence for an active, unmuted session. Authentication must
 // happen before this call so forged high sequences cannot advance the window.
-func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAddr, sequence uint32) (SessionSnapshot, bool) {
+func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAddr, sequence uint32, now time.Time) (SessionSnapshot, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s, ok := sm.sessions[id]
-	if !ok || s.Muted || !udpAddrEqual(s.UDPAddr, expectedAddr) {
+	if !ok || s.Muted || !udpAddrEqual(sm.voiceEndpointLocked(s, now), expectedAddr) {
 		return SessionSnapshot{}, false
 	}
 	window := sm.voiceReplay[id]
@@ -473,57 +487,99 @@ func (sm *SessionManager) AcceptVoiceSequence(id uint32, expectedAddr *net.UDPAd
 		ChannelScope:    s.ChannelScope,
 		ChannelID:       s.ChannelID,
 		ScreenAuthToken: s.ScreenAuthToken,
-		UDPAddr:         cloneUDPAddr(s.UDPAddr),
+		UDPAddr:         cloneUDPAddr(sm.voiceEndpointLocked(s, now)),
 		Muted:           s.Muted,
 		Deafened:        s.Deafened,
 	}, true
 }
 
 // allowVoicePacket charges only authenticated, replay-accepted packets.
-func (sm *SessionManager) allowVoicePacket(id uint32, addr *net.UDPAddr, packetBytes int, now time.Time) bool {
+func (sm *SessionManager) allowVoicePacket(id uint32, addr *net.UDPAddr, channelID int64, packetBytes int, now time.Time) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	session, state := sm.sessions[id], sm.voiceReplay[id]
-	if session == nil || state == nil || session.Muted || !udpAddrEqual(session.UDPAddr, addr) || packetBytes <= 0 {
+	if session == nil || state == nil || session.Muted || channelID <= 0 || session.ChannelID != channelID || !udpAddrEqual(sm.voiceEndpointLocked(session, now), addr) || packetBytes <= 0 {
 		return false
 	}
-	return state.charge(packetBytes, now)
+	if !state.charge(packetBytes, now) {
+		return false
+	}
+	session.VoiceEndpointLastSeen = now
+	return true
 }
 
-// RegisterUDPAddr authenticates and atomically updates a session's UDP endpoint.
-// Verified registrations are charged to the session's voice packet budget so a
-// key holder cannot bypass packet pacing with a registration flood.
-func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.VoiceRegistration, addr *net.UDPAddr, now time.Time, rebindInterval time.Duration) bool {
+// voiceEndpointLocked is the shared expiry gate for snapshots and receive commits.
+// Expiry does not reset counters, replay state or the rebind clock.
+func (sm *SessionManager) voiceEndpointLocked(s *model.Session, now time.Time) *net.UDPAddr {
+	if sm.voiceClosed || s.VoiceEndpointLastSeen.IsZero() || !now.Before(s.VoiceEndpointLastSeen.Add(voiceEndpointTTL)) {
+		return nil
+	}
+	return s.UDPAddr
+}
+
+func (sm *SessionManager) closeVoiceEndpoints() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.voiceClosed = true
+}
+
+// RegisterUDPAddr processes GSR2 under the session lifecycle lock. A true result
+// means accepted work, not endpoint ownership: a non-nil reply must be returned
+// to the observed address, which must answer before a destination is installed.
+// One pending challenge per session bounds state; both legs share the voice budget.
+func (sm *SessionManager) RegisterUDPAddr(id uint32, registration *protocol.VoiceRegistration, addr *net.UDPAddr, now time.Time, rebindInterval time.Duration) ([]byte, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s, ok := sm.sessions[id]
-	if !ok || registration == nil || registration.SessionID != id || !registration.Verify(s.VoiceRegistrationKey) {
-		return false
-	}
-	if registration.Counter <= s.VoiceRegistrationCounter {
-		return false
+	if sm.voiceClosed || !ok || addr == nil || addr.Port <= 0 || addr.Port > 65535 || addr.IP.To16() == nil || registration == nil || registration.SessionID != id || !registration.Verify(s.VoiceRegistrationKey) {
+		return nil, false
 	}
 	rebound := !udpAddrEqual(s.UDPAddr, addr)
-	if rebound {
-		if s.UDPAddr != nil && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
-			return false
+	if rebound && s.UDPAddr != nil && now.Sub(s.VoiceEndpointUpdatedAt) < rebindInterval {
+		return nil, false
+	}
+	state := sm.voiceReplay[id]
+	switch registration.Kind {
+	case protocol.VoiceRegistrationResponse:
+		if state == nil || registration.Counter != s.VoiceRegistrationCounter || !udpAddrEqual(state.challengeAddr, addr) || registration.Challenge != state.challenge || !now.Before(state.challengeUntil) || now.Before(state.challengeUntil.Add(-voiceChallengeTTL)) {
+			return nil, false
 		}
-	}
-	// Charge the session's voice packet budget after verification so a key
-	// holder cannot bypass packet pacing with a registration flood; forged or
-	// rejected registrations create no replay/budget state. The charge runs
-	// before any mutation, so a budget-refused rebind consumes no rebind
-	// headroom.
-	if !sm.chargeRegistrationToken(id, now) {
-		return false
+		if !sm.chargeRegistrationToken(id, now) {
+			return nil, false
+		}
+		state.challengeAddr = nil
+	case protocol.VoiceRegistrationRequest:
+		if registration.Counter <= s.VoiceRegistrationCounter {
+			return nil, false
+		}
+		if !sm.chargeRegistrationToken(id, now) {
+			return nil, false
+		}
+		state = sm.voiceReplay[id]
+		state.challengeAddr = nil
+		if !udpAddrEqual(sm.voiceEndpointLocked(s, now), addr) {
+			var challenge [16]byte
+			if _, err := rand.Read(challenge[:]); err != nil {
+				return nil, false
+			}
+			reply, err := (&protocol.VoiceRegistration{SessionID: id, Counter: registration.Counter, Kind: protocol.VoiceRegistrationChallenge, Challenge: challenge}).Marshal(s.VoiceRegistrationKey)
+			if err != nil {
+				return nil, false
+			}
+			state.challenge, state.challengeAddr, state.challengeUntil = challenge, cloneUDPAddr(addr), now.Add(voiceChallengeTTL)
+			s.VoiceRegistrationCounter = registration.Counter
+			return reply, true
+		}
+		s.VoiceRegistrationCounter = registration.Counter
+	default:
+		return nil, false
 	}
 	if rebound {
-		// Same-address registration refreshes must not postpone NAT rebinding.
 		s.VoiceEndpointUpdatedAt = now
 	}
 	s.UDPAddr = cloneUDPAddr(addr)
-	s.VoiceRegistrationCounter = registration.Counter
-	return true
+	s.VoiceEndpointLastSeen = now
+	return nil, true
 }
 
 func (sm *SessionManager) chargeRegistrationToken(id uint32, now time.Time) bool {

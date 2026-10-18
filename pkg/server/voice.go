@@ -89,8 +89,12 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 		}
 
 		if protocol.IsVoiceRegistration(buf[:n]) {
-			if !s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now()) {
+			reply, ok := s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now())
+			if !ok {
 				s.metrics.VoicePacketsDropped.Add(1)
+			}
+			if reply != nil {
+				_, _ = conn.WriteToUDP(reply, remoteAddr)
 			}
 			continue
 		}
@@ -166,7 +170,7 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if pkt == nil || s.voiceCipher == nil {
 		return 0, false
 	}
-	session, ok := s.sessions.GetSnapshot(pkt.SessionID)
+	session, ok := s.sessions.getSnapshotAt(pkt.SessionID, now)
 	if !ok || session.Muted || session.ChannelID <= 0 || !udpAddrEqual(session.UDPAddr, remoteAddr) {
 		return 0, false
 	}
@@ -180,7 +184,7 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if hook := s.voiceReplayHook; hook != nil {
 		hook()
 	}
-	acceptedSession, ok := s.sessions.AcceptVoiceSequence(pkt.SessionID, remoteAddr, pkt.SeqNum)
+	acceptedSession, ok := s.sessions.AcceptVoiceSequence(pkt.SessionID, remoteAddr, pkt.SeqNum, now)
 	if !ok {
 		return 0, false
 	}
@@ -193,16 +197,16 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if packetChannel != pkt.ChannelID {
 		return 0, false
 	}
-	if !s.sessions.allowVoicePacket(pkt.SessionID, remoteAddr, protocol.VoiceHeaderSize+len(pkt.Payload), now) {
+	if !s.sessions.allowVoicePacket(pkt.SessionID, remoteAddr, actualChannel, protocol.VoiceHeaderSize+len(pkt.Payload), now) {
 		return 0, false
 	}
 	return actualChannel, true
 }
 
-func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) bool {
+func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) ([]byte, bool) {
 	registration, err := protocol.UnmarshalVoiceRegistration(data)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	return s.sessions.RegisterUDPAddr(registration.SessionID, registration, remoteAddr, now, voiceRebindInterval)
 }

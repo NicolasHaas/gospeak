@@ -15,6 +15,8 @@ import (
 
 var ErrVoiceSequenceExhausted = errors.New("client: voice sequence exhausted; reconnect required")
 
+var ErrVoiceRegistrationExhausted = errors.New("client: voice registration counter exhausted; reconnect required")
+
 // VoiceClient manages the UDP voice connection.
 type VoiceClient struct {
 	conn                net.Conn
@@ -25,6 +27,8 @@ type VoiceClient struct {
 	seqNum              uint32
 	registrationKey     []byte
 	registrationCounter uint64
+	registrationPending bool
+	closed              bool
 	mu                  sync.Mutex
 
 	// Incoming voice packets are sent here
@@ -69,16 +73,45 @@ func NewVoiceClient(serverAddr string, sessionID uint32, encKey, registrationKey
 	return client, nil
 }
 
-// SendRegistration proves ownership of this session from the current UDP endpoint.
+// SendRegistration requests or refreshes the current UDP endpoint. The receiver
+// answers an authenticated server challenge for a new, rebound or expired endpoint.
 func (v *VoiceClient) SendRegistration() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return net.ErrClosed
+	}
+	if v.registrationCounter == ^uint64(0) {
+		v.registrationPending = false
+		return ErrVoiceRegistrationExhausted
+	}
 	v.registrationCounter++
 	packet, err := protocol.MarshalVoiceRegistration(v.sessionID, v.registrationCounter, v.registrationKey)
 	if err != nil {
 		return err
 	}
 	_, err = v.conn.Write(packet)
+	v.registrationPending = err == nil
+	return err
+}
+
+func (v *VoiceClient) answerRegistrationChallenge(data []byte) error {
+	challenge, err := protocol.UnmarshalVoiceRegistration(data)
+	if err != nil {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || !v.registrationPending || challenge.SessionID != v.sessionID || challenge.Counter != v.registrationCounter || challenge.Kind != protocol.VoiceRegistrationChallenge || !challenge.Verify(v.registrationKey) {
+		return nil
+	}
+	v.registrationPending = false
+	challenge.Kind = protocol.VoiceRegistrationResponse
+	response, err := challenge.Marshal(v.registrationKey)
+	if err != nil {
+		return err
+	}
+	_, err = v.conn.Write(response)
 	return err
 }
 
@@ -92,6 +125,10 @@ func (v *VoiceClient) SetChannel(channelID int64) {
 // SendVoice encrypts and sends an Opus frame over UDP.
 func (v *VoiceClient) SendVoice(opusData []byte, timestamp uint32) error {
 	v.mu.Lock()
+	if v.closed {
+		v.mu.Unlock()
+		return net.ErrClosed
+	}
 	if v.seqNum == ^uint32(0) {
 		v.mu.Unlock()
 		return ErrVoiceSequenceExhausted
@@ -136,6 +173,12 @@ func (v *VoiceClient) StartReceiving() {
 				return
 			}
 
+			if protocol.IsVoiceRegistration(buf[:n]) {
+				if err := v.answerRegistrationChallenge(buf[:n]); err != nil {
+					slog.Debug("voice registration response failed")
+				}
+				continue
+			}
 			pkt, err := protocol.UnmarshalVoicePacket(buf[:n])
 			if err != nil {
 				continue
@@ -152,5 +195,11 @@ func (v *VoiceClient) StartReceiving() {
 
 // Close closes the voice connection.
 func (v *VoiceClient) Close() error {
-	return v.conn.Close()
+	// Interrupt registration writes before waiting for their mutex.
+	err := v.conn.Close()
+	v.mu.Lock()
+	v.closed = true
+	v.registrationPending = false
+	v.mu.Unlock()
+	return err
 }

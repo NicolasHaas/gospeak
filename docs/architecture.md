@@ -162,13 +162,16 @@ sequenceDiagram
     Srv->>Eng: AuthResponse{sessionID, role, channelScope, mediaCipher, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken?}
     Eng->>UDP: Dial UDP to server:9601
     Eng->>Eng: Create outbound VoiceCipher from encryptionKey
-    Eng->>Srv: Authenticated voice-registration datagram
+    Eng->>Srv: GSR2 authenticated registration request
     Eng->>Eng: Create inbound VoiceCipher from encryptionKey
     opt screenShareEnabled
         Eng->>SCR: Dial TCP/TLS to screenAddr and authenticate with screenAuthToken
     end
     Eng->>UI: OnStateChange(Connected)
     Eng->>Eng: Start control and voice receivers
+    Srv->>Eng: GSR2 address-bound challenge
+    Eng->>Srv: GSR2 authenticated challenge response
+    Note over Eng,Srv: Voice destination becomes eligible only after returned proof
     opt screenShareEnabled
         Eng->>Eng: Start screen receiver
     end

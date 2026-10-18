@@ -141,6 +141,7 @@ func (s *Server) Shutdown() {
 		s.workerMu.Lock()
 		s.stopping = true
 		s.cancel()
+		s.sessions.closeVoiceEndpoints()
 		s.workerMu.Unlock()
 		s.statePublicationMu.Unlock()
 

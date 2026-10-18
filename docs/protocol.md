@@ -211,15 +211,19 @@ The control plane carries screen-share lifecycle messages only:
 
 ### Authenticated Endpoint Registration
 
-A voice endpoint is not learned from an ordinary voice packet. During control authentication, the server creates a random 32-byte `voice_registration_key` for that session and returns it inside the TLS-protected `AuthResponse`. The client immediately sends this registration datagram and refreshes it every five seconds:
+A voice endpoint is never learned from an ordinary voice packet. Control authentication returns a random 32-byte per-session `voice_registration_key` over TLS. The client immediately sends a GSR2 request and refreshes it every five seconds, including while silent or muted. All three registration messages have the same 65-byte format; integers are big-endian:
 
 ```
-[Magic "GSR1":4B][SessionID:4B][Counter:8B][HMAC-SHA-256:32B]
+[Magic "GSR2":4B][SessionID:4B][Counter:8B][Kind:1B][Challenge:16B][HMAC-SHA-256:32B]
 ```
 
-The HMAC covers the first 16 bytes. The server accepts only a valid proof for the named active session with a counter greater than every previously accepted counter. Once a registration is accepted, the same datagram cannot be replayed. A source-address change requires a fresh proof and is accepted at most once per five seconds; this permits controlled NAT rebinding without STUN or TURN. Voice packets from unregistered or mismatched endpoints are dropped.
+The HMAC covers the first 33 bytes, including kind and challenge. Kind `0` is a request with an all-zero challenge. Its positive 64-bit counter must exceed the last accepted request counter. A live endpoint at the same address refreshes immediately. For a new, changed or expired endpoint, the server instead returns kind `1` with a fresh random 128-bit challenge. The client verifies the server HMAC, session and outstanding counter, then returns kind `2` with the same challenge and counter, signed again. The server commits the destination only if that response matches the pending session, source IP/port/zone, counter and challenge within three seconds. A server challenge cannot be reflected as a client response. Requests supersede older pending challenges; responses are accepted once. Counters never wrap: exhaustion requires reconnecting.
 
-This field is required: clients and servers from before authenticated UDP registration are not voice-compatible with this protocol revision and fail closed rather than falling back to first-packet binding.
+A session HMAC proves key possession, so it cannot by itself authorize a spoofed UDP source. The server retains at most one pending challenge per active session and sends at most one equal-sized challenge per accepted request. Malformed packets and unknown sessions receive no reply; bad HMACs create no pending or budget state. Accepted requests and matching responses each consume one token from the existing voice packet/byte budget, charged at the maximum voice packet size. Source changes remain limited to one per five seconds; same-address refreshes do not postpone that rebind clock.
+
+Destinations expire after 30 seconds without an accepted registration refresh, returned proof or authenticated, replay-accepted, authorized and budget-admitted voice packet from that endpoint. Invalid, replayed, muted or over-budget voice does not renew activity. Forwarding eligibility checks expiry directly, without a janitor. Ordinary voice cannot revive an expired endpoint; a fresh challenge exchange can. Expiry and rebinding preserve media replay state and registration counters until the control session ends.
+
+**Compatibility:** GSR2 requires coordinated client and server upgrades. GSR1 HMAC-only peers are not voice-compatible. There is no legacy registration or first-packet binding fallback, and no STUN, TURN or cloud service.
 
 ### Packet Format
 
@@ -279,7 +283,7 @@ The server does **not** decode Opus audio. It:
 3. Opens the selected AEAD payload transiently to authenticate the ciphertext and complete header; it does not decode, log, or retain the Opus plaintext
 4. Applies a per-session 64-packet replay window after authentication
 5. Forwards the original ciphertext **as-is** to all other members of that channel
-6. Skips the sender (no echo) and any deafened users
+6. Skips the sender (no echo), deafened users and destinations without an unexpired return-routability proof
 
 ### Nonce Construction
 

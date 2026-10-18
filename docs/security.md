@@ -18,7 +18,7 @@ Text chat is protected in transit by the control connection's TLS, not end-to-en
 | AEAD nonce reuse | Session IDs are never reissued while a voice key is active; voice and screen senders fail closed before sequence-number wrap |
 | Media replay | Voice uses an authenticated 64-packet sliding window per control session; screen uses a strict authenticated sequence on its ordered stream |
 | Unauthorized access | Token-based auth with SHA-256 hashed storage, RBAC |
-| UDP endpoint hijacking | Per-session HMAC registration proof from the TLS control channel, monotonic registration counters, and rate-limited rebinding |
+| UDP endpoint hijacking and spoofed destinations | Per-session HMACs, address-bound return challenges, monotonic counters, rate-limited rebinding and endpoint expiry |
 | Brute force tokens | Tokens are 256-bit random (64-char hex), hashed with SHA-256 |
 | Privilege escalation | Server-side RBAC checks on every admin operation |
 
@@ -106,9 +106,11 @@ sequenceDiagram
 
 ### UDP Endpoint Registration
 
-The shared media key does not authorize a UDP source address. Each control session receives a separate random 256-bit registration key in `AuthResponse`, protected by TLS. The client sends an HMAC-SHA-256 registration proof immediately and every five seconds. A monotonic 64-bit counter makes accepted proofs one-use, and the server rate-limits authenticated endpoint changes to one per five seconds. Ordinary voice packets never establish or change the endpoint.
+The shared media key does not authorize a UDP source address. Each control session receives a separate random 256-bit registration key in `AuthResponse`, protected by TLS. Its HMAC proves key possession, but a key holder could still spoof a packet's source. GSR2 therefore requires a random, session/address-bound challenge response within three seconds before installing a new, changed or expired destination. Requests use increasing 64-bit counters; returned proofs are one-use. Endpoint changes remain limited to one per five seconds. Ordinary voice packets never establish or change the endpoint.
 
-This prevents another client from binding a victim's visible session ID to the attacker's UDP address. It does not prevent an on-path attacker from dropping UDP traffic, and it does not add NAT traversal: connectivity remains direct UDP with no STUN or TURN service.
+The client refreshes registration every five seconds even while silent. After 30 seconds without valid authenticated endpoint activity, forwarding stops until a fresh challenge exchange succeeds. Invalid or replayed traffic cannot keep a recipient alive. One pending challenge per session and equal-sized request/reply datagrams bound retained state and reflection; accepted registration legs share the voice pacing budget. Unauthenticated input has fixed-size parsing/HMAC work and receives no challenge. These bounds do not provide an aggregate UDP CPU or bandwidth guarantee.
+
+GSR2 clients and servers must upgrade together; GSR1 HMAC-only registration has no fallback. This prevents an off-path key holder from directing voice at an unanswered spoofed destination. An on-path attacker can still observe challenges or drop traffic. Connectivity remains direct UDP with no STUN or TURN service. See the [wire format and expiry rules](protocol.md#authenticated-endpoint-registration).
 
 ### Voice forwarding limits
 
