@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
+	"github.com/NicolasHaas/gospeak/pkg/rbac"
 )
 
 var errControlUserBudgetCapacity = errors.New("server: control user budget capacity reached")
@@ -18,6 +19,8 @@ const (
 	controlExpensiveCost      = 5
 	controlBytesPerCost       = 16 * 1024
 	maxControlUserBudgetCount = 4096
+	controlModerationBurst    = 4 * controlExpensiveCost
+	controlModerationRefill   = controlExpensiveCost
 )
 
 type controlBudgetDecision struct {
@@ -27,6 +30,31 @@ type controlBudgetDecision struct {
 	Remaining float64
 	Limit     int
 	Usage     int
+}
+
+// Local/account budgets are charged before this fallback. Target authorization
+// stays in the kick/ban handlers; role-qualified invalid attempts also pay.
+func (s *Server) allowGlobalControl(sessionID uint32, message *pb.ControlMessage, payloadBytes int) controlBudgetDecision {
+	decision := s.controlGlobalBudget.AllowSized(message, payloadBytes)
+	if decision.Allowed {
+		return decision
+	}
+	var permission rbac.Permission
+	switch {
+	case message.KickUserReq != nil:
+		permission = rbac.PermKickUser
+	case message.BanUserReq != nil:
+		permission = rbac.PermBanUser
+	default:
+		return decision
+	}
+	s.remoteModerationMu.Lock()
+	session, ok := s.sessions.GetSnapshot(sessionID)
+	if ok && rbac.HasPermission(session.Role, permission) {
+		decision.Allowed = s.controlModerationBudget.AllowSized(message, payloadBytes).Allowed
+	}
+	s.remoteModerationMu.Unlock()
+	return decision
 }
 
 type controlMessageLimiter struct {
