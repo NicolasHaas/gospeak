@@ -615,7 +615,7 @@ func (a *App) bindEvents() {
 			a.activeScreenShare = event
 			a.updateShareButton()
 			a.updateWatchButton()
-			if event != nil && !event.Active && a.watchingScreenFeed {
+			if (event == nil || !event.Active) && a.watchingScreenFeed {
 				a.watchingScreenFeed = false
 				a.showChatPanel()
 			}
