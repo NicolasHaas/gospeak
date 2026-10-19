@@ -486,7 +486,12 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 	}) {
 		return fail(fmt.Errorf("connection canceled"))
 	}
-	if !g.startTrackedReceiver(voice.StartReceiving, func() { <-voice.done }) {
+	if !g.startTrackedReceiver(voice.StartReceiving, func() {
+		<-voice.done
+		if g.ctx.Err() == nil {
+			e.requestDisconnect(g, "voice connection lost")
+		}
+	}) {
 		return fail(fmt.Errorf("connection canceled"))
 	}
 	g.mu.Lock()
