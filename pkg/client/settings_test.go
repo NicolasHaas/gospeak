@@ -8,6 +8,42 @@ import (
 	"testing"
 )
 
+func TestSettingsVADThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  float64
+	}{
+		{"", DefaultSettings().VADThreshold},
+		{".nan", DefaultSettings().VADThreshold},
+		{".inf", DefaultSettings().VADThreshold},
+		{"-.inf", DefaultSettings().VADThreshold},
+		{"-1", DefaultSettings().VADThreshold},
+		{"0", DefaultSettings().VADThreshold},
+		{"49.99", DefaultSettings().VADThreshold},
+		{"3000.01", DefaultSettings().VADThreshold},
+		{"broken", DefaultSettings().VADThreshold},
+		{"50", 50},
+		{"200", 200},
+		{"512.5", 512.5},
+		{"3000", 3000},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.yaml")
+			data := "mute_key: F9\n"
+			if tc.value != "" {
+				data += "vad_threshold: " + tc.value + "\n"
+			}
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := loadSettings(path, "")
+			if s.VADThreshold != tc.want || s.MuteKey != "F9" {
+				t.Fatalf("loaded threshold %v, mute key %q; want %v, F9", s.VADThreshold, s.MuteKey, tc.want)
+			}
+		})
+	}
+}
+
 func TestSettingsVolumes(t *testing.T) {
 	for _, tc := range []struct {
 		data          string

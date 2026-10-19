@@ -74,6 +74,9 @@ func loadSettings(path, legacyPath string) *Settings {
 	if err := yaml.Unmarshal(data, s); err != nil {
 		slog.Error("parse settings", "err", err)
 	}
+	if math.IsNaN(s.VADThreshold) || s.VADThreshold < 50 || s.VADThreshold > 3000 {
+		s.VADThreshold = DefaultSettings().VADThreshold
+	}
 	s.InputVolume = normalizeVolume(s.InputVolume)
 	s.OutputVolume = normalizeVolume(s.OutputVolume)
 	return s
