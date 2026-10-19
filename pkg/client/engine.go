@@ -1231,9 +1231,11 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		}
 		voice := g.voice
 		applied := false
+		channelChanged := false
 		if pending && response.Success && g.ctx.Err() == nil {
 			e.mu.Lock()
 			if e.generation == g && e.state == StateConnected {
+				channelChanged = e.channelID != response.ChannelID
 				e.channelID = response.ChannelID
 				if voice != nil {
 					voice.SetChannel(response.ChannelID)
@@ -1254,7 +1256,9 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 			return
 		}
 		if applied {
-			e.clearScreenShareStateGenerationLocked(g)
+			if channelChanged {
+				e.clearScreenShareStateGenerationLocked(g)
+			}
 			if callback := e.OnChannelJoined; callback != nil {
 				e.enqueueGenerationCallbackLocked(g, func() { callback(response.ChannelID) })
 			}
