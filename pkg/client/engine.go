@@ -13,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/NicolasHaas/gospeak/pkg/audio"
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 	"github.com/NicolasHaas/gospeak/pkg/screenshare"
@@ -1800,6 +1802,17 @@ func (e *Engine) SendChat(channelID int64, text string) error {
 	defer g.wg.Done()
 	if channelID <= 0 {
 		return fmt.Errorf("no text channel selected")
+	}
+	// Count the characters that survive the server's text sanitization.
+	length := 0
+	for _, r := range strings.TrimSpace(text) {
+		if r != '\n' && r != '\r' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			continue
+		}
+		length++
+		if length > model.MessageMaxBodyLength {
+			return model.ErrMessageBodyTooLong
+		}
 	}
 	return ctrl.Send(&pb.ControlMessage{
 		ChatMsg: &pb.ChatMessage{ChannelID: channelID, Text: text},
