@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1204,10 +1205,26 @@ func (e *Engine) handleEventGeneration(g *connectionGeneration, msg *pb.ControlM
 func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 	switch {
 	case msg.ServerStateEvent != nil:
+		g.mu.Lock()
 		e.mu.Lock()
 		e.channels = msg.ServerStateEvent.Channels
 		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled
+		// Deletion and temporary-channel cleanup already publish the full list.
+		// A missing voice channel revokes local media, without selecting a new one.
+		removed := e.channelID != 0 && !slices.ContainsFunc(e.channels, func(channel pb.ChannelInfo) bool {
+			return channel.ID == e.channelID
+		})
+		if removed {
+			e.channelID = 0
+			if g.voice != nil {
+				g.voice.SetChannel(0)
+			}
+		}
 		e.mu.Unlock()
+		g.mu.Unlock()
+		if removed {
+			e.clearScreenShareStateGenerationLocked(g)
+		}
 		if callback := e.OnChannelsUpdate; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.ServerStateEvent.Channels) })
 		}
@@ -2244,6 +2261,9 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 	mySessionID := e.sessionID
 	channelID := e.channelID
 	e.mu.RUnlock()
+	if event.Active && (channelID == 0 || event.ChannelID != channelID) {
+		return
+	}
 
 	if event.SessionID == mySessionID {
 		if event.Active {
