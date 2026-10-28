@@ -82,6 +82,7 @@ type App struct {
 	channels           []pb.ChannelInfo
 	selectedChannelID  int64
 	chatChannelID      int64
+	chatDrafts         map[int64]string
 	chatRows           []pb.ChatMessage
 	chatDeleted        map[int64]bool
 	chatHasMore        bool
@@ -483,6 +484,7 @@ func (a *App) bindEvents() {
 				a.channels = nil
 				a.selectedChannelID = 0
 				a.resetChat()
+				clear(a.chatDrafts)
 				a.activeScreenShare = nil
 				a.watchingScreenFeed = false
 				a.updateJoinChannelButton()

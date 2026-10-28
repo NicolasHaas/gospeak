@@ -42,6 +42,13 @@ func (a *App) expireChatHistory(attempt uint64) {
 }
 
 func (a *App) resetChat() {
+	if a.chatChannelID != 0 {
+		if a.chatDrafts == nil {
+			a.chatDrafts = make(map[int64]string)
+		}
+		a.chatDrafts[a.chatChannelID] = a.chatEntry.Text
+	}
+	a.chatEntry.SetText("")
 	if a.chatTimer != nil {
 		a.chatTimer.Stop()
 		a.chatTimer = nil
@@ -76,6 +83,7 @@ func (a *App) selectChatChannel(channelID int64) {
 	if channelID != a.chatChannelID {
 		a.resetChat()
 		a.chatChannelID = channelID
+		a.chatEntry.SetText(a.chatDrafts[channelID])
 		a.chatDeleted = make(map[int64]bool)
 	}
 	a.startChatLoading()
