@@ -515,8 +515,10 @@ func (a *App) bindEvents() {
 				a.syncSelectedChannel()
 				a.selectChatChannel(a.selectedChannelID)
 				role := a.engine.GetRole()
-				if role == "admin" || role == "moderator" {
+				if role == "admin" {
 					a.serverBtn.Show()
+				} else {
+					a.serverBtn.Hide()
 				}
 			}
 		})
@@ -659,7 +661,7 @@ func (a *App) bindEvents() {
 				dialog.ShowInformation("Role Updated", message, a.window)
 				// Update server button visibility based on new role
 				role := a.engine.GetRole()
-				if role == "admin" || role == "moderator" {
+				if role == "admin" {
 					a.serverBtn.Show()
 				} else {
 					a.serverBtn.Hide()
@@ -1282,8 +1284,8 @@ func (a *App) showServerSettings() {
 	role := a.engine.GetRole()
 	var sections []fyne.CanvasObject
 
-	// --- Create Invite Token (admin/mod) ---
-	if role == "admin" || role == "moderator" {
+	// --- Create Invite Token (admin) ---
+	if role == "admin" {
 		roleSelect := widget.NewSelect([]string{"user", "moderator", "admin"}, nil)
 		roleSelect.SetSelected("user")
 		maxUsesEntry := widget.NewEntry()
@@ -1312,8 +1314,8 @@ func (a *App) showServerSettings() {
 		)
 	}
 
-	// --- Create Channel (admin/mod) ---
-	if role == "admin" || role == "moderator" {
+	// --- Create Channel (admin) ---
+	if role == "admin" {
 		chNameEntry := widget.NewEntry()
 		chNameEntry.SetPlaceHolder("Channel name")
 		chDescEntry := widget.NewEntry()
@@ -1663,7 +1665,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		// Show gear icon when user has channel actions available
 		role := a.engine.GetRole()
 		showGear := a.engine.GetState() == client.StateConnected &&
-			(item.channel.AllowSubChannels || role == "admin" || role == "moderator")
+			(item.channel.AllowSubChannels || role == "admin")
 		if showGear {
 			ch := item.channel
 			gearBtn.OnTapped = func() {
@@ -1924,7 +1926,7 @@ func (a *App) showChannelSettingsDialog(channel pb.ChannelInfo) {
 	}
 
 	// Admin: delete channel (not Lobby)
-	if (role == "admin" || role == "moderator") && channel.Name != "Lobby" {
+	if role == "admin" && channel.Name != "Lobby" {
 		items = append(items, widget.NewSeparator())
 		delBtn := widget.NewButton("Delete Channel", func() {
 			dialog.ShowConfirm("Delete Channel",
@@ -1962,7 +1964,7 @@ func (a *App) showHelpDialog() {
 		"  [M]              — Muted\n" +
 		"  [D]              — Deafened\n\n" +
 		"TOOLBAR\n" +
-		"  Server Settings  — Tokens, channels, import/export (admin/mod)\n" +
+		"  Server Settings  - Tokens, channels, import/export (admin)\n" +
 		fmt.Sprintf("  Gear icon        - %s\n", settingsHelp) +
 		"  Info icon        — This help dialog\n\n" +
 		"CHAT\n" +
