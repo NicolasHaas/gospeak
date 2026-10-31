@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
@@ -19,7 +21,11 @@ func TestChannelRemovalPublishesStateAfterJoinACK(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv, st, handler := newTestServer(t)
 			handler.statePublisher.Do(func() {}) // publish at explicit barriers, not timer ticks
-			channel := &model.Channel{Name: "removed", IsTemp: sweep, ParentID: 999}
+			parent := &model.Channel{Name: "remaining"}
+			if err := st.NonTx().CreateChannel(parent); err != nil {
+				t.Fatal(err)
+			}
+			channel := &model.Channel{Name: "removed", IsTemp: sweep, ParentID: parent.ID}
 			if err := st.NonTx().CreateChannel(channel); err != nil {
 				t.Fatal(err)
 			}
@@ -36,6 +42,10 @@ func TestChannelRemovalPublishesStateAfterJoinACK(t *testing.T) {
 				t.Fatal(err)
 			}
 			if sweep {
+				// Exercise legacy orphan cleanup; new writes cannot create this state.
+				if _, err := st.(*datastore.ProviderFactory).DB.ExecContext(context.Background(), "UPDATE channels SET parent_id = 999 WHERE id = ?", channel.ID); err != nil {
+					t.Fatal(err)
+				}
 				srv.sweepTempChannels(handler, st)
 			} else {
 				srv.handleDeleteChannel(member.ID, &pb.DeleteChannelRequest{ChannelID: channel.ID}, st, &bufferConn{}, handler)

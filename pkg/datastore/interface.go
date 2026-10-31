@@ -50,6 +50,8 @@ type DataStore interface {
 // duplicate username constraint.
 var ErrUsernameTaken = errors.New("datastore: username already taken")
 var ErrChannelNameTaken = errors.New("datastore: channel name already exists under parent")
+var ErrChannelReference = errors.New("datastore: channel reference must be zero or an existing channel")
+var ErrChannelDeleteRefused = errors.New("datastore: channel missing, referenced, or last remaining channel")
 var ErrBootstrapAlreadyProvisioned = errors.New("datastore: bootstrap credential already provisioned another user")
 
 type BootstrapTokenState uint8

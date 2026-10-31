@@ -637,18 +637,25 @@ func (s *baseProvider) CreateUserWithChannelScope(username string, role model.Ro
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO users (username, role, channel_scope, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?, ?)",
+		`INSERT INTO users (username, role, channel_scope, personal_token_hash, personal_token_created_at)
+		 SELECT ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))`,
 		username,
 		int(role),
 		channelScope,
 		"",
 		formatDBTime(time.Now().UTC()),
+		channelScope, channelScope, channelScope,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
 			return nil, fmt.Errorf("datastore: create user: %w", ErrUsernameTaken)
 		}
 		return nil, fmt.Errorf("datastore: create user: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("datastore: create user rows affected: %w", err)
+	} else if n == 0 {
+		return nil, ErrChannelReference
 	}
 	id, _ := res.LastInsertId()
 	return &model.User{
@@ -847,7 +854,7 @@ func (s *baseProvider) BootstrapUserID() (int64, bool, error) {
 
 // ---- Channels ----
 
-// CreateChannelFull creates a new channel with all options.
+// CreateChannel creates a channel, checking its parent atomically with insertion.
 func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	if err := channel.Validate(); err != nil {
 		return err
@@ -863,7 +870,8 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		`INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by)
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?)`,
 		channel.Name,
 		channel.Description,
 		channel.MaxUsers,
@@ -871,12 +879,18 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 		isTempInt,
 		allowSubInt,
 		channel.CreatedBy,
+		channel.ParentID, channel.ParentID,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: channels.parent_id, channels.name") {
 			return fmt.Errorf("datastore: create channel: %w", ErrChannelNameTaken)
 		}
 		return fmt.Errorf("datastore: create channel: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: create channel rows affected: %w", err)
+	} else if n == 0 {
+		return ErrChannelReference
 	}
 	channel.ID, err = res.LastInsertId()
 	if err != nil {
@@ -887,11 +901,21 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	return nil
 }
 
-// DeleteChannel deletes a channel by ID.
+// DeleteChannel refuses missing, referenced, or last-channel deletion. The checks
+// share the DELETE statement's writer lock, including for nontransactional callers.
 func (s *baseProvider) DeleteChannel(id int64) error {
-	_, err := s.ExecContext(context.Background(), "DELETE FROM channels WHERE id = ?", id)
+	res, err := s.ExecContext(context.Background(), `DELETE FROM channels WHERE id = ?
+		AND EXISTS(SELECT 1 FROM channels WHERE id != ?)
+		AND NOT EXISTS(SELECT 1 FROM channels WHERE parent_id = ?)
+		AND NOT EXISTS(SELECT 1 FROM users WHERE channel_scope = ?)
+		AND NOT EXISTS(SELECT 1 FROM tokens WHERE channel_scope = ?)`, id, id, id, id, id)
 	if err != nil {
 		return fmt.Errorf("datastore: delete channel: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: delete channel rows affected: %w", err)
+	} else if n == 0 {
+		return ErrChannelDeleteRefused
 	}
 	return nil
 }
@@ -1027,11 +1051,17 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 		value := formatDBTime(expiresAt)
 		expStr = &value
 	}
-	_, err := s.ExecContext(context.Background(),
-		"INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr)
+	res, err := s.ExecContext(context.Background(),
+		`INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at)
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))`,
+		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr, channelScope, channelScope, channelScope)
 	if err != nil {
 		return fmt.Errorf("datastore: create token: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: create token rows affected: %w", err)
+	} else if n == 0 {
+		return ErrChannelReference
 	}
 	return nil
 }

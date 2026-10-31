@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -167,10 +168,18 @@ func TestTemporaryChannelParentAndGlobalQuotas(t *testing.T) {
 		if err := st.NonTx().CreateChannel(parent); err != nil {
 			t.Fatalf("CreateChannel(parent): %v", err)
 		}
+		var quotaParentID int64
 		for i := 0; i < maxTempChannels; i++ {
+			if i%maxTempChannelsPerParent == 0 {
+				quotaParent := &model.Channel{Name: fmt.Sprintf("quota-parent-%d", i)}
+				if err := st.NonTx().CreateChannel(quotaParent); err != nil {
+					t.Fatal(err)
+				}
+				quotaParentID = quotaParent.ID
+			}
 			channel := model.NewChannel()
 			channel.Name = fmt.Sprintf("temp-%d", i)
-			channel.ParentID = int64(i/maxTempChannelsPerParent + 100)
+			channel.ParentID = quotaParentID
 			channel.IsTemp = true
 			channel.CreatedBy = int64(i + 1)
 			if err := st.NonTx().CreateChannel(channel); err != nil {
@@ -284,10 +293,14 @@ func TestTemporaryChannelSweepPreservesReoccupiedChannelAndDeletesOrphan(t *test
 	}
 	orphan := model.NewChannel()
 	orphan.Name = "orphan"
-	orphan.ParentID = parent.ID + 999
+	orphan.ParentID = parent.ID
 	orphan.IsTemp = true
 	if err := st.NonTx().CreateChannel(orphan); err != nil {
 		t.Fatalf("CreateChannel(orphan): %v", err)
+	}
+	// Seed pre-existing malformed state; normal creation now rejects missing parents.
+	if _, err := st.(*datastore.ProviderFactory).DB.ExecContext(context.Background(), "UPDATE channels SET parent_id = ? WHERE id = ?", parent.ID+999, orphan.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	srv.tempChannels.emptySince[occupied.ID] = occupied.CreatedAt

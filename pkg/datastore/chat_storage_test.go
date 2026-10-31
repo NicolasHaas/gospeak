@@ -92,6 +92,9 @@ func TestChatStorageCursorAndRetention(t *testing.T) {
 			t.Fatalf("accepted invalid message: %+v", bad)
 		}
 	}
+	if err := st.CreateChannel(&model.Channel{Name: "remaining"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.DeleteChannel(channel.ID); err != nil {
 		t.Fatal(err)
 	}

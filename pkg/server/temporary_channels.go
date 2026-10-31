@@ -251,7 +251,10 @@ func (s *Server) sweepTempChannels(handler *ControlHandler, store datastore.Data
 			continue
 		}
 		if err := store.NonTx().DeleteChannel(channel.ID); err != nil {
-			slog.Error("delete expired temporary channel", "id", channel.ID, "err", err)
+			// A durable reference is an expected refusal, not a datastore failure.
+			if !errors.Is(err, datastore.ErrChannelDeleteRefused) {
+				slog.Error("delete expired temporary channel", "id", channel.ID, "err", err)
+			}
 			deleteFailed = true
 			continue
 		}
