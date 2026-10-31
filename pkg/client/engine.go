@@ -231,7 +231,8 @@ type Engine struct {
 	decoderFactory  audio.DecoderFactory
 	now             func() time.Time
 
-	channels []pb.ChannelInfo
+	channels     []pb.ChannelInfo
+	channelScope int64
 
 	screenMu            sync.Mutex
 	screenSendMu        sync.Mutex
@@ -373,6 +374,7 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 			e.generation = nil
 			e.disconnecting = g
 			e.state = StateDisconnected
+			e.channelScope = 0
 		}
 		e.mu.Unlock()
 		e.notifyStateChange(StateDisconnected)
@@ -571,6 +573,7 @@ func (e *Engine) publishConnectingGeneration(g *connectionGeneration) bool {
 		return false
 	}
 	e.generation = g
+	e.channelScope = 0
 	e.state = StateConnecting
 	e.mu.Unlock()
 
@@ -598,6 +601,7 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 	e.username = authResp.Username
 	e.role = authResp.Role
 	e.channels = authResp.Channels
+	e.channelScope = authResp.ChannelScope
 	e.screenShareEnabled = authResp.ScreenShareEnabled
 	e.mediaCipher = authResp.MediaCipher
 	e.state = StateConnected
@@ -2154,6 +2158,13 @@ func (e *Engine) GetChannels() []pb.ChannelInfo {
 	return result
 }
 
+// GetChannelScope returns the authenticated channel restriction (0 if unrestricted).
+func (e *Engine) GetChannelScope() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.channelScope
+}
+
 // GetChannelID returns the current channel ID (0 if none).
 func (e *Engine) GetChannelID() int64 {
 	e.mu.RLock()
@@ -2218,6 +2229,7 @@ func (e *Engine) handleDisconnectGeneration(g *connectionGeneration, reason stri
 	e.generation = nil
 	e.disconnecting = g
 	e.channelID = 0
+	e.channelScope = 0
 	e.muted = false
 	e.deafened = false
 	e.screenShareEnabled = false

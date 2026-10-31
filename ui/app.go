@@ -855,6 +855,9 @@ func (a *App) syncSelectedChannel() {
 	}
 
 	selectedChannelID := a.engine.GetChannelID()
+	if scope := a.engine.GetChannelScope(); selectedChannelID == 0 && scope != 0 {
+		selectedChannelID = scope
+	}
 	if selectedChannelID == 0 {
 		for _, item := range a.flattenChannels() {
 			if item.isChannel {
