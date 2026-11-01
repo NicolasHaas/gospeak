@@ -66,6 +66,11 @@ func run(cfg server.Config) (err error) {
 		}
 	}
 
+	if cfg.ExportUsers || cfg.ExportChannels {
+		if err := datastore.ValidateExportSource(cfg.DBPath); err != nil {
+			return fmt.Errorf("export database source: %w", err)
+		}
+	}
 	st, err := datastore.NewProviderFactory(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

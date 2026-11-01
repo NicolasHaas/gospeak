@@ -153,6 +153,8 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 
+File-backed exports require an existing `-db` source. A missing source fails before database creation or migration. Normal server startup still creates a missing database.
+
 ## Local Development (Without Containers)
 
 For local development, you need the native dependencies installed:

@@ -92,6 +92,17 @@ func (sf ProviderFactory) Tx(ctx context.Context) (DataStoreTx, error) {
 	}, nil
 }
 
+// ValidateExportSource checks file-backed sources before the factory can create
+// files or run migrations. It does not pin the file against concurrent replacement.
+func ValidateExportSource(dbPath string) error {
+	path, hasFile, _, err := sqliteFilesystemPath(dbPath)
+	if err != nil || !hasFile {
+		return err
+	}
+	_, err = os.Stat(path)
+	return err
+}
+
 // New opens (or creates) a SQLite database and runs migrations.
 func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 	dsn, err := sqliteConnectionDSN(dbPath)
