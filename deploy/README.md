@@ -58,6 +58,103 @@ docker compose cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
 cat ./bootstrap-admin.token
 ```
 
+## Backup and restore
+
+Stop the server before copying its files. SQLite uses WAL mode: copying only
+`gospeak.db` while a writer is running can lose committed data. YAML exports
+are not database backups. The users export contains IDs, names, roles and
+creation times, but omits `channel_scope` and personal-token hashes. There is
+no full user importer. Channel YAML omits stored IDs, temporary channels,
+credentials, bans and chat history.
+
+### Backup
+
+1. Record the server version and effective startup command, including `-db`,
+   `-data`, `-cert`, `-key`, `-channels-file` and retention settings. Relative
+   paths resolve from the process working directory. `-data` does not relocate
+   a separately configured `-db`. Save the service/Compose configuration,
+   channel YAML and any environment/secret files needed to reproduce startup.
+2. Stop the service (`systemctl stop gospeak`, or `docker compose stop gospeak`
+   for the supplied Compose deployment). Wait for it to exit successfully and
+   ensure no other GoSpeak process or SQLite tool is using the database. Keep
+   auto-update/restart automation from starting it during the copy.
+3. Copy the complete database set and data directory to private backup storage:
+   the database, any remaining matching `-wal` and `-shm` sidecars,
+   `server.crt`, `server.key`, and `bootstrap-admin.token` if present. Also copy
+   separately configured TLS files and the configuration recorded above.
+   A clean shutdown normally checkpoints/removes sidecars; never discard a
+   remaining WAL just because the process stopped. Do not mix files from
+   different backup times.
+
+For a host deployment where the database and automatic files all live under
+one directory, run the following as the service owner after stopping it. Set
+absolute paths for your installation; the backup destination must be new and
+outside the source directory. This example does not cover external config or
+custom TLS paths, which must be copied separately while still stopped.
+
+```bash
+set -eu
+umask 077
+source=/var/lib/gospeak
+backup=/srv/private-backups/gospeak-2026-11-01
+mkdir -m 700 "$backup"
+cp -a "$source/." "$backup/"
+```
+
+For a named container volume, stop the container first and copy the complete
+volume through a trusted host-side volume backup mechanism; the server image
+has no shell or SQLite CLI. Preserve ownership for the account that will run
+the restored service. On Unix, protect backup directories with `0700` and
+secret/database files with `0600`; check these modes and ownership rather
+than relying on `umask` to tighten files copied with `cp -a`. On Windows,
+retain owner-only ACLs. Restrict access to backup storage and encrypt off-host
+copies. The database contains chat text, names, account scopes, token hashes
+and explicit IP bans; private TLS keys and bootstrap credentials are secrets.
+Do not put them in Git, logs or support reports. Server backups do not include
+client bookmarks/personal tokens stored on client machines, or live sessions
+and in-memory media keys. Restoring the TLS key preserves saved TOFU identity.
+
+### Restore and verify
+
+1. Keep the destination service and restart/update automation stopped. Retain
+   the current files separately for rollback, including their own sidecars.
+   Restore into a new empty directory, never over an existing database with
+   stale `-wal`/`-shm` files. Copy the entire matching backup set before any
+   SQLite tool or server opens it. For the host example, set a new absolute
+   destination and use:
+
+   ```bash
+   set -eu
+   umask 077
+   restore=/var/lib/gospeak-restored
+   mkdir -m 700 "$restore"
+   cp -a "$backup/." "$restore/"
+   ```
+
+2. Restore external config/custom TLS files too. Check directory access,
+   ownership and file permissions for the service account, especially the
+   bootstrap file and private key. Repoint all affected startup paths. Use the
+   backed-up server version first: opening a database can run migrations, so
+   keep an untouched backup before testing an upgrade. A YAML channel file can
+   create channels on startup; use the corresponding saved configuration.
+3. On a disposable restored copy, run SQLite `PRAGMA integrity_check;` (expect
+   `ok`) and `PRAGMA foreign_key_check;` (expect no rows). Compare saved channel,
+   user/scope and message counts/content without printing secrets. Start the
+   server with isolated loopback listeners and the restored paths before
+   switching production. Check successful startup, then test account access,
+   channel scope and history. Startup retention sweeps and empty temporary
+   channel cleanup can remove rows according to the saved settings.
+
+A pending bootstrap requires the original `bootstrap-admin.token` from the
+same backup. If it is missing, malformed or insecurely permissioned, startup
+refuses it; this is fail-closed recovery, not a request to generate a replacement.
+A different valid-looking token cannot recover the original credential's
+hash or retry-derived personal token. Recover the original file from a matching
+backup, or keep the service stopped for operator-local recovery. Do not delete
+bootstrap rows, reset the database or fabricate a credential to bypass refusal.
+After the bootstrap administrator authenticates with its personal token, the
+server retires the bootstrap file; a finalized backup need not contain it.
+
 ## Bandwidth example (budget VPS)
 
 As a rough example, a small VPS with 20 TB/month bandwidth (e.g., a ~EUR 3.5/month Hetzner CX11)
