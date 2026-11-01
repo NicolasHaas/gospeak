@@ -872,6 +872,16 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}
 
+	// Keep required state before creating credentials that must reach the client.
+	var initialChannels []model.Channel
+	if user == nil {
+		initialChannels, err = st.NonTx().ListChannels()
+		if err != nil {
+			slog.Error("read authentication channels failed")
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
 	var channelScope int64
 	var sessionReservation *SessionReservation
 	var preparedSession *model.Session
@@ -1186,7 +1196,18 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}()
 
 	// Build channel list
-	channels, _ := st.NonTx().ListChannels()
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		slog.Error("read authentication channels failed")
+		if autoToken == "" {
+			conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 3, Message: "internal error"}})
+			return
+		}
+		// Provisioning already committed. Deliver the token with the last good
+		// snapshot and let the existing bounded publisher repair it.
+		channels = initialChannels
+		s.broadcastServerState(st, handler)
+	}
 	channelInfos := s.buildChannelInfos(channels)
 	screenAddr := ""
 	screenAuthToken := ""
@@ -1241,7 +1262,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	statePending := client.statePending
 	client.mu.Unlock()
 	if statePending {
-		s.sendServerState(st, conn)
+		s.sendServerState(st, handler, conn)
 	}
 
 	slog.Debug("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
@@ -1542,7 +1563,12 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 }
 
 func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Conn) {
-	channels, _ := st.NonTx().ListChannels()
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		slog.Error("read channel list failed")
+		sendError(conn, 3, "internal error")
+		return
+	}
 	infos := s.buildChannelInfos(channels)
 	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ChannelListResponse: &pb.ChannelListResponse{Channels: infos},
@@ -2081,13 +2107,18 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 }
 
 // sendServerState sends the full server state to a single connection.
-func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
+func (s *Server) sendServerState(st datastore.DataProviderFactory, handler *ControlHandler, conn net.Conn) {
 	s.statePublicationMu.Lock()
 	if s.ctx.Err() != nil {
 		s.statePublicationMu.Unlock()
 		return
 	}
-	channels, _ := st.NonTx().ListChannels()
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		s.statePublicationMu.Unlock()
+		s.broadcastServerState(st, handler)
+		return
+	}
 	infos := s.buildChannelInfos(channels)
 	msg := &pb.ControlMessage{
 		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},

@@ -110,6 +110,14 @@ or event. An in-flight write is immutable. Reliable messages are never replaced;
 a full reliable backlog still disconnects the slow client. Explicit channel
 list replies and post-authentication repairs remain immediate.
 
+A failed channel read never becomes an empty snapshot. Channel list requests
+receive an internal error; failed state refreshes retain the previous state
+and retry through the existing publisher. New accounts require a successful
+channel read before provisioning. If the refresh after provisioning fails,
+the authentication response still delivers the personal token with that
+known-good snapshot. Existing-account authentication fails if its required
+channel read fails.
+
 Join membership and its successful acknowledgement enqueue share the snapshot
 publication lock. A concurrent flush therefore cannot expose the joining
 client's new membership before that client's acknowledgement. Socket writes
