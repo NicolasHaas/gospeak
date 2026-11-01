@@ -327,6 +327,8 @@ so jitter-buffer cleanup does not reopen the window.
 4. Screen-share start/stop/subscribe still happen on the control plane.
 5. Actual encrypted frame packets flow over the screen plane.
 
+If the optional screen TCP dial is refused, times out, or reports an unreachable host/network, the client keeps voice and chat connected and shows one warning. Screen sharing stays unavailable for that connection, including after server-state updates; reconnect manually to try again. DNS errors, invalid advertised addresses or credentials, TLS/certificate/identity failures, and screen authentication write failures abort the connection attempt. Cancellation also aborts the attempt. The client does not retry the screen connection automatically.
+
 ### Relay Logic
 
 The server does not need to decode screen frames. It:

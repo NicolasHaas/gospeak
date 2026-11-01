@@ -121,6 +121,8 @@ type connectionGeneration struct {
 	keepaliveNow     chan struct{}
 	pendingJoins     map[int64]uint32
 	pendingResponses map[callbackKind]uint32
+
+	screenUnavailable bool
 }
 
 func newConnectionGeneration() *connectionGeneration {
@@ -463,17 +465,23 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 		}
 		screen, screenErr := newScreenClientContextWithTrust(g.ctx, screenAddr, authResp.SessionID, authResp.ScreenAuthToken, ctrl.serverTrust)
 		if screenErr != nil {
-			return fail(fmt.Errorf("connect screen plane: %w", screenErr))
+			var unavailable *screenTransportUnavailable
+			if g.ctx.Err() != nil || !errors.As(screenErr, &unavailable) {
+				return fail(fmt.Errorf("connect screen plane: %w", screenErr))
+			}
 		}
 		screenInstalled := false
 		g.mu.Lock()
 		if g.ctx.Err() == nil {
 			g.screen = screen
+			g.screenUnavailable = screenErr != nil
 			screenInstalled = true
 		}
 		g.mu.Unlock()
 		if !screenInstalled {
-			_ = screen.Close()
+			if screen != nil {
+				_ = screen.Close()
+			}
 			return fail(fmt.Errorf("connection canceled"))
 		}
 		if g.ctx.Err() != nil {
@@ -482,6 +490,16 @@ func (e *Engine) ConnectWithAutoToken(controlAddr, voiceAddr, token, username, s
 	}
 	if !e.publishConnectedGeneration(g, authResp) {
 		return fail(fmt.Errorf("connection canceled"))
+	}
+	g.mu.Lock()
+	screenUnavailable := g.screenUnavailable
+	g.mu.Unlock()
+	if screenUnavailable {
+		if callback := e.OnError; callback != nil {
+			e.invokeGenerationCallback(g, func() {
+				callback(fmt.Errorf("screen sharing unavailable: screen port could not be reached; voice and chat remain connected. Reconnect to try again"))
+			})
+		}
 	}
 
 	ctrl.SetEventHandler(func(msg *pb.ControlMessage) { e.handleEventGeneration(g, msg) })
@@ -574,6 +592,7 @@ func (e *Engine) publishConnectingGeneration(g *connectionGeneration) bool {
 	}
 	e.generation = g
 	e.channelScope = 0
+	e.screenShareEnabled = false
 	e.state = StateConnecting
 	e.mu.Unlock()
 
@@ -602,7 +621,7 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 	e.role = authResp.Role
 	e.channels = authResp.Channels
 	e.channelScope = authResp.ChannelScope
-	e.screenShareEnabled = authResp.ScreenShareEnabled
+	e.screenShareEnabled = authResp.ScreenShareEnabled && !g.screenUnavailable
 	e.mediaCipher = authResp.MediaCipher
 	e.state = StateConnected
 	e.mu.Unlock()
@@ -1214,7 +1233,7 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		g.mu.Lock()
 		e.mu.Lock()
 		e.channels = msg.ServerStateEvent.Channels
-		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled
+		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled && !g.screenUnavailable
 		// Deletion and temporary-channel cleanup already publish the full list.
 		// A missing voice channel revokes local media, without selecting a new one.
 		removed := e.channelID != 0 && !slices.ContainsFunc(e.channels, func(channel pb.ChannelInfo) bool {
@@ -1860,6 +1879,12 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 		return fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
+	g.mu.Lock()
+	unavailable := g.screenUnavailable
+	g.mu.Unlock()
+	if unavailable {
+		return fmt.Errorf("screen sharing unavailable on this connection")
+	}
 	e.mu.RLock()
 	channelID := e.channelID
 	mySessionID := e.sessionID
@@ -1901,7 +1926,7 @@ func (e *Engine) StartScreenShare(displayIndex int) error {
 	current := e.generation == g && e.state == StateConnected && e.channelID == channelID
 	e.mu.RUnlock()
 	g.mu.Lock()
-	activeGeneration := g.ctx.Err() == nil && g.control == ctrl
+	activeGeneration := g.ctx.Err() == nil && g.control == ctrl && !g.screenUnavailable
 	g.mu.Unlock()
 	if !current || !activeGeneration {
 		e.callbackMu.Unlock()
@@ -2135,7 +2160,7 @@ func (e *Engine) GetSessionID() uint32 {
 	return e.sessionID
 }
 
-// IsScreenShareEnabled returns whether the server advertised screen sharing support.
+// IsScreenShareEnabled returns whether screen sharing is available on this connection.
 func (e *Engine) IsScreenShareEnabled() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -2281,12 +2306,28 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 			return
 		}
 	}
-
 	e.mu.RLock()
 	mySessionID := e.sessionID
 	channelID := e.channelID
 	e.mu.RUnlock()
 	if event.Active && (channelID == 0 || event.ChannelID != channelID) {
+		return
+	}
+
+	var eventCipher *gospeakCrypto.VoiceCipher
+	if event.Active && len(event.EncryptionKey) > 0 {
+		var err error
+		eventCipher, err = gospeakCrypto.NewMediaCipher(event.MediaCipher, event.EncryptionKey)
+		if err != nil {
+			slog.Error("screen cipher init failed", "err", err)
+			e.requestDisconnect(g, "invalid screen media key")
+			return
+		}
+	}
+	g.mu.Lock()
+	unavailable := g.screenUnavailable
+	g.mu.Unlock()
+	if unavailable {
 		return
 	}
 
@@ -2319,15 +2360,7 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 	} else if len(event.EncryptionKey) > 0 {
 		sameKey := previous != nil && previous.SessionID == event.SessionID && bytes.Equal(e.screenKey, event.EncryptionKey)
 		if !sameKey {
-			cipher, err := gospeakCrypto.NewMediaCipher(event.MediaCipher, event.EncryptionKey)
-			if err != nil {
-				e.screenMu.Unlock()
-				e.screenSendMu.Unlock()
-				slog.Error("screen cipher init failed", "err", err)
-				e.requestDisconnect(g, "invalid screen media key")
-				return
-			}
-			e.screenCipher = cipher
+			e.screenCipher = eventCipher
 			e.screenKey = append(e.screenKey[:0], event.EncryptionKey...)
 			e.screenReceiveSeq = 0
 		}
@@ -2533,6 +2566,7 @@ func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
 	e.mu.Unlock()
 
 	g.mu.Lock()
+	g.screenUnavailable = true
 	if g.screen == nil {
 		g.mu.Unlock()
 		return

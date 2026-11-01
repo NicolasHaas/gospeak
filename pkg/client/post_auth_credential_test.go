@@ -1,9 +1,7 @@
 package client
 
 import (
-	"context"
 	"crypto/tls"
-	"net"
 	"net/http/httptest"
 	"strconv"
 	"sync"
@@ -24,14 +22,7 @@ func TestAutoTokenSurvivesMediaFailureAndCallbackPressure(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer listener.Close()
-			// A closed screen port reliably fails after successful auth.
-			var listenConfig net.ListenConfig
-			screen, err := listenConfig.Listen(context.Background(), "tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			screenAddr := screen.Addr().String()
-			_ = screen.Close()
+			// Invalid screen credentials remain fatal after successful control auth.
 			authed := make(chan bool, 1)
 			go func() {
 				conn, err := listener.Accept()
@@ -49,7 +40,7 @@ func TestAutoTokenSurvivesMediaFailureAndCallbackPressure(t *testing.T) {
 				_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{AuthResponse: &pb.AuthResponse{
 					SessionID: 1, Username: "fixture-user", Role: "user", MediaCipher: "aes128",
 					EncryptionKey: make([]byte, 16), VoiceRegistrationKey: make([]byte, 32), AutoToken: "fixture-personal",
-					ScreenShareEnabled: true, ScreenAddr: screenAddr, ScreenAuthToken: "fixture-screen",
+					ScreenShareEnabled: true, ScreenAddr: "127.0.0.1:9603",
 				}})
 			}()
 			e := NewEngine()
