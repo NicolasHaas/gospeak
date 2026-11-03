@@ -89,6 +89,7 @@ type App struct {
 	chatLoading        bool
 	chatRetry          bool
 	chatAttempt        uint64
+	chatRequestID      int64
 	chatTimer          *time.Timer
 	chatBeforeID       int64
 	activeScreenShare  *pb.ScreenShareEvent

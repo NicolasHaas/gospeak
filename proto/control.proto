@@ -89,6 +89,7 @@ message AuthResponse {
   int64 channel_scope = 10;
   bytes voice_registration_key = 11;
   string media_cipher = 12; // authenticated choice, no implicit fallback
+  bool history_request_ids = 13; // echoes per-attempt chat history identity
 }
 
 // ----- Channels -----
@@ -229,12 +230,14 @@ message ChatHistoryRequest {
   int64 channel_id = 1;
   int64 before_id = 2;
   int64 limit = 3;
+  int64 request_id = 4; // positive per attempt, zero for legacy clients
 }
 
 message ChatHistoryResponse {
   int64 channel_id = 1;
   repeated ChatMessage messages = 2;
   bool has_more = 3;
+  int64 request_id = 4;
 }
 
 message ChatDeleteRequest {

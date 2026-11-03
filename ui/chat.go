@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"time"
@@ -36,12 +37,15 @@ func (a *App) expireChatHistory(attempt uint64) {
 	if attempt != a.chatAttempt || !a.chatLoading {
 		return
 	}
+	a.engine.CancelChatHistory(a.chatRequestID)
 	a.chatLoading = false
 	a.chatRetry = a.chatBeforeID == 0
 	a.renderChat()
 }
 
 func (a *App) resetChat() {
+	a.engine.CancelChatHistory(a.chatRequestID)
+	a.chatRequestID = 0
 	if a.chatChannelID != 0 {
 		if a.chatDrafts == nil {
 			a.chatDrafts = make(map[int64]string)
@@ -76,7 +80,8 @@ func (a *App) selectChatChannel(channelID int64) {
 		return
 	}
 	// The history request selects this text channel on the server before reading it.
-	if err := a.engine.LoadChatHistory(channelID, 0); err != nil {
+	requestID, err := a.engine.LoadChatHistory(channelID, 0)
+	if err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
@@ -86,6 +91,7 @@ func (a *App) selectChatChannel(channelID int64) {
 		a.chatEntry.SetText(a.chatDrafts[channelID])
 		a.chatDeleted = make(map[int64]bool)
 	}
+	a.chatRequestID = requestID
 	a.startChatLoading()
 	a.updateChatContext()
 	a.renderChat()
@@ -99,10 +105,12 @@ func (a *App) loadEarlierChat() {
 	if a.chatLoading || !a.chatHasMore || a.chatBeforeID == 0 {
 		return
 	}
-	if err := a.engine.LoadChatHistory(a.chatChannelID, a.chatBeforeID); err != nil {
+	requestID, err := a.engine.LoadChatHistory(a.chatChannelID, a.chatBeforeID)
+	if err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
+	a.chatRequestID = requestID
 	a.startChatLoading()
 	a.chatMore.Disable()
 }
@@ -137,7 +145,7 @@ func (a *App) addChatMessage(message pb.ChatMessage) {
 }
 
 func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
-	if response.ChannelID != a.chatChannelID || !a.chatLoading {
+	if response.ChannelID != a.chatChannelID || response.RequestID != a.chatRequestID || !a.chatLoading {
 		return
 	}
 	if a.chatTimer != nil {
@@ -168,6 +176,15 @@ func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
 		seen[message.ID] = true
 	}
 	a.chatRows = append(older, a.chatRows...)
+	slices.SortStableFunc(a.chatRows, func(left, right pb.ChatMessage) int {
+		if left.ID == 0 && right.ID != 0 {
+			return 1
+		}
+		if right.ID == 0 && left.ID != 0 {
+			return -1
+		}
+		return cmp.Compare(left.ID, right.ID)
+	})
 	if len(a.chatRows) > 500 {
 		a.chatRows = a.chatRows[len(a.chatRows)-500:]
 		a.chatHasMore = false

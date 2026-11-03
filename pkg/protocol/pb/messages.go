@@ -70,6 +70,7 @@ type AuthResponse struct {
 	ScreenAuthToken      string        `json:"screen_auth_token,omitempty"`
 	ScreenShareEnabled   bool          `json:"screen_share_enabled,omitempty"`
 	AutoToken            string        `json:"auto_token,omitempty"` // set when server generated a token for this user
+	HistoryRequestIDs    bool          `json:"history_request_ids,omitempty"`
 }
 
 // ----- Channels -----
@@ -228,12 +229,14 @@ type ChatMessage struct {
 }
 
 type ChatHistoryRequest struct {
+	RequestID int64 `json:"request_id,omitempty"`
 	ChannelID int64 `json:"channel_id"`
 	BeforeID  int64 `json:"before_id,omitempty"`
 	Limit     int64 `json:"limit,omitempty"`
 }
 
 type ChatHistoryResponse struct {
+	RequestID int64         `json:"request_id,omitempty"`
 	ChannelID int64         `json:"channel_id"`
 	Messages  []ChatMessage `json:"messages"`
 	HasMore   bool          `json:"has_more"`

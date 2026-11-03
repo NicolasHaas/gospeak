@@ -109,18 +109,22 @@ type connectionGeneration struct {
 	wg     sync.WaitGroup
 	done   chan struct{}
 
-	disconnectOnce   sync.Once
-	terminalErrOnce  sync.Once
-	doneOnce         sync.Once
-	mu               sync.Mutex
-	control          *ControlClient
-	voice            *VoiceClient
-	screen           *ScreenClient
-	cipher           *gospeakCrypto.VoiceCipher
-	audio            *audioResources
-	keepaliveNow     chan struct{}
-	pendingJoins     map[int64]uint32
-	pendingResponses map[callbackKind]uint32
+	disconnectOnce    sync.Once
+	terminalErrOnce   sync.Once
+	doneOnce          sync.Once
+	mu                sync.Mutex
+	control           *ControlClient
+	voice             *VoiceClient
+	screen            *ScreenClient
+	cipher            *gospeakCrypto.VoiceCipher
+	audio             *audioResources
+	keepaliveNow      chan struct{}
+	pendingJoins      map[int64]uint32
+	pendingResponses  map[callbackKind]uint32
+	historySendMu     sync.Mutex
+	historyRequestIDs bool
+	historyRequestID  int64
+	historyChannelID  int64
 
 	screenUnavailable bool
 }
@@ -186,6 +190,8 @@ func (g *connectionGeneration) closeResources() {
 	screen := g.screen
 	g.screen = nil
 	g.cipher = nil
+	g.historyRequestID = 0
+	g.historyChannelID = 0
 	g.mu.Unlock()
 
 	resources.close()
@@ -233,8 +239,9 @@ type Engine struct {
 	decoderFactory  audio.DecoderFactory
 	now             func() time.Time
 
-	channels     []pb.ChannelInfo
-	channelScope int64
+	channels             []pb.ChannelInfo
+	channelScope         int64
+	nextHistoryRequestID int64 // Engine lifetime, never reused across reconnects or queued UI callbacks
 
 	screenMu            sync.Mutex
 	screenSendMu        sync.Mutex
@@ -623,6 +630,7 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 	e.channelScope = authResp.ChannelScope
 	e.screenShareEnabled = authResp.ScreenShareEnabled && !g.screenUnavailable
 	e.mediaCipher = authResp.MediaCipher
+	g.historyRequestIDs = authResp.HistoryRequestIDs
 	e.state = StateConnected
 	e.mu.Unlock()
 
@@ -1356,6 +1364,17 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		}
 
 	case msg.ChatHistoryResp != nil:
+		g.mu.Lock()
+		if g.historyRequestIDs {
+			response := msg.ChatHistoryResp
+			if response.RequestID <= 0 || response.RequestID != g.historyRequestID || response.ChannelID != g.historyChannelID {
+				g.mu.Unlock()
+				return
+			}
+			g.historyRequestID = 0
+			g.historyChannelID = 0
+		}
+		g.mu.Unlock()
 		if callback := e.OnChatHistory; callback != nil {
 			response := *msg.ChatHistoryResp
 			response.Messages = append([]pb.ChatMessage(nil), response.Messages...)
@@ -1842,19 +1861,60 @@ func (e *Engine) SendChat(channelID int64, text string) error {
 	})
 }
 
-// LoadChatHistory selects a text channel and fetches one page, newest first.
-func (e *Engine) LoadChatHistory(channelID, beforeID int64) error {
+// LoadChatHistory selects a text channel and returns its per-attempt ID.
+// Zero retains uncorrelated legacy behavior when the server does not advertise IDs.
+func (e *Engine) LoadChatHistory(channelID, beforeID int64) (int64, error) {
 	g, ctrl, ok := e.beginControlOperation()
 	if !ok {
-		return fmt.Errorf("not connected")
+		return 0, fmt.Errorf("not connected")
 	}
 	defer g.wg.Done()
 	if channelID <= 0 || beforeID < 0 {
-		return fmt.Errorf("invalid chat history request")
+		return 0, fmt.Errorf("invalid chat history request")
 	}
-	return ctrl.Send(&pb.ControlMessage{ChatHistoryReq: &pb.ChatHistoryRequest{
-		ChannelID: channelID, BeforeID: beforeID,
-	}})
+	// Keep pending identity and wire order together without blocking cancellation.
+	g.historySendMu.Lock()
+	defer g.historySendMu.Unlock()
+	g.mu.Lock()
+	if g.ctx.Err() != nil {
+		g.mu.Unlock()
+		return 0, fmt.Errorf("connection canceled")
+	}
+	var requestID int64
+	if g.historyRequestIDs {
+		e.mu.Lock()
+		if e.nextHistoryRequestID == math.MaxInt64 {
+			e.mu.Unlock()
+			g.mu.Unlock()
+			return 0, fmt.Errorf("chat history request IDs exhausted")
+		}
+		e.nextHistoryRequestID++
+		requestID = e.nextHistoryRequestID
+		e.mu.Unlock()
+		// One active page per generation: a newer attempt supersedes the old one.
+		g.historyRequestID, g.historyChannelID = requestID, channelID
+	}
+	g.mu.Unlock()
+	if err := ctrl.Send(&pb.ControlMessage{ChatHistoryReq: &pb.ChatHistoryRequest{
+		RequestID: requestID, ChannelID: channelID, BeforeID: beforeID,
+	}}); err != nil {
+		e.CancelChatHistory(requestID)
+		return 0, err
+	}
+	return requestID, nil
+}
+
+// CancelChatHistory retires a timed-out/reset attempt without affecting a newer one.
+func (e *Engine) CancelChatHistory(requestID int64) {
+	g, _, _, _ := e.connectionClients()
+	if g == nil || requestID == 0 {
+		return
+	}
+	g.mu.Lock()
+	if g.historyRequestID == requestID {
+		g.historyRequestID, g.historyChannelID = 0, 0
+	}
+	g.mu.Unlock()
 }
 
 // DeleteChatMessage requests moderator removal of a stored message.

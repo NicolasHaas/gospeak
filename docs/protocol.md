@@ -176,6 +176,31 @@ When persistence is enabled, the server stores a message before broadcasting it.
 
 `ChatHistoryRequest{channel_id, before_id, limit}` returns `ChatHistoryResponse{channel_id, messages, has_more}` in descending message-ID order. The first page uses `before_id = 0`; subsequent pages use the last message ID from the previous page. Pages default to 40 and cannot exceed 40. Requesting history also selects that channel for live chat events on the control connection, independently of voice membership. Older clients that never request history continue to receive live events for their voice channel. The server clears the text selection on disconnect. History responses are snapshots, not ordered barriers against live events: a delete event may arrive before an in-flight history response containing the deleted row. Clients must retain deleted message IDs for the active text selection and filter both later history pages and late chat events against those IDs; reset that set when selecting a different channel or reconnecting.
 
+`AuthResponse.history_request_ids = true` advertises per-attempt history
+correlation. With that flag, each client attempt (including retries of the same
+page) uses a fresh positive signed 64-bit `request_id` inside
+`ChatHistoryRequest`; the server echoes it in `ChatHistoryResponse`, including
+empty and persistence-disabled pages. Negative IDs are refused, and JSON values
+outside the signed 64-bit range are rejected by decoding. An ID grants no
+access and changes no control budget. The client tracks one active page per
+connection generation and ignores zero, unknown, duplicate, superseded or
+wrong-channel replies. The UI also matches the ID before changing its timer,
+rows, cursor or paging state, so a response already queued before A -> B -> A
+cannot complete the newer A attempt. IDs are not reused across reconnects of
+the same client engine. Timeout/reset retires the pending attempt; generic
+errors remain uncorrelated and the existing retry timeout still applies.
+
+Compatibility uses the existing message envelopes and optional nested fields,
+not a new protocol version. Older clients send no ID; the server retains the
+legacy response shape by omitting zero IDs. New clients connecting to servers
+without the authentication flag send no ID and retain legacy history behavior.
+That pairing cannot distinguish stale replies for repeated same-channel/page
+attempts; both peers need identity support for the matching guarantee. A
+capable connection never falls back after receiving a zero-ID reply. Unknown
+top-level message alternatives remain rejected. Request identity does not
+acknowledge successful text selection: a refused history request can still
+leave the UI and server with different text selections.
+
 `ChatEvent` includes a stored message ID when persistence is enabled. The server targets 500 retained messages per channel and 30 days of history by default. Operators can change `-chat-history-limit` (0 disables storage and history; 1..10000 retains messages) and `-chat-max-age` (a Go duration; `0` disables age expiry). With storage disabled, live chat still works and events have ID 0. Existing stored rows are left untouched, hidden from history, and not swept while disabled; re-enabling persistence exposes any rows still within the configured retention period. Each write prunes at most 1000 excess rows in its channel; a large imported count backlog can remain above the target until further writes. A one-minute sweep removes up to 1000 age-expired rows per pass, including idle channels. Oversized legacy messages are truncated for history responses without changing their stored contents. Live events can overlap a history page, so clients should deduplicate by nonzero message ID.
 
 A moderator or administrator may send `ChatDeleteRequest{channel_id, message_id}` to remove any stored message in a channel their account can access, regardless of the author's role. The server deletes only a matching channel/message pair and emits `ChatDeleteEvent{channel_id, message_id}` to text subscribers; the requester also receives it as an acknowledgement. The client should treat duplicate deletion events as harmless. Older clients receive live chat but not deletion events because they reject unknown protocol fields, so an already displayed message can remain visible until they disconnect. Deletion is unavailable while persistence is disabled; live-only messages (ID 0) cannot be deleted after delivery. The desktop client loads history on text-channel selection, pages through older messages, and offers deletion to moderators and administrators.

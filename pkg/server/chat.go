@@ -61,7 +61,7 @@ func (s *Server) handleChatMessage(handler *ControlHandler, sessionID uint32, ch
 }
 
 func (s *Server) handleChatHistory(handler *ControlHandler, sessionID uint32, req *pb.ChatHistoryRequest, st datastore.DataProviderFactory, conn net.Conn) {
-	if req.BeforeID < 0 || req.Limit < 0 || req.Limit > chatPageLimit || !s.chatChannel(sessionID, req.ChannelID, st) {
+	if req.RequestID < 0 || req.BeforeID < 0 || req.Limit < 0 || req.Limit > chatPageLimit || !s.chatChannel(sessionID, req.ChannelID, st) {
 		sendError(conn, 3, "channel not found or inaccessible")
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Server) handleChatHistory(handler *ControlHandler, sessionID uint32, re
 		limit = chatPageLimit
 	}
 	if s.cfg.ChatHistoryLimit == 0 {
-		if err := writeControlMessage(conn, &pb.ControlMessage{ChatHistoryResp: &pb.ChatHistoryResponse{ChannelID: req.ChannelID, Messages: []pb.ChatMessage{}}}); err != nil {
+		if err := writeControlMessage(conn, &pb.ControlMessage{ChatHistoryResp: &pb.ChatHistoryResponse{RequestID: req.RequestID, ChannelID: req.ChannelID, Messages: []pb.ChatMessage{}}}); err != nil {
 			slog.Warn("send empty chat history", "session", sessionID, "err", err)
 		}
 		return
@@ -93,7 +93,7 @@ func (s *Server) handleChatHistory(handler *ControlHandler, sessionID uint32, re
 		sendError(conn, 3, "could not load history")
 		return
 	}
-	resp := &pb.ChatHistoryResponse{ChannelID: req.ChannelID, Messages: []pb.ChatMessage{}, HasMore: int64(len(rows)) > limit}
+	resp := &pb.ChatHistoryResponse{RequestID: req.RequestID, ChannelID: req.ChannelID, Messages: []pb.ChatMessage{}, HasMore: int64(len(rows)) > limit}
 	if resp.HasMore {
 		rows = rows[:limit]
 	}

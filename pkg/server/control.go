@@ -1231,6 +1231,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			ScreenAuthToken:      screenAuthToken,
 			ScreenShareEnabled:   s.cfg.EnableScreenShare,
 			AutoToken:            autoToken,
+			HistoryRequestIDs:    true,
 		},
 	}
 	// Refresh authority and publish the first frame in one policy epoch. Enqueue
