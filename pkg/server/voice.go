@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
@@ -50,10 +54,10 @@ func (s *Server) StartVoice() error {
 
 	// Increase UDP buffer size for better performance
 	if err := conn.SetReadBuffer(1024 * 1024); err != nil {
-		slog.Warn("failed to set UDP read buffer", "err", err)
+		s.logVoiceError(slog.LevelWarn, "failed to set UDP read buffer", err)
 	}
 	if err := conn.SetWriteBuffer(1024 * 1024); err != nil {
-		slog.Warn("failed to set UDP write buffer", "err", err)
+		s.logVoiceError(slog.LevelWarn, "failed to set UDP write buffer", err)
 	}
 
 	slog.Info("voice plane listening", "addr", s.cfg.VoiceAddr)
@@ -79,11 +83,14 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+				return
+			}
 			select {
 			case <-s.ctx.Done():
 				return
 			default:
-				slog.Error("voice read error")
+				s.logVoiceError(slog.LevelError, "voice read error", err)
 				continue
 			}
 		}
@@ -147,7 +154,7 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 
 			_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
 			if err != nil {
-				slog.Debug("voice forward error", "target", memberSID)
+				s.logVoiceError(slog.LevelDebug, "voice forward error", err)
 			} else {
 				s.metrics.VoicePacketsOut.Add(1)
 				s.metrics.VoiceBytesOut.Add(int64(n))
@@ -157,6 +164,25 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			}
 		}
 	}
+}
+
+func (s *Server) logVoiceError(level slog.Level, message string, err error) {
+	if s.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return
+	}
+	reason := "io_error"
+	var timeout net.Error
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &timeout) && timeout.Timeout(), errors.Is(err, context.DeadlineExceeded):
+		reason = "timeout"
+	case errors.Is(err, io.ErrShortWrite):
+		reason = "short_write"
+	case errors.As(err, &errno):
+		// Only the OS cause is safe: net.OpError and outer wrappers contain addresses.
+		reason = errno.Error()
+	}
+	slog.Log(s.ctx, level, message, "reason", reason)
 }
 
 // acceptVoicePacket verifies endpoint ownership and packet authenticity before
