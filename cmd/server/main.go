@@ -60,6 +60,9 @@ func main() {
 }
 
 func run(cfg server.Config) (err error) {
+	if !cfg.ExportUsers && !cfg.ExportChannels && (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return fmt.Errorf("TLS certificate and key must be configured together")
+	}
 	if !cfg.ExportUsers && !cfg.ExportChannels && cfg.ChannelsFile != "" {
 		if err := server.ValidateChannelsFile(cfg.ChannelsFile); err != nil {
 			return fmt.Errorf("validate channels config: %w", err)
