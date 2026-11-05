@@ -56,7 +56,8 @@ Homebrew until GoSpeak ships an application bundle.
 Release tags must use SemVer without build metadata. Push one release tag at a
 time and wait for its workflow to finish: GitHub Actions keeps only one pending
 run in a concurrency group. Stable releases also update the `latest` container
-tag; prereleases publish only their versioned tag.
+tag; prereleases publish only their versioned tag. The GitHub release is created
+only after the scanned container image has been published.
 
 ## Container Build Stages
 
