@@ -552,8 +552,9 @@ func TestBootstrapProvisioningRetrySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap retry after restart error = %v", err)
 	}
-	if response.AutoToken != deriveBootstrapPersonalToken(rawToken, "bootstrap-admin") {
-		t.Fatal("bootstrap retry after restart returned a different personal token")
+	retry, err := authenticateBootstrap(t, restarted, reopened, "bootstrap-admin", rawToken)
+	if err != nil || retry.AutoToken != response.AutoToken {
+		t.Fatalf("bootstrap retry after restart changed personal token: %v", err)
 	}
 }
 

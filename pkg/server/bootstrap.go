@@ -35,6 +35,13 @@ func (s *Server) ensureAdminToken(st datastore.DataProviderFactory) error {
 		return fmt.Errorf("server: check tokens: %w", err)
 	}
 	if hasTokens {
+		legacy, err := st.NonTx().HasLegacyBootstrapOwner()
+		if err != nil {
+			return fmt.Errorf("server: inspect legacy bootstrap owner: %w", err)
+		}
+		if legacy {
+			slog.Warn("legacy bootstrap owner credential preserved; old setup copies can derive it; explicit operator rotation required (docs/security.md)")
+		}
 		state, err := st.NonTx().BootstrapTokenState()
 		if err != nil {
 			return fmt.Errorf("server: inspect admin bootstrap state: %w", err)
@@ -93,11 +100,21 @@ func (s *Server) tryProvisionBootstrapUser(st datastore.DataProviderFactory, tok
 	if err != nil || !matches {
 		return nil, "", false, err
 	}
-	rawPersonalToken := deriveBootstrapPersonalToken(rawToken, username)
 	tx, err := st.Tx(context.Background())
 	if err != nil {
 		return nil, "", true, fmt.Errorf("start transaction: %w", err)
 	}
+	key, err := tx.BootstrapPersonalTokenKey(tokenHash)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, "", true, err
+	}
+	// Empty retry material denotes an already-bound legacy owner. Preserve its
+	// credential until an operator explicitly rotates it, rather than locking out.
+	if key == "" {
+		key = rawToken
+	}
+	rawPersonalToken := deriveBootstrapPersonalToken(key, username)
 	user, err := tx.ProvisionBootstrapUser(tokenHash, username, crypto.HashToken(rawPersonalToken), time.Now().UTC())
 	if err != nil {
 		if rollbackErr := tx.Rollback(); rollbackErr != nil {

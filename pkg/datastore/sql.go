@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -523,6 +524,12 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 			version: 12,
 			steps: []migrationStep{
 				{statement: "CREATE INDEX IF NOT EXISTS idx_tokens_created_by_kind ON tokens(created_by, kind)"},
+			},
+		},
+		{
+			version: 13,
+			steps: []migrationStep{
+				{statement: "ALTER TABLE tokens ADD COLUMN bootstrap_key TEXT", table: "tokens", column: "bootstrap_key"},
 			},
 		},
 	}
@@ -1077,6 +1084,45 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 	return nil
 }
 
+// HasLegacyBootstrapOwner identifies preserved owners whose credential was
+// issued before independent server randomness. NULL is never silently upgraded.
+func (s *baseProvider) HasLegacyBootstrapOwner() (bool, error) {
+	var legacy bool
+	err := s.QueryRowContext(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM tokens WHERE kind = ? AND created_by > 0 AND bootstrap_key IS NULL)", tokenKindBootstrap,
+	).Scan(&legacy)
+	if err != nil {
+		return false, fmt.Errorf("datastore: inspect legacy bootstrap owner: %w", err)
+	}
+	return legacy, nil
+}
+
+// BootstrapPersonalTokenKey prepares retry material inside the provisioning
+// transaction. Already-bound legacy owners retain their original credential.
+func (s *txProvider) BootstrapPersonalTokenKey(hash string) (string, error) {
+	var key sql.NullString
+	var useCount int
+	if err := s.QueryRowContext(context.Background(),
+		"SELECT bootstrap_key, use_count FROM tokens WHERE hash = ? AND kind = ? AND max_uses = -1",
+		hash, tokenKindBootstrap,
+	).Scan(&key, &useCount); err != nil {
+		return "", fmt.Errorf("datastore: read bootstrap key: %w", err)
+	}
+	if key.Valid && key.String == "" {
+		return "", fmt.Errorf("datastore: missing pending bootstrap key")
+	}
+	if !key.Valid && useCount == 0 {
+		key.String = rand.Text()
+		if _, err := s.ExecContext(context.Background(),
+			"UPDATE tokens SET bootstrap_key = ? WHERE hash = ? AND kind = ? AND use_count = 0 AND bootstrap_key IS NULL",
+			key.String, hash, tokenKindBootstrap,
+		); err != nil {
+			return "", fmt.Errorf("datastore: prepare bootstrap key: %w", err)
+		}
+	}
+	return key.String, nil
+}
+
 func (s *baseProvider) CreateBootstrapToken(hash string) error {
 	_, err := s.ExecContext(context.Background(),
 		"INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses) VALUES (?, ?, 0, 0, ?, -1)",
@@ -1102,7 +1148,7 @@ func (s *baseProvider) FinalizeBootstrapToken(userID int64) (bool, error) {
 		return false, nil
 	}
 	if _, err := s.ExecContext(ctx,
-		"UPDATE tokens SET max_uses = 1 WHERE created_by = ? AND kind = ? AND max_uses = -1 AND use_count = 1",
+		"UPDATE tokens SET max_uses = 1, bootstrap_key = CASE WHEN bootstrap_key IS NULL THEN NULL ELSE '' END WHERE created_by = ? AND kind = ? AND max_uses = -1 AND use_count = 1",
 		userID, tokenKindBootstrap,
 	); err != nil {
 		return false, fmt.Errorf("datastore: finalize bootstrap token: %w", err)

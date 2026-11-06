@@ -98,6 +98,7 @@ type ChannelWriteProvider interface {
 type TokenReadProvider interface {
 	HasTokens() (bool, error)
 	BootstrapTokenState() (BootstrapTokenState, error)
+	HasLegacyBootstrapOwner() (bool, error)
 }
 
 type TokenWriteProvider interface {
@@ -107,6 +108,7 @@ type TokenWriteProvider interface {
 }
 
 type TokenTransactionProvider interface {
+	BootstrapPersonalTokenKey(hash string) (string, error)
 	ValidateToken(hash string) (*model.Token, error)
 	ProvisionUser(hash, username, personalTokenHash string, createdAt time.Time, allowTokenless bool) (*model.User, error)
 	ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error)

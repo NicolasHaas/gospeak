@@ -179,7 +179,7 @@ graph TB
 ```
 
 - Tokens are 256-bit random values (64 hex characters)
-- Only the SHA-256 hash is stored in the database (invite + personal tokens). Personal tokens are stored on the user record and are shown only once.
+- Invite and personal tokens are stored as SHA-256 hashes. Pending bootstrap issuance also stores independent random retry material in the private database; protect database backups as credentials. Personal-token hashes are stored on the user record.
 - Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). When legacy bookmark or settings files are found beside the executable, the client asks before migrating them. Choosing No keeps those files as the active persistence destinations. After confirmation, each original is removed only after its exact bytes are validated and published successfully; conflicting or concurrently changed files are preserved for manual resolution. Protect the user account and its config directory accordingly.
 - Invite tokens can have: role assignment, channel scope, max uses, expiration. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide.
 - Redeeming an invite, creating its user, and storing the new personal-token hash happen in one database transaction. A failed user creation therefore does not consume an invite use. Credential failures use the same external error response, while detailed causes remain in server logs.
@@ -193,6 +193,42 @@ graph TB
   after response-delivery failures. The server invalidates the credential and
   removes its file after that administrator proves possession of the returned
   personal token. Normal logs contain only the credential path.
+  New owner issuance uses at least 128 bits of server randomness, persisted in the same
+  transaction as the owner binding, so response loss and restart return the same
+  personal token. An old setup-file copy and public username cannot derive it.
+  Finalization clears this retry material atomically with setup invalidation;
+  the durable owner marker and owner exemptions remain intact. While setup is
+  pending, possession of the setup credential still allows the bound owner's
+  retry, so complete personal-token authentication promptly. Old database
+  backups containing retry material remain sensitive after finalization.
+
+### Existing bootstrap owners and explicit rotation
+
+An owner already issued by an older server is NOT remediated by upgrading.
+Its personal token remains derivable from an old setup-file copy and its public
+username. Upgrade preserves both pending retries and finalized credentials;
+startup logs a warning for these legacy owners. It never rotates credentials,
+deletes accounts, or migrates client files automatically. An unused legacy
+setup credential acquires independent randomness at first provisioning.
+
+To remediate an existing owner, the operator must explicitly coordinate an
+offline credential rotation with that owner. Stop the server (closing all
+sessions), make a protected consistent database backup, and identify the owner
+from the single tokens row with kind = 1 and created_by > 0. Do not delete or
+replace this marker or the account. Generate a fresh 32-byte cryptographically
+random personal token, encoded as 64 lowercase hex characters, outside logs and
+shell history; securely deliver and retain it before replacing the old hash.
+Using parameterized statements in one SQLite transaction, update that owner's
+users.personal_token_hash to the SHA-256 hex digest of the new token and update
+personal_token_created_at to the current UTC database timestamp. Finalize its
+tokens row by setting max_uses = 1 and bootstrap_key = '' while retaining
+created_by, kind and use_count = 1. Check exactly one owner and marker were
+updated before commit; otherwise roll back. This is an explicit revocation:
+the old token and setup retry will no longer work. Remove the obsolete setup
+file, restart, and verify the owner authenticates with the new token and keeps
+its owner protections. Update the owner's bookmark only with their consent.
+Retain the backup securely for recovery; restoring it restores the old risk.
+No online rotation command or automatic revocation policy is introduced.
 
 ### Open Server Mode
 
