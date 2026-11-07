@@ -889,7 +889,9 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	res, err := s.ExecContext(
 		context.Background(),
 		`INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by)
-		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?)`,
+		 SELECT ?, ?, ?, ?, ?, ?, ?
+		 WHERE (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))
+		 AND (SELECT COALESCE(SUM(? + ? * (length(name) + length(description))), 0) FROM channels) + ? <= ?`,
 		channel.Name,
 		channel.Description,
 		channel.MaxUsers,
@@ -898,6 +900,7 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 		allowSubInt,
 		channel.CreatedBy,
 		channel.ParentID, channel.ParentID,
+		model.StateChannelFixedBytes, model.StateJSONRuneBytes, model.ChannelStateBytes(*channel), model.MaxChannelStateBytes,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: channels.parent_id, channels.name") {
@@ -908,7 +911,7 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("datastore: create channel rows affected: %w", err)
 	} else if n == 0 {
-		return ErrChannelReference
+		return fmt.Errorf("datastore: channel parent missing or serialized channel state budget exceeded: %w", ErrChannelReference)
 	}
 	channel.ID, err = res.LastInsertId()
 	if err != nil {

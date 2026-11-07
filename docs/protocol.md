@@ -125,7 +125,10 @@ remain outside the publication lock.
 
 This bounds mutation-driven snapshot work, not the full-state fanout cost.
 Each recipient still receives a full snapshot, subject to the 512 KiB frame
-limit. Coalescing alone does not establish a 500-user capacity guarantee.
+limit. The shared [channel state budget](channels.md#server-wide-state-budget)
+reserves space for all supported sessions and the authentication envelope.
+Snapshot construction counts each session at most once, even during channel
+moves. These byte bounds do not establish a throughput capacity guarantee.
 
 ### Channel Operations
 

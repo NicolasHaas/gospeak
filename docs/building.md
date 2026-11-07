@@ -140,11 +140,11 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; requires `-key` |
 | `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
 | `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
-| `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
+| `-screen` | `:9603` | TCP/TLS screen-share relay bind address; at most 256 bytes when screen sharing is enabled |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(none)* | YAML file defining channels to create on startup |
 | `-metrics` | *(empty)* | HTTP bind address for Prometheus `/metrics` and `/healthz`; disabled by default |
-| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
+| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; supported range 1..1024, non-positive values use the default |
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
 | `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |

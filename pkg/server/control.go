@@ -649,6 +649,16 @@ func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMes
 
 // StartControl starts the TCP/TLS control listener.
 func (s *Server) StartControl(st datastore.DataProviderFactory) error {
+	if err := s.validateStateConfig(); err != nil {
+		return err
+	}
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		return fmt.Errorf("server: read initial channel state: %w", err)
+	}
+	if err := validateChannelState(channels); err != nil {
+		return err
+	}
 	if !s.beginTask() {
 		return fmt.Errorf("server: start control: %w", s.ctx.Err())
 	}
@@ -2007,26 +2017,6 @@ func (s *Server) handleUnban(sessionID uint32, req *pb.UnbanRequest, st datastor
 	}
 }
 
-// channelUsers returns UserInfo for all sessions in a channel.
-func (s *Server) channelUsers(channelID int64) []pb.UserInfo {
-	members := s.channels.Members(channelID)
-	users := make([]pb.UserInfo, 0, len(members))
-	for _, sid := range members {
-		sess, ok := s.sessions.GetSnapshot(sid)
-		if ok {
-			users = append(users, pb.UserInfo{
-				SessionID: sess.ID,
-				ID:        sess.UserID,
-				Username:  sess.Username,
-				Role:      sess.Role.String(),
-				Muted:     sess.Muted,
-				Deafened:  sess.Deafened,
-			})
-		}
-	}
-	return users
-}
-
 func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, req *pb.SetUserRoleRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
@@ -2201,7 +2191,9 @@ func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *Con
 // buildChannelInfos converts model channels to protocol channel infos.
 func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 	infos := make([]pb.ChannelInfo, len(channels))
+	indices := make(map[int64]int, len(channels))
 	for i, ch := range channels {
+		indices[ch.ID] = i
 		infos[i] = pb.ChannelInfo{
 			ID:               ch.ID,
 			Name:             ch.Name,
@@ -2210,7 +2202,23 @@ func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 			ParentID:         ch.ParentID,
 			IsTemp:           ch.IsTemp,
 			AllowSubChannels: ch.AllowSubChannels,
-			Users:            s.channelUsers(ch.ID),
+			Users:            []pb.UserInfo{},
+		}
+	}
+	// Snapshot sessions once: per-channel reads could count a moving session
+	// repeatedly and invalidate the reserved wire budget.
+	s.sessions.mu.RLock()
+	users := make([]pb.UserInfo, 0, len(s.sessions.sessions))
+	for _, sess := range s.sessions.sessions {
+		users = append(users, pb.UserInfo{
+			SessionID: sess.ID, ID: sess.UserID, Username: sess.Username,
+			Role: sess.Role.String(), Muted: sess.Muted, Deafened: sess.Deafened,
+		})
+	}
+	s.sessions.mu.RUnlock()
+	for _, user := range users {
+		if i, ok := indices[s.channels.ChannelOf(user.SessionID)]; ok {
+			infos[i].Users = append(infos[i].Users, user)
 		}
 	}
 	return infos

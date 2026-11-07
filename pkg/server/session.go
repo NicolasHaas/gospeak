@@ -245,6 +245,9 @@ func (reservation *SessionReservation) BindUser(userID int64) error {
 
 // Prepare allocates every fallible session resource while retaining reserved capacity.
 func (reservation *SessionReservation) Prepare(username string, role model.Role, channelScope int64) (*model.Session, error) {
+	if err := model.ValidateUsername(username); err != nil {
+		return nil, err
+	}
 	if reservation == nil || reservation.manager == nil {
 		return nil, errors.New("server: invalid session reservation")
 	}
