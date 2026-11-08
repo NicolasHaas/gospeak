@@ -65,7 +65,7 @@ Prefix with: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`, `chore:`
 
 - Keep PRs focused — one feature or fix per PR
 - Include a clear description of what changed and why
-- Ensure CI passes (lint + build + security scan)
+- Ensure CI passes (lint, race-enabled tests and builds). Container vulnerability scanning runs in the release workflow, not regular CI.
 - Update documentation if you change behavior
 
 ## Project Structure
