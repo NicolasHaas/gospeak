@@ -50,11 +50,12 @@ returned by the server. Interrupted first logins can be retried for the same
 administrator. GoSpeak removes the bootstrap file after the personal token is
 used and logs only the file path, never the credential itself.
 
-With `deploy/compose.yaml`, the same file is in the named data volume. Read it
-without requiring a shell in the server image:
+With `deploy/compose.yaml`, the same file is in the named data volume. Run the
+Compose commands below from the repository root. Read the credential without
+requiring a shell in the server image:
 
 ```bash
-docker compose cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
+docker compose -f deploy/compose.yaml cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
 cat ./bootstrap-admin.token
 ```
 
@@ -74,8 +75,9 @@ credentials, bans and chat history.
    paths resolve from the process working directory. `-data` does not relocate
    a separately configured `-db`. Save the service/Compose configuration,
    channel YAML and any environment/secret files needed to reproduce startup.
-2. Stop the service (`systemctl stop gospeak`, or `docker compose stop gospeak`
-   for the supplied Compose deployment). Wait for it to exit successfully and
+2. Stop the service (`systemctl stop gospeak`, or
+   `docker compose -f deploy/compose.yaml stop gospeak` for the supplied Compose
+   deployment). Wait for it to exit successfully and
    ensure no other GoSpeak process or SQLite tool is using the database. Keep
    auto-update/restart automation from starting it during the copy.
 3. Copy the complete database set and data directory to private backup storage:
