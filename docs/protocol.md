@@ -167,11 +167,11 @@ sequenceDiagram
     S->>C: ServerStateEvent{channels}
 ```
 
-Channel creation requires an existing parent, or `parentID = 0` for a root channel. Deletion is refused if the channel does not exist, has children, is referenced by any stored token or account scope, or is the last remaining channel. Deletion never cascades or changes scopes. These checks are atomic with the datastore write and also apply to temporary-channel cleanup.
+Channel creation requires an existing parent, or `parentID = 0` for a root channel. Deletion is refused if the channel does not exist, has children, is referenced by an active invite or any account scope, or is the last remaining channel. Expired or exhausted invite rows alone no longer prevent deletion. Expiry follows redemption: an invite is expired strictly after its stored expiry; zero max uses means unlimited, not exhausted. These checks are atomic with the datastore write and also apply to temporary-channel cleanup. Deletion never cascades or broadens account scopes, and does not delete invite history, bootstrap markers or users.
 
 Temporary sub-channels are removed five minutes after becoming empty unless a deletion guard above applies. Occupied temporary channels with an existing parent remain available; legacy temporary rows with a missing parent are eligible for cleanup under the same guards. Refused cleanup schedules a retry after 30 seconds without logging an error for the refusal. Open servers allow two temporary channels per user; invite-only servers allow five.
 
-Invite scope `0` is unrestricted. A nonzero scope must name an existing channel; negative scopes are rejected. A scope restricts joining and chat to that exact channel, not its descendants. Temporary channels may be scope targets and remain protected while stored references exist, including expired or exhausted tokens. No existing malformed references are repaired automatically.
+Invite scope `0` is unrestricted. A new nonzero scope must name an existing permanent channel; negative and temporary-channel scopes are rejected atomically at issuance. A scope restricts joining and chat to that exact channel, not its descendants. Previously issued active temporary-scoped invites remain redeemable and protect their channel, and existing scoped accounts continue to protect it even after the invite expires or is exhausted. Operators must resolve such durable references before the room can expire; this change neither deletes historic credentials/accounts nor automatically repairs or broadens their scopes.
 
 ### Chat
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/datastore"
 	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
@@ -58,8 +59,55 @@ func TestChannelIntegrityHandlers(t *testing.T) {
 	}
 }
 
+func TestCreateTokenScopePolicy(t *testing.T) {
+	for _, scope := range []string{"unrestricted", "permanent", "temporary", "missing", "negative"} {
+		t.Run(scope, func(t *testing.T) {
+			srv, st, _ := newTestServer(t)
+			actor := mustCreateSession(t, srv.sessions, 1, "admin", model.RoleAdmin)
+			channel := &model.Channel{Name: "scope", IsTemp: scope == "temporary"}
+			if err := st.NonTx().CreateChannel(channel); err != nil {
+				t.Fatal(err)
+			}
+			id := channel.ID
+			switch scope {
+			case "unrestricted":
+				id = 0
+			case "missing":
+				id += 999
+			case "negative":
+				id = -1
+			}
+			conn := &bufferConn{}
+			srv.handleCreateToken(actor.ID, &pb.CreateTokenRequest{Role: "user", ChannelScope: id, MaxUses: 1}, st, conn)
+			response, err := protocol.ReadControlMessage(conn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			valid := scope == "unrestricted" || scope == "permanent"
+			if valid {
+				if response.CreateTokenResp == nil {
+					t.Fatalf("permanent/unrestricted mint refused: %v", response)
+				}
+				var storedScope int64
+				if err := st.(*datastore.ProviderFactory).DB.QueryRowContext(context.Background(), "SELECT channel_scope FROM tokens WHERE hash = ?", crypto.HashToken(response.CreateTokenResp.Token)).Scan(&storedScope); err != nil || storedScope != id {
+					t.Fatalf("minted scope: %d %v", storedScope, err)
+				}
+			} else if response.ErrorResponse == nil || response.ErrorResponse.Code != 31 {
+				t.Fatalf("unsafe scope minted: %v", response)
+			}
+			var count int
+			if err := st.(*datastore.ProviderFactory).DB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM tokens").Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if valid && (count != 1 || srv.metrics.TokensCreated.Load() != 1) || !valid && (count != 0 || srv.metrics.TokensCreated.Load() != 0) {
+				t.Fatal("mint persistence/metrics disagree with policy")
+			}
+		})
+	}
+}
+
 func TestTemporaryChannelSweepProtectsDurableReferences(t *testing.T) {
-	for _, ref := range []string{"token", "account", "child"} {
+	for _, ref := range []string{"token", "account", "child", "expired token", "exhausted token"} {
 		t.Run(ref, func(t *testing.T) {
 			srv, st, handler := newTestServer(t)
 			parent := &model.Channel{Name: "parent"}
@@ -71,30 +119,41 @@ func TestTemporaryChannelSweepProtectsDurableReferences(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch ref {
-			case "token", "account":
-				if err := st.NonTx().CreateToken("invite", model.RoleUser, ch.ID, 0, 1, time.Time{}); err != nil {
+			case "token", "account", "expired token", "exhausted token":
+				var expiry time.Time
+				if ref == "expired token" {
+					expiry = time.Now().Add(-time.Hour)
+				}
+				if err := st.NonTx().CreateToken("invite", model.RoleUser, parent.ID, 0, 1, expiry); err != nil {
 					t.Fatal(err)
 				}
-				if ref == "account" {
+				// Seed an old temporary scope: new issuance must reject it.
+				db := st.(*datastore.ProviderFactory).DB
+				if _, err := db.ExecContext(context.Background(), "UPDATE tokens SET channel_scope = ? WHERE hash = ?", ch.ID, "invite"); err != nil {
+					t.Fatal(err)
+				}
+				if ref == "account" || ref == "exhausted token" {
 					tx, err := st.Tx(context.Background())
 					if err != nil {
 						t.Fatal(err)
 					}
 					defer func() { _ = tx.Rollback() }()
-					user, err := tx.ProvisionUser("invite", "scoped", "personal", time.Now(), false)
-					if err != nil || user.ChannelScope != ch.ID {
-						t.Fatalf("provision: %v %v", user, err)
+					if ref == "account" {
+						user, err := tx.ProvisionUser("invite", "scoped", "personal", time.Now(), false)
+						if err != nil || user.ChannelScope != ch.ID {
+							t.Fatalf("provision: %v %v", user, err)
+						}
+					} else if _, err := tx.ValidateToken("invite"); err != nil {
+						t.Fatal(err)
 					}
 					if err := tx.Commit(); err != nil {
 						t.Fatal(err)
 					}
-					// Isolate the account guard and exercise legacy orphan cleanup too.
-					db := st.(*datastore.ProviderFactory).DB
-					if _, err := db.ExecContext(context.Background(), "DELETE FROM tokens WHERE hash = ?", "invite"); err != nil {
-						t.Fatal(err)
-					}
-					if _, err := db.ExecContext(context.Background(), "UPDATE channels SET parent_id = 999 WHERE id = ?", ch.ID); err != nil {
-						t.Fatal(err)
+					// The exhausted invite is retained; the account alone pins an orphan.
+					if ref == "account" {
+						if _, err := db.ExecContext(context.Background(), "UPDATE channels SET parent_id = 999 WHERE id = ?", ch.ID); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 			case "child":
@@ -106,6 +165,20 @@ func TestTemporaryChannelSweepProtectsDurableReferences(t *testing.T) {
 			srv.tempChannels.now = func() time.Time { return now }
 			srv.sweepTempChannels(handler, st)
 			now = now.Add(tempChannelEmptyGrace)
+			if ref == "expired token" || ref == "exhausted token" {
+				srv.sweepTempChannels(handler, st)
+				if got, err := st.NonTx().GetChannel(ch.ID); err != nil || got != nil {
+					t.Fatalf("inactive invite pinned expired room: %v %v", got, err)
+				}
+				var count int
+				if err := st.(*datastore.ProviderFactory).DB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM tokens WHERE hash = ?", "invite").Scan(&count); err != nil || count != 1 {
+					t.Fatalf("invite history changed: %d %v", count, err)
+				}
+				if srv.metrics.ChannelsDeleted.Load() != 1 {
+					t.Fatal("retirement not counted as deletion")
+				}
+				return
+			}
 			for i := 0; i < 2; i++ {
 				delay := srv.sweepTempChannels(handler, st)
 				if delay < tempChannelSweepRetry {

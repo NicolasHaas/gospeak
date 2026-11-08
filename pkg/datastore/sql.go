@@ -922,14 +922,20 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	return nil
 }
 
-// DeleteChannel refuses missing, referenced, or last-channel deletion. The checks
-// share the DELETE statement's writer lock, including for nontransactional callers.
+// DeleteChannel ignores expired/exhausted invite references, but preserves their
+// rows and all account scopes. The guards share the DELETE's writer lock.
 func (s *baseProvider) DeleteChannel(id int64) error {
+	// Trim fractional zeros so exact expiry is still valid, matching time.After
+	// in ValidateToken, without rounding away the first nanosecond after expiry.
+	now := time.Now().UTC().Format(dbTimeLayout + ".999999999")
 	res, err := s.ExecContext(context.Background(), `DELETE FROM channels WHERE id = ?
 		AND EXISTS(SELECT 1 FROM channels WHERE id != ?)
 		AND NOT EXISTS(SELECT 1 FROM channels WHERE parent_id = ?)
 		AND NOT EXISTS(SELECT 1 FROM users WHERE channel_scope = ?)
-		AND NOT EXISTS(SELECT 1 FROM tokens WHERE channel_scope = ?)`, id, id, id, id, id)
+		AND NOT EXISTS(SELECT 1 FROM tokens WHERE channel_scope = ? AND
+			(kind != ? OR max_uses < 0 OR
+			 ((expires_at IS NULL OR expires_at >= ? OR datetime(expires_at) IS NULL)
+			  AND (max_uses = 0 OR use_count < max_uses))))`, id, id, id, id, id, tokenKindInvite, now)
 	if err != nil {
 		return fmt.Errorf("datastore: delete channel: %w", err)
 	}
@@ -1062,7 +1068,8 @@ func (s *baseProvider) BootstrapTokenState() (BootstrapTokenState, error) {
 	return state, nil
 }
 
-// CreateToken stores a new token (hash only).
+// CreateToken stores a new invite (hash only). New scopes must be permanent;
+// existing temporary-scoped invites and accounts are not changed.
 func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error {
 	if maxUses < 0 {
 		return fmt.Errorf("datastore: create token: max uses must not be negative")
@@ -1074,7 +1081,7 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 	}
 	res, err := s.ExecContext(context.Background(),
 		`INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at)
-		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))`,
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ? AND is_temp = 0))`,
 		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr, channelScope, channelScope, channelScope)
 	if err != nil {
 		return fmt.Errorf("datastore: create token: %w", err)
