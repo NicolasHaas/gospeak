@@ -96,7 +96,7 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-      target: builder
+      target: development
     image: gospeak-lint
     profiles:
       - dev
@@ -113,7 +113,7 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-      target: builder
+      target: development
     image: gospeak-test
     profiles:
       - dev

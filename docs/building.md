@@ -63,51 +63,39 @@ only after the scanned container image has been published.
 
 ```mermaid
 graph TB
-    subgraph "Stage 1: builder-base"
-        S1[golang:1.26.8-bookworm]
-        S1 --> DEPS[Install system deps:<br/>PortAudio, Opus, OpenGL,<br/>MinGW cross-compiler]
-    end
-
-    subgraph "Stage 2: win-deps"
-        DEPS --> CMAKE[Cross-compile Windows libs:<br/>PortAudio + Opus via CMake<br/>with MinGW toolchain]
-    end
-
-    subgraph "Stage 3: builder"
-        CMAKE --> GOMOD[go mod download<br/>cached layer]
-        GOMOD --> COPY[Copy source]
-        COPY --> SRV_LIN[Build gospeak-server<br/>Linux, CGO=0]
-        COPY --> SRV_WIN[Build gospeak-server-win.exe<br/>Windows, CGO=0]
-        COPY --> CLI_LIN[Build gospeak-client-lin<br/>Linux, CGO=1]
-        COPY --> CLI_WIN[Build gospeak-client-win.exe<br/>Windows, MinGW cross-compile]
-    end
-
-    subgraph "Stage 3b: builder-win"
-        SRV_WIN --> RT_WIN[Windows binaries export]
-        CLI_WIN --> RT_WIN
-    end
-
-    subgraph "Stage 3c: builder-lin"
-        SRV_LIN --> RT_LIN[Linux binaries export]
-        CLI_LIN --> RT_LIN
-    end
-
-    subgraph "Stage 4: server"
-        SRV_LIN --> RT1[scratch runtime image]
-    end
-
-    subgraph "Stage 5: trivy-scan"
-        RT1 --> TRIVY[Trivy CVE scanner]
-    end
+    GO[go-base: pinned Go image] --> SRC[go-source: modules, source, version flags]
+    GO --> LIN[builder-base: Linux client dependencies]
+    GO --> WIN[win-deps: MinGW, static PortAudio and Opus]
+    SRC --> SRV[server-builder: pure-Go native server]
+    SRV --> RUNTIME[server: scratch runtime]
+    RUNTIME --> SCAN[trivy-scan]
+    SRC --> DEV[development: Linux dependencies and source]
+    LIN --> DEV
+    DEV --> CHECKS[Compose lint and test]
+    DEV --> BL[builder-lin: Linux client and server]
+    SRV --> BL
+    SRC --> BW[builder-win: Windows client and server]
+    WIN --> BW
+    LIN --> TOOLS[release-base: Windows objdump plus Linux inspection libraries]
+    TOOLS --> ALL[builder: all four binaries]
+    BL --> ALL
+    BW --> ALL
 ```
+
+The `server` target never installs system packages or builds clients. The
+`builder-lin` and `builder-win` targets compile only their platform's binaries;
+only `builder` joins both paths. Compose lint/test use `development` without
+compiling release binaries first. Linux outputs use the container platform's
+architecture; Windows outputs remain `amd64`.
 
 ### Layer Caching Strategy
 
-The Containerfile is optimized for caching:
-
-1. **System deps** (Stage 1) stay cached until the apt packages change.
-2. **Windows libs** (Stage 2) stay cached until the CMake config changes.
-3. **Go modules** (the first step in Stage 3) stay cached until `go.mod` or `go.sum` changes.
-4. **Source compilation** (the last step in Stage 3) is the only stage rerun for code changes.
+1. **System dependencies** are installed before source copies and release metadata.
+2. **Windows native libraries** depend on their pinned source refs and CMake config,
+   not Go source or version metadata.
+3. **Go modules** stay cached until `go.mod` or `go.sum` changes.
+4. **Go source and version flags** feed only the requested build paths. Source
+   changes rerun compilation, not apt or CMake.
 
 ## Server Container
 

@@ -1,15 +1,9 @@
 # GoSpeak Build Container
-# Multi-stage build: compile with all CGo deps, output lean binaries
-# Optimized for layer caching — all apt/cmake steps run before source copy.
+# Independent server, Linux and Windows builds; apt/cmake precede source copies.
+FROM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS go-base
 
-# ============================================================
-# Stage 1: Builder base — install ALL system deps (cached layer)
-# ============================================================
-FROM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS builder-base
-
-# Install ALL system dependencies in one layer:
-# - Linux audio/GL for native client
-# - mingw-w64 for Windows cross-compilation
+# Linux client dependencies (also used by development and release inspection).
+FROM go-base AS builder-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Audio
     portaudio19-dev \
@@ -26,18 +20,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Build tools
     gcc \
     libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Aggregate release inspection needs Linux runtime libraries and Windows objdump.
+FROM builder-base AS release-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    binutils-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Windows toolchain and native libraries, independent of Linux client packages.
+FROM go-base AS win-deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
     cmake \
     make \
     git \
-    # Windows cross-compile
     gcc-mingw-w64-x86-64 \
     g++-mingw-w64-x86-64 \
     && rm -rf /var/lib/apt/lists/*
-
-# ============================================================
-# Stage 2: Cross-compile Windows deps (cached until cmake changes)
-# ============================================================
-FROM builder-base AS win-deps
 
 ARG PORTAUDIO_COMMIT=147dd722548358763a8b649b3e4b41dfffbcfbb6
 ARG OPUS_COMMIT=ddbe48383984d56acd9e1ab6a090c54ca6b735a6
@@ -93,51 +93,53 @@ RUN mkdir -p /win-deps/include /win-deps/lib && \
     printf 'prefix=/win-deps\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: opus\nVersion: 1.5.2\nDescription: Opus\nLibs: -L${libdir} -lopus\nCflags: -I${includedir}/opus\n' > /win-deps/lib/pkgconfig/opus.pc && \
     rm -rf /tmp/portaudio-src /tmp/portaudio-build /tmp/opus-src /tmp/opus-build
 
-# ============================================================
-# Stage 3: Go build — only this reruns on source changes
-# ============================================================
-FROM builder-base AS builder
+# Shared Go inputs; no native packages or release compilation.
+FROM go-base AS go-source
+WORKDIR /build
 
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Release metadata cannot invalidate apt, CMake or module-download layers.
 ARG VERSION_TAG
 ARG VERSION_COMMIT=unknown
 ARG VERSION_DATE=unknown
-
-WORKDIR /build
-
-# Cache Go module download (only reruns when go.mod/go.sum change)
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy Windows cross-compiled libs from cache stage
-COPY --from=win-deps /win-deps /win-deps
-COPY --from=win-deps /tmp/mingw-toolchain.cmake /tmp/mingw-toolchain.cmake
-
-# Copy source code (this is the layer that changes most often)
-COPY . .
-
-# Release workflows pass immutable source metadata. Local builds keep explicit
-# unknown defaults instead of depending on whether the build context contains .git.
 RUN VERSION_PKG="github.com/NicolasHaas/gospeak/pkg/version" && \
     echo "-X ${VERSION_PKG}.tag=${VERSION_TAG} -X ${VERSION_PKG}.commit=${VERSION_COMMIT} -X ${VERSION_PKG}.date=${VERSION_DATE}" > /tmp/version-ldflags
 
-# Build the pure-Go server as a static binary.
+# Dedicated pure-Go server build, using the build platform's architecture.
+FROM go-source AS server-builder
 RUN CGO_ENABLED=0 go build -o /out/gospeak-server \
     -ldflags="-s -w $(cat /tmp/version-ldflags)" \
     ./cmd/server/
 
-# Build server (Windows) — pure Go SQLite, no C deps needed
-RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-    go build -o /out/gospeak-server-win.exe \
-    -ldflags="-s -w $(cat /tmp/version-ldflags)" \
-    ./cmd/server/
+# Compose lint/test need native Linux dependencies and source, not release binaries.
+FROM builder-base AS development
+WORKDIR /build
+COPY --from=go-source /go/pkg/mod /go/pkg/mod
+COPY --from=go-source /build /build
 
-# Build Linux client
+FROM development AS builder-lin
+COPY --from=go-source /tmp/version-ldflags /tmp/version-ldflags
+COPY --from=server-builder /out/gospeak-server /out/
 RUN CGO_ENABLED=1 go build -o /out/gospeak-client-lin \
     -tags nolibopusfile \
     -ldflags="-s -w $(cat /tmp/version-ldflags)" \
     ./cmd/client/
 
-# Build Windows client
+FROM win-deps AS builder-win
+WORKDIR /build
+COPY --from=go-source /go/pkg/mod /go/pkg/mod
+COPY --from=go-source /build /build
+COPY --from=go-source /tmp/version-ldflags /tmp/version-ldflags
+
+# Windows server remains pure Go; only the client uses MinGW and native libraries.
+RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -o /out/gospeak-server-win.exe \
+    -ldflags="-s -w $(cat /tmp/version-ldflags)" \
+    ./cmd/server/
+
 RUN PKG_CONFIG_PATH=/win-deps/lib/pkgconfig \
     PKG_CONFIG_LIBDIR=/win-deps/lib/pkgconfig \
     CC=x86_64-w64-mingw32-gcc \
@@ -149,23 +151,12 @@ RUN PKG_CONFIG_PATH=/win-deps/lib/pkgconfig \
     -ldflags="-s -w -H windowsgui $(cat /tmp/version-ldflags)" \
     ./cmd/client/
 
-# ============================================================
-# Stage 3b: Windows-only export (for fast local dev)
-# Usage: podman compose --profile build-win run builder-win
-# ============================================================
-FROM builder-base AS builder-win
-
-COPY --from=builder /out/gospeak-server-win.exe /out/
-COPY --from=builder /out/gospeak-client-win.exe /out/
-
-# ============================================================
-# Stage 3c: Linux-only export (for fast local dev)
-# Usage: podman compose --profile build-lin run builder-lin
-# ============================================================
-FROM builder-base AS builder-lin
-
-COPY --from=builder /out/gospeak-server /out/
-COPY --from=builder /out/gospeak-client-lin /out/
+# Aggregate export retains all four binaries and release dependency-inspection tools.
+FROM release-base AS builder
+COPY --from=builder-lin /out/gospeak-server /out/
+COPY --from=builder-lin /out/gospeak-client-lin /out/
+COPY --from=builder-win /out/gospeak-server-win.exe /out/
+COPY --from=builder-win /out/gospeak-client-win.exe /out/
 
 # ============================================================
 # Stage 4: Server runtime — the server has no C or OS package dependencies
@@ -176,7 +167,7 @@ LABEL org.opencontainers.image.source="https://github.com/NicolasHaas/gospeak" \
       org.opencontainers.image.licenses="AGPL-3.0" \
       org.opencontainers.image.description="GoSpeak server: privacy-focused voice communication SFU"
 
-COPY --from=builder /out/gospeak-server /gospeak-server
+COPY --from=server-builder /out/gospeak-server /gospeak-server
 
 EXPOSE 9600/tcp 9601/udp 9603/tcp
 
