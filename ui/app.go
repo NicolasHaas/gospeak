@@ -434,7 +434,13 @@ func (a *App) buildUI() {
 	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
 	chatBottom := widget.NewButtonWithIcon("Scroll to bottom", theme.MoveDownIcon(), a.chatScroll.ScrollToBottom)
 	chatBottom.Importance = widget.LowImportance
-	a.chatPane = container.NewBorder(a.chatMore, chatBottom, nil, nil, a.chatScroll)
+	chatBottom.Hide()
+	// Overlay the action so its visibility cannot change the scrollable height.
+	a.chatPane = container.NewBorder(a.chatMore, nil, nil, nil,
+		container.NewStack(a.chatScroll, container.NewBorder(nil, chatBottom, nil, nil)))
+	chatLayout := &chatPaneLayout{box: a.chatPane.Layout, scroll: a.chatScroll, bottom: chatBottom}
+	a.chatPane.Layout = chatLayout
+	a.chatScroll.OnScrolled = func(fyne.Position) { chatLayout.updateBottom() }
 	a.chatStack = container.NewStack(a.chatPane, a.screenBox)
 	chatPanel := container.NewBorder(chatHeaderBar, container.NewBorder(nil, nil, nil, a.chatSend, a.chatEntry), nil, nil, a.chatStack)
 

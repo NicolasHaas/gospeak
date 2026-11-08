@@ -18,6 +18,33 @@ import (
 // maxChatTombstones bounds deletion markers retained for the selected channel.
 const maxChatTombstones = 1000
 
+// chatPaneLayout updates the bottom action after content changes and resizes,
+// which do not necessarily move the offset or emit OnScrolled.
+type chatPaneLayout struct {
+	box    fyne.Layout
+	scroll *container.Scroll
+	bottom *widget.Button
+}
+
+func (l *chatPaneLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	l.box.Layout(objects, size)
+	l.scroll.Refresh()
+	l.updateBottom()
+}
+
+func (l *chatPaneLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	return l.box.MinSize(objects)
+}
+
+func (l *chatPaneLayout) updateBottom() {
+	remaining := l.scroll.Content.MinSize().Height - l.scroll.Size().Height
+	if remaining > 0 && l.scroll.Offset.Y < remaining {
+		l.bottom.Show()
+	} else {
+		l.bottom.Hide()
+	}
+}
+
 func (a *App) startChatLoading() {
 	if a.chatTimer != nil {
 		a.chatTimer.Stop()
@@ -66,8 +93,8 @@ func (a *App) resetChat() {
 	a.chatLoading = false
 	a.chatBeforeID = 0
 	a.chatBox.Objects = nil
-	a.chatBox.Refresh()
 	a.chatMore.Hide()
+	a.chatPane.Refresh()
 	a.updateChatContext()
 }
 
@@ -258,7 +285,6 @@ func (a *App) renderChat() {
 		rows = append(rows, container.NewBorder(nil, nil, nil, button, label))
 	}
 	a.chatBox.Objects = rows
-	a.chatBox.Refresh()
 	if a.chatRetry {
 		a.chatMore.SetText("Retry messages")
 		a.chatMore.Show()
@@ -274,4 +300,5 @@ func (a *App) renderChat() {
 	} else {
 		a.chatMore.Hide()
 	}
+	a.chatPane.Refresh()
 }

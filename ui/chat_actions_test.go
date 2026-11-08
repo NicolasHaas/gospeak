@@ -3,6 +3,7 @@ package ui
 import (
 	"crypto/tls"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,27 +21,112 @@ func TestChatBottomButton(t *testing.T) {
 	defer f.Quit()
 	a := &App{fyneApp: f, window: f.NewWindow("GoSpeak"), engine: client.NewEngine()}
 	a.buildUI()
-	a.chatChannelID = 1
-	for i := int64(1); i <= 40; i++ {
-		a.chatRows = append(a.chatRows, pb.ChatMessage{ID: i, ChannelID: 1, Text: "message"})
-	}
-	a.renderChat()
-	a.chatScroll.Resize(fyne.NewSize(400, 100))
-	a.chatScroll.ScrollToTop()
 	var bottom *widget.Button
-	for _, obj := range a.chatPane.Objects {
+	var findButton func(fyne.CanvasObject)
+	findButton = func(obj fyne.CanvasObject) {
 		if button, ok := obj.(*widget.Button); ok && button.Text == "Scroll to bottom" {
 			bottom = button
 		}
+		if box, ok := obj.(*fyne.Container); ok {
+			for _, child := range box.Objects {
+				findButton(child)
+			}
+		}
 	}
+	findButton(a.chatPane)
 	if bottom == nil {
 		t.Fatal("missing labeled chat bottom button")
 	}
+	check := func(state string, visible bool) {
+		t.Helper()
+		if bottom.Visible() != visible {
+			t.Fatalf("%s: button visible %v, want %v (content %v, viewport %v, offset %v)",
+				state, bottom.Visible(), visible, a.chatBox.MinSize(), a.chatScroll.Size(), a.chatScroll.Offset)
+		}
+	}
+	a.chatPane.Resize(fyne.NewSize(400, 200))
+	check("empty", false)
+	a.chatChannelID = 1
+	a.chatDeleted = make(map[int64]bool)
+	a.addChatMessage(pb.ChatMessage{ID: 1, ChannelID: 1, Text: "message"})
+	check("short chat", false)
+	for i := int64(2); i <= 40; i++ {
+		a.chatRows = append(a.chatRows, pb.ChatMessage{ID: i, ChannelID: 1, Text: "message"})
+	}
+	a.renderChat()
+	a.chatScroll.ScrollToBottom()
+	check("overflow at bottom", false)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: 50}})
+	check("wheel up", true)
 	test.Tap(bottom)
 	want := a.chatBox.MinSize().Height - a.chatScroll.Size().Height
 	if want <= 0 || a.chatScroll.Offset.Y != want || len(a.chatRows) != 40 {
 		t.Fatalf("bottom action: offset %v, want %v; rows %d", a.chatScroll.Offset.Y, want, len(a.chatRows))
 	}
+	check("tapped bottom", false)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: 100000}})
+	check("top", true)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: -50}})
+	a.chatPane.Resize(fyne.NewSize(400, a.chatBox.MinSize().Height-a.chatScroll.Offset.Y))
+	check("resize reaches bottom without moving offset or content", false)
+	a.chatPane.Resize(fyne.NewSize(400, 200))
+	check("resize leaves bottom without moving offset or content", true)
+	a.chatPane.Resize(fyne.NewSize(400, a.chatBox.MinSize().Height+1))
+	check("grown to fit", false)
+	a.chatPane.Resize(fyne.NewSize(400, 200))
+	check("shrunk from fitting", true)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: -100000}})
+	check("wheel down", false)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: 100000}})
+	a.addChatMessage(pb.ChatMessage{ID: 41, ChannelID: 1, Text: "new message"})
+	check("incoming message keeps existing autoscroll", false)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: 100000}})
+	for i := int64(2); i <= 41; i++ {
+		a.removeChatMessage(pb.ChatDeleteEvent{ChannelID: 1, MessageID: i})
+	}
+	check("deleted down to fitting", false)
+
+	// One wrapped row can overflow; width changes must update without a scroll event.
+	a.chatRows[0].Text = strings.Repeat("wrapped message ", 30)
+	a.renderChat()
+	a.chatPane.Resize(fyne.NewSize(200, 200))
+	check("narrow wrapped row", true)
+	a.chatPane.Resize(fyne.NewSize(2000, 200))
+	check("wide wrapped row fits", false)
+	a.chatPane.Resize(fyne.NewSize(400, 200))
+	a.chatRows[0].Text = "message"
+	a.renderChat()
+	a.chatPane.Resize(fyne.NewSize(400, a.chatBox.MinSize().Height+1))
+	check("near fit without button stealing height", false)
+	a.chatHasMore = true
+	a.renderChat()
+	check("earlier messages bar reduces viewport", true)
+	a.chatHasMore = false
+	a.renderChat()
+	check("earlier messages bar removed", false)
+	a.chatPane.Resize(fyne.NewSize(200, 100))
+	a.chatRows[0].Text = strings.Repeat("wrapped message ", 30)
+	a.renderChat()
+	check("overflow before reset", true)
+	a.resetChat()
+	check("reset", false)
+	a.chatChannelID = 2
+	a.chatLoading = true
+	a.addChatHistory(pb.ChatHistoryResponse{ChannelID: 2, HasMore: true, Messages: []pb.ChatMessage{
+		{ID: 2, ChannelID: 2, Text: strings.Repeat("history message ", 30)},
+	}})
+	check("initial history at bottom", false)
+	a.chatScroll.Scrolled(&fyne.ScrollEvent{Scrolled: fyne.Delta{DY: 100000}})
+	check("history scrolled up", true)
+	a.chatLoading = true
+	a.addChatHistory(pb.ChatHistoryResponse{ChannelID: 2, Messages: []pb.ChatMessage{
+		{ID: 1, ChannelID: 2, Text: "earlier message"},
+	}})
+	check("earlier history leaves action visible", true)
+	a.bindEvents()
+	a.engine.OnStateChange(client.StateDisconnected)
+	fyne.DoAndWait(func() {})
+	check("disconnect", false)
 }
 
 func TestChannelJoinButtonUsesRecycledRow(t *testing.T) {
