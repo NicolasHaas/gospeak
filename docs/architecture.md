@@ -195,6 +195,13 @@ sequenceDiagram
     end
 ```
 
+Screen state changes wait for any in-flight screen send before taking the client
+callback ordering gate. A stalled screen write therefore does not hold up the
+microphone's RMS/VAD callback enqueue or subsequent voice encoding. After that
+wait, events are rechecked against the current, uncanceled connection generation;
+accepted callbacks keep their existing FIFO/coalescing behavior. This does not
+make native audio device calls interruptible.
+
 ## Data Models
 
 ```mermaid

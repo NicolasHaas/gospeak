@@ -243,7 +243,9 @@ type Engine struct {
 	channelScope         int64
 	nextHistoryRequestID int64 // Engine lifetime, never reused across reconnects or queued UI callbacks
 
-	screenMu            sync.Mutex
+	screenMu sync.Mutex
+	// Acquire the send gate before callbackMu, never while holding it: a bounded
+	// network write must not stall microphone callback producers.
 	screenSendMu        sync.Mutex
 	screenSharePending  bool
 	screenShareRunning  bool
@@ -1225,10 +1227,14 @@ func (e *Engine) handleVoiceSendError(g *connectionGeneration, err error) bool {
 
 // handleEvent dispatches incoming server events.
 func (e *Engine) handleEventGeneration(g *connectionGeneration, msg *pb.ControlMessage) {
+	if msg.ServerStateEvent != nil || msg.ChannelJoinResponse != nil || msg.ErrorResponse != nil || msg.ScreenShareEvent != nil {
+		e.screenSendMu.Lock()
+		defer e.screenSendMu.Unlock()
+	}
 	e.callbackMu.Lock()
 	defer e.callbackMu.Unlock()
 	e.mu.RLock()
-	current := e.generation == g && e.state == StateConnected
+	current := e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
 	e.mu.RUnlock()
 	if current {
 		e.handleEvent(g, msg)
@@ -1332,7 +1338,7 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 	case msg.ErrorResponse != nil:
 		slog.Error("server error", "code", msg.ErrorResponse.Code, "msg", msg.ErrorResponse.Message)
 		if msg.ErrorResponse.Code == 40 && strings.Contains(strings.ToLower(msg.ErrorResponse.Message), "screen") {
-			e.stopScreenShareLoop()
+			e.stopScreenShareLoopLocked()
 			e.screenMu.Lock()
 			e.screenSharePending = false
 			e.screenMu.Unlock()
@@ -1388,7 +1394,7 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		}
 
 	case msg.ScreenShareEvent != nil:
-		e.handleScreenShareEvent(g, msg.ScreenShareEvent)
+		e.handleScreenShareEventLocked(g, msg.ScreenShareEvent)
 
 	case msg.SetUserRoleResp != nil:
 		if !g.consumeResponse(callbackRole) {
@@ -2039,6 +2045,7 @@ func (e *Engine) StopScreenShare() error {
 	}
 	defer g.wg.Done()
 
+	e.screenSendMu.Lock()
 	e.callbackMu.Lock()
 	e.mu.RLock()
 	current := e.generation == g && e.state == StateConnected
@@ -2048,13 +2055,15 @@ func (e *Engine) StopScreenShare() error {
 	g.mu.Unlock()
 	if !current || !activeGeneration {
 		e.callbackMu.Unlock()
+		e.screenSendMu.Unlock()
 		return fmt.Errorf("not connected")
 	}
-	e.stopScreenShareLoop()
+	e.stopScreenShareLoopLocked()
 	e.screenMu.Lock()
 	e.screenSharePending = false
 	e.screenMu.Unlock()
 	e.callbackMu.Unlock()
+	e.screenSendMu.Unlock()
 
 	return ctrl.Send(&pb.ControlMessage{ScreenShareStopReq: &pb.ScreenShareStopRequest{}})
 }
@@ -2354,6 +2363,15 @@ func (e *Engine) handleDisconnectGeneration(g *connectionGeneration, reason stri
 
 func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.ScreenShareEvent) {
 	if event == nil {
+		e.clearScreenShareStateGeneration(g)
+		return
+	}
+	e.handleEventGeneration(g, &pb.ControlMessage{ScreenShareEvent: event})
+}
+
+// Caller holds screenSendMu then callbackMu, including across state and enqueue.
+func (e *Engine) handleScreenShareEventLocked(g *connectionGeneration, event *pb.ScreenShareEvent) {
+	if event == nil {
 		e.clearScreenShareStateGenerationLocked(g)
 		return
 	}
@@ -2400,14 +2418,13 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 				e.startScreenShareLoop(g)
 			}
 		} else {
-			e.stopScreenShareLoop()
+			e.stopScreenShareLoopLocked()
 			e.screenMu.Lock()
 			e.screenSharePending = false
 			e.screenMu.Unlock()
 		}
 	}
 
-	e.screenSendMu.Lock()
 	e.screenMu.Lock()
 	previous := e.activeScreenShare
 	if !event.Active {
@@ -2434,7 +2451,6 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 		}
 	}
 	e.screenMu.Unlock()
-	e.screenSendMu.Unlock()
 
 	if callback := e.OnScreenFrame; !event.Active && callback != nil {
 		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
@@ -2448,27 +2464,34 @@ func (e *Engine) handleScreenShareEvent(g *connectionGeneration, event *pb.Scree
 }
 
 func (e *Engine) clearScreenShareState() {
-	e.callbackMu.Lock()
-	e.clearScreenShareStateGenerationLocked(nil)
-	e.callbackMu.Unlock()
+	e.clearScreenShareStateGeneration(nil)
 }
 
 func (e *Engine) clearScreenShareStateGeneration(g *connectionGeneration) {
+	e.screenSendMu.Lock()
+	defer e.screenSendMu.Unlock()
 	e.callbackMu.Lock()
+	defer e.callbackMu.Unlock()
+	if g != nil {
+		e.mu.RLock()
+		current := e.generation == g && e.state == StateConnected && g.ctx.Err() == nil
+		e.mu.RUnlock()
+		if !current {
+			return
+		}
+	}
 	e.clearScreenShareStateGenerationLocked(g)
-	e.callbackMu.Unlock()
 }
 
+// Caller holds screenSendMu then callbackMu.
 func (e *Engine) clearScreenShareStateGenerationLocked(g *connectionGeneration) {
-	e.stopScreenShareLoop()
-	e.screenSendMu.Lock()
+	e.stopScreenShareLoopLocked()
 	e.screenMu.Lock()
 	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenKey = nil
 	e.screenReceiveSeq = 0
 	e.screenMu.Unlock()
-	e.screenSendMu.Unlock()
 	if callback := e.OnScreenFrame; callback != nil {
 		e.enqueueOptionalGenerationCallbackLocked(g, func() { callback(nil) })
 	}
@@ -2591,6 +2614,11 @@ func (e *Engine) startScreenShareLoop(g *connectionGeneration) {
 
 func (e *Engine) stopScreenShareLoop() {
 	e.screenSendMu.Lock()
+	defer e.screenSendMu.Unlock()
+	e.stopScreenShareLoopLocked()
+}
+
+func (e *Engine) stopScreenShareLoopLocked() {
 	e.screenMu.Lock()
 	cancel := e.screenShareCancel
 	e.screenShareLoopID++
@@ -2601,7 +2629,6 @@ func (e *Engine) stopScreenShareLoop() {
 	if cancel != nil {
 		cancel()
 	}
-	e.screenSendMu.Unlock()
 }
 
 func (e *Engine) finishScreenShareLoop(loopID uint64) {
@@ -2615,10 +2642,19 @@ func (e *Engine) finishScreenShareLoop(loopID uint64) {
 }
 
 func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
+	// Closing the transport first interrupts any send that owns the gate.
+	g.mu.Lock()
+	screen := g.screen
+	g.mu.Unlock()
+	if screen != nil {
+		_ = screen.Close()
+	}
+	e.screenSendMu.Lock()
+	defer e.screenSendMu.Unlock()
 	e.callbackMu.Lock()
 	defer e.callbackMu.Unlock()
 	e.mu.Lock()
-	if e.generation != g || e.state != StateConnected {
+	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
 		e.mu.Unlock()
 		return
 	}
@@ -2631,20 +2667,16 @@ func (e *Engine) handleScreenDisconnectGeneration(g *connectionGeneration) {
 		g.mu.Unlock()
 		return
 	}
-	screen := g.screen
 	g.screen = nil
 	g.mu.Unlock()
-	_ = screen.Close()
 
-	e.stopScreenShareLoop()
-	e.screenSendMu.Lock()
+	e.stopScreenShareLoopLocked()
 	e.screenMu.Lock()
 	e.activeScreenShare = nil
 	e.screenCipher = nil
 	e.screenKey = nil
 	e.screenReceiveSeq = 0
 	e.screenMu.Unlock()
-	e.screenSendMu.Unlock()
 
 	if callback := e.OnScreenFrame; callback != nil {
 		e.enqueueGenerationCallbackLocked(g, func() { callback(nil) })
