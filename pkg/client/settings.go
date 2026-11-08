@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -18,6 +19,7 @@ type Settings struct {
 	InputVolume  float64 `yaml:"input_volume"`
 	OutputVolume float64 `yaml:"output_volume"`
 	path         string
+	loadErr      error
 }
 
 // normalizeVolume bounds an app-specific percentage; invalid values use unity.
@@ -58,22 +60,29 @@ func LoadLegacySettings() *Settings {
 
 func loadSettings(path, legacyPath string) *Settings {
 	s := DefaultSettings()
+	s.path = path
 	loadedPath := path
 	data, err := readPrivateFile(path, path != legacyPath)
 	if os.IsNotExist(err) && legacyPath != "" && legacyPath != path {
 		data, err = readPrivateFile(legacyPath, false)
 		loadedPath = legacyPath
 	}
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Error("read settings", "err", err)
-		}
+	if os.IsNotExist(err) {
 		return s
 	}
 	s.path = loadedPath
-	if err := yaml.Unmarshal(data, s); err != nil {
-		slog.Error("parse settings", "err", err)
+	if err != nil {
+		s.loadErr = fmt.Errorf("read settings %q: %w", loadedPath, err)
+		slog.Error("read settings", "err", s.loadErr)
+		return s
 	}
+	loaded := *s
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
+		s.loadErr = fmt.Errorf("invalid settings file %q", loadedPath)
+		slog.Error("parse settings", "err", s.loadErr)
+		return s
+	}
+	*s = loaded
 	if math.IsNaN(s.VADThreshold) || s.VADThreshold < 50 || s.VADThreshold > 3000 {
 		s.VADThreshold = DefaultSettings().VADThreshold
 	}
@@ -84,6 +93,9 @@ func loadSettings(path, legacyPath string) *Settings {
 
 // Save writes settings atomically to the user config directory.
 func (s *Settings) Save() error {
+	if s.loadErr != nil {
+		return fmt.Errorf("settings were not loaded; refusing to overwrite; repair or move %q and restart GoSpeak: %w", s.path, s.loadErr)
+	}
 	s.InputVolume = normalizeVolume(s.InputVolume)
 	s.OutputVolume = normalizeVolume(s.OutputVolume)
 	data, err := yaml.Marshal(s)

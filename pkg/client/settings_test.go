@@ -21,7 +21,6 @@ func TestSettingsVADThreshold(t *testing.T) {
 		{"0", DefaultSettings().VADThreshold},
 		{"49.99", DefaultSettings().VADThreshold},
 		{"3000.01", DefaultSettings().VADThreshold},
-		{"broken", DefaultSettings().VADThreshold},
 		{"50", 50},
 		{"200", 200},
 		{"512.5", 512.5},
@@ -53,7 +52,6 @@ func TestSettingsVolumes(t *testing.T) {
 		{"input_volume: 0\noutput_volume: 50\n", 0, 50},
 		{"input_volume: -20\noutput_volume: 200\n", 0, 100},
 		{"input_volume: .nan\noutput_volume: .inf\n", 100, 100},
-		{"input_volume: broken\noutput_volume: 25\n", 100, 25},
 	} {
 		path := filepath.Join(t.TempDir(), "settings.yaml")
 		if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {

@@ -1538,6 +1538,7 @@ func (a *App) showSettingsDialog() {
 			a.settings.DeafenKey = deafenKeySelect.Selected
 			if err := a.settings.Save(); err != nil {
 				slog.Error("save settings", "err", err)
+				a.showError(err)
 			}
 			inputName, outputName := inputSelect.Selected, outputSelect.Selected
 			if inputName == "(Default)" {
@@ -1556,6 +1557,7 @@ func (a *App) showSettingsDialog() {
 						a.settings.AudioInput, a.settings.AudioOutput = inputName, outputName
 						if saveErr := a.settings.Save(); saveErr != nil {
 							slog.Error("save settings", "err", saveErr)
+							a.showError(saveErr)
 						}
 					} else {
 						dialog.ShowError(err, a.window)
