@@ -1045,6 +1045,7 @@ func TestValidateToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Tx: %v", err)
 			}
+			defer func() { _ = tx1.Rollback() }()
 			_, err = tx1.ValidateToken(tc.token.hash)
 			if err != nil && tc.expectValidation {
 				t.Fatalf("ValidateToken_1: unexpected error: %v", err)
@@ -1058,6 +1059,7 @@ func TestValidateToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Tx: %v", err)
 			}
+			defer func() { _ = tx2.Rollback() }()
 			_, err = tx2.ValidateToken(tc.token.hash)
 			if !tc.expectValidation {
 				if err == nil {
