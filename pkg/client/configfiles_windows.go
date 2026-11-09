@@ -153,7 +153,18 @@ func openConfigDirectory(path string, create, protect bool) (*configDirectory, e
 		}
 		handle, openErr := openConfigHandle(current, true, access, windows.FILE_SHARE_READ)
 		if (errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND) || errors.Is(openErr, windows.ERROR_PATH_NOT_FOUND)) && create {
-			if mkdirErr := os.Mkdir(current, 0o700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+			descriptor, descriptorErr := privateConfigSecurityDescriptor()
+			if descriptorErr != nil {
+				directory.Close()
+				return nil, descriptorErr
+			}
+			pointer, pointerErr := windows.UTF16PtrFromString(current)
+			if pointerErr != nil {
+				directory.Close()
+				return nil, pointerErr
+			}
+			attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+			if mkdirErr := windows.CreateDirectory(pointer, attrs); mkdirErr != nil && !errors.Is(mkdirErr, windows.ERROR_ALREADY_EXISTS) {
 				directory.Close()
 				return nil, mkdirErr
 			}

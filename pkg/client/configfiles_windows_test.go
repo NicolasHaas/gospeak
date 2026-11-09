@@ -90,6 +90,10 @@ func assertOwnerOnlyConfigACL(t *testing.T, path string) {
 	if err != nil || owner == nil {
 		t.Fatalf("read config owner: %v", err)
 	}
+	current, err := currentConfigUserSID()
+	if err != nil || !owner.Equals(current) {
+		t.Fatalf("config owner is not the current user: %v", err)
+	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil || dacl == nil || dacl.AceCount != 1 {
 		t.Fatalf("config DACL does not contain exactly one ACE: %v", err)
