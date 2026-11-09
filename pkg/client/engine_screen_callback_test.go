@@ -38,6 +38,7 @@ func TestScreenSendDoesNotBlockMicrophoneCallbacks(t *testing.T) {
 			e.generation, e.state, e.sessionID, e.channelID = g, StateConnected, 10, 1
 			e.mediaCipher = "aes128"
 			g.control = &ControlClient{conn: &recordingConn{}}
+			g.voice = &VoiceClient{}
 			share := &pb.ScreenShareEvent{Active: true, SessionID: 10, ChannelID: 1, MediaCipher: "aes128", EncryptionKey: make([]byte, 16)}
 			e.handleEventGeneration(g, &pb.ControlMessage{ScreenShareEvent: share})
 			e.captureScreenFn = func(int) (image.Image, error) { return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil }
@@ -89,7 +90,6 @@ func TestScreenSendDoesNotBlockMicrophoneCallbacks(t *testing.T) {
 			e.OnRMSLevel = func(level float64) { levels <- level }
 			e.OnVoiceActivity = func(active bool) { activity <- active }
 			encoder := &volumeEncoder{}
-			g.voice = &VoiceClient{}
 			g.audio = &audioResources{
 				capture: &volumeCapturer{sequenceCapturer: sequenceCapturer{frame: []int16{1000}}, engine: e, generation: g, volumes: []float64{100, 100, 100}},
 				encoder: encoder,
