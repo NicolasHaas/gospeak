@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestMalformedSettingsApplyPreservesFileAndShowsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "gospeak", "settings.yaml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := client.DefaultSettings().Save(); err != nil {
 		t.Fatal(err)
 	}
 	original := []byte("mute_key: F9\ninput_volume: broken\n")
@@ -38,7 +39,7 @@ func TestMalformedSettingsApplyPreservesFileAndShowsRecovery(t *testing.T) {
 	defer fyne.SetCurrentApp(f)
 	test.Tap(apply)
 	finishAudioSettingsApply(t, completion)
-	if !a.errorVisible || a.errorLabel == nil || !strings.Contains(a.errorLabel.Text, "refusing to overwrite") || !strings.Contains(a.errorLabel.Text, path) || !strings.Contains(a.errorLabel.Text, "restart") {
+	if !a.errorVisible || a.errorLabel == nil || !strings.Contains(a.errorLabel.Text, "refusing to overwrite") || !strings.Contains(a.errorLabel.Text, strconv.Quote(path)) || !strings.Contains(a.errorLabel.Text, "restart") {
 		t.Error("Apply did not show the settings preservation error and recovery instructions")
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // Fixed fixture under the isolated test config root.
