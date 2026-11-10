@@ -18,6 +18,19 @@ import (
 func TestRolePermissionControls(t *testing.T) {
 	f := test.NewApp()
 	defer f.Quit()
+	defer fyne.SetCurrentApp(f)
+	driver := &audioSettingsDriver{Driver: f.Driver(), completion: make(chan func(), 32)}
+	fyne.SetCurrentApp(&audioSettingsApp{App: f, driver: driver})
+	drainUI := func() {
+		for {
+			select {
+			case fn := <-driver.completion:
+				fn()
+			default:
+				return
+			}
+		}
+	}
 	certificate := httptest.NewTLSServer(nil)
 	defer certificate.Close()
 	for _, role := range []string{"admin", "moderator", "user"} {
@@ -27,13 +40,19 @@ func TestRolePermissionControls(t *testing.T) {
 			a.buildUI()
 			a.bindEvents()
 			a.engine.OnAudioFailure = func(error) {}
-			connected := make(chan struct{}, 1)
-			onState := a.engine.OnStateChange
-			a.engine.OnStateChange = func(state client.State) {
-				onState(state)
-				if state == client.StateConnected {
-					connected <- struct{}{}
-				}
+			a.engine.OnRMSLevel = nil
+			a.engine.OnVoiceActivity = nil
+			channelsUpdated := make(chan struct{}, 1)
+			onChannels := a.engine.OnChannelsUpdate
+			a.engine.OnChannelsUpdate = func(channels []pb.ChannelInfo) {
+				onChannels(channels)
+				channelsUpdated <- struct{}{}
+			}
+			disconnected := make(chan struct{}, 1)
+			onDisconnect := a.engine.OnDisconnect
+			a.engine.OnDisconnect = func(reason string) {
+				onDisconnect(reason)
+				disconnected <- struct{}{}
 			}
 			listener, err := tls.Listen("tcp", "127.0.0.1:0", certificate.TLS)
 			if err != nil {
@@ -66,17 +85,22 @@ func TestRolePermissionControls(t *testing.T) {
 				_ = listener.Close()
 				a.engine.Disconnect()
 				<-done
-				fyne.DoAndWait(func() {})
+				select {
+				case <-disconnected:
+				case <-time.After(3 * time.Second):
+					t.Error("disconnected callback missing")
+				}
+				drainUI()
 			}()
 			if err := a.engine.Connect(listener.Addr().String(), "127.0.0.1:9601", "", "Guest", client.SPKIFingerprint(certificate.Certificate())); err != nil {
 				t.Fatal(err)
 			}
 			select {
-			case <-connected:
+			case <-channelsUpdated:
 			case <-time.After(3 * time.Second):
-				t.Fatal("connected callback missing")
+				t.Fatal("channels callback missing")
 			}
-			fyne.DoAndWait(func() {})
+			drainUI()
 			admin := role == "admin"
 			moderation := admin || role == "moderator"
 			if a.serverBtn.Visible() != admin {
@@ -122,7 +146,7 @@ func TestRolePermissionControls(t *testing.T) {
 			}
 			clearDialogs()
 			a.engine.OnRoleChanged(true, "Role updated")
-			fyne.DoAndWait(func() {})
+			drainUI()
 			if a.serverBtn.Visible() != admin {
 				t.Errorf("role callback: Server Settings visible=%v, want %v", a.serverBtn.Visible(), admin)
 			}
