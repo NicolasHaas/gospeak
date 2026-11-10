@@ -205,12 +205,9 @@ func TestEnsureAdminTokenRetiresStaleCredentialForExistingStore(t *testing.T) {
 
 func TestEnsureAdminTokenRecoversPublishedCredential(t *testing.T) {
 	srv, st, credentialPath := newBootstrapTestServer(t)
-	rawToken, err := crypto.GenerateToken()
+	rawToken, err := loadOrCreateBootstrapCredential(credentialPath)
 	if err != nil {
-		t.Fatalf("GenerateToken() error = %v", err)
-	}
-	if err := os.WriteFile(credentialPath, []byte(rawToken+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
+		t.Fatalf("loadOrCreateBootstrapCredential() error = %v", err)
 	}
 
 	if err := srv.ensureAdminToken(st); err != nil {
