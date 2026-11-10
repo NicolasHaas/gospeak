@@ -254,17 +254,6 @@ func TestWritePrivateFileRejectsSymlinkDestination(t *testing.T) {
 	assertContentsAndMode(t, target, data, 0o644)
 }
 
-func assertPrivateFile(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("%s mode = %o, want 600", path, info.Mode().Perm())
-	}
-}
-
 func assertContentsAndMode(t *testing.T, path string, want []byte, mode os.FileMode) {
 	t.Helper()
 	got, err := os.ReadFile(path) //nolint:gosec // test helper receives temporary paths only

@@ -11,6 +11,29 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func assertPrivateFile(t *testing.T, path string) {
+	t.Helper()
+	assertOwnerOnlyConfigACL(t, path)
+}
+
+func TestWindowsPrivateFileReplacementPaths(t *testing.T) {
+	for _, name := range []string{"a", "settings.yaml", "音声-🎤.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "gospeak", name)
+			for _, data := range []string{"old", "new"} {
+				if err := writePrivateFile(path, []byte(data)); err != nil {
+					t.Fatal(err)
+				}
+				assertOwnerOnlyConfigACL(t, path)
+			}
+			data, err := os.ReadFile(path) //nolint:gosec // controlled temporary test path
+			if err != nil || string(data) != "new" {
+				t.Fatalf("replacement contents = %q, error = %v", data, err)
+			}
+		})
+	}
+}
+
 func TestReadPrivateFileRepairsPermissiveWindowsACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gospeak", "servers.yaml")
 	if err := writePrivateFile(path, []byte("bookmarks: []\n")); err != nil {

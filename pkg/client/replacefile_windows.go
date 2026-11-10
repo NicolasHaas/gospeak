@@ -24,7 +24,7 @@ func renameFileHandle(handle windows.Handle, destination string, replace bool) e
 	if err != nil {
 		return err
 	}
-	name = name[:len(name)-1]
+	// Win32 resolves the absolute path as a NUL-terminated string.
 	header := fileRenameInfoHeader{}
 	if replace {
 		header.replaceIfExists = 1
@@ -33,7 +33,7 @@ func renameFileHandle(handle windows.Handle, destination string, replace bool) e
 	buffer := make([]byte, nameOffset+uintptr(len(name))*unsafe.Sizeof(name[0]))
 	stored := (*fileRenameInfoHeader)(unsafe.Pointer(&buffer[0]))
 	*stored = header
-	stored.fileNameLength = uint32(len(name) * 2)
+	stored.fileNameLength = uint32((len(name) - 1) * 2)
 	copy(unsafe.Slice((*uint16)(unsafe.Pointer(&buffer[nameOffset])), len(name)), name)
 	return windows.SetFileInformationByHandle(handle, windows.FileRenameInfo, &buffer[0], uint32(len(buffer)))
 }
