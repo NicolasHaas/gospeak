@@ -13,6 +13,7 @@
 # NOTE: always use --build on "run" to ensure the latest source is compiled.
 #
 # Works with: Docker Compose v2, Podman Compose, podman-compose
+# Before starting, follow docs/building.md#server-container for rootful/rootless ./data ownership and mode 0700.
 
 services:
   server:

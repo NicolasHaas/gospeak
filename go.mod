@@ -1,6 +1,6 @@
 module github.com/NicolasHaas/gospeak
 
-go 1.26.8
+go 1.26.11
 
 require (
 	fyne.io/fyne/v2 v2.7.2
@@ -9,7 +9,7 @@ require (
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	golang.org/x/crypto v0.57.0
-	golang.org/x/image v0.24.0
+	golang.org/x/image v0.43.0
 	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.45.0

@@ -1,6 +1,6 @@
 # GoSpeak Build Container
 # Independent server, Linux and Windows builds; apt/cmake precede source copies.
-FROM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS go-base
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS go-base
 
 # Linux client dependencies (also used by development and release inspection).
 FROM go-base AS builder-base
@@ -110,6 +110,7 @@ RUN VERSION_PKG="github.com/NicolasHaas/gospeak/pkg/version" && \
 
 # Dedicated pure-Go server build, using the build platform's architecture.
 FROM go-source AS server-builder
+RUN mkdir -m 0700 -p /out/data
 RUN CGO_ENABLED=0 go build -o /out/gospeak-server \
     -ldflags="-s -w $(cat /tmp/version-ldflags)" \
     ./cmd/server/
@@ -168,6 +169,8 @@ LABEL org.opencontainers.image.source="https://github.com/NicolasHaas/gospeak" \
       org.opencontainers.image.description="GoSpeak server: privacy-focused voice communication SFU"
 
 COPY --from=server-builder /out/gospeak-server /gospeak-server
+COPY --from=server-builder --chown=10001:10001 --chmod=0700 /out/data /data
+USER 10001:10001
 
 EXPOSE 9600/tcp 9601/udp 9603/tcp
 

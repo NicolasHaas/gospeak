@@ -34,6 +34,8 @@ This configuration is designed to be hands-off after first boot while staying se
 - The supplied container services drop all capabilities and use
   `no-new-privileges`.
 
+The server image runs as UID:GID `10001:10001`. Cloud-init provisions `/var/lib/gospeak` for this owner with mode `0700`; fresh Compose named volumes inherit the image's private `/data`. Existing root-owned data must be migrated while stopped before enabling image auto-updates; follow the [volume ownership instructions](../docs/building.md#server-container). Existing database, sidecar, TLS and bootstrap files must also belong to this account; the image never changes ownership at startup.
+
 ## Open server mode
 
 The provided cloud-init starts GoSpeak with `-open` and `-screen-share`, which allows anyone to join without a token and enables per-channel screen sharing.

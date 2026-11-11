@@ -53,7 +53,7 @@ func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 
 func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 	containerfile := readProjectFile(t, "Containerfile")
-	if !strings.Contains(containerfile, "FROM golang:1.26.8-bookworm@sha256:") {
+	if !strings.Contains(containerfile, "FROM golang:1.26.11-bookworm@sha256:") {
 		t.Error("container build does not use the release Go toolchain version")
 	}
 	digest := regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
@@ -69,7 +69,7 @@ func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 			t.Errorf("container base is not pinned by digest: %s", line)
 		}
 	}
-	for _, required := range []string{"EXPOSE 9600/tcp 9601/udp 9603/tcp", "PORTAUDIO_COMMIT=", "OPUS_COMMIT="} {
+	for _, required := range []string{"EXPOSE 9600/tcp 9601/udp 9603/tcp", "PORTAUDIO_COMMIT=", "OPUS_COMMIT=", "USER 10001:10001", "mkdir -m 0700 -p /out/data", "COPY --from=server-builder --chown=10001:10001 --chmod=0700 /out/data /data"} {
 		if !strings.Contains(containerfile, required) {
 			t.Errorf("Containerfile missing %q", required)
 		}

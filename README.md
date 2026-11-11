@@ -43,9 +43,14 @@ GoSpeak uses a client-server SFU model, not peer-to-peer connections. TLS handle
 
 ### Run the Server (Container)
 
+For a fresh bind mount with rootful Docker (without user-namespace remapping):
+
 ```bash
+sudo install -d -m 0700 -o 10001 -g 10001 ./data
 docker compose up --build
 ```
+
+The image runs as UID:GID `10001:10001`. For rootless engines, use the separate [volume ownership instructions](docs/building.md#server-container) instead of the sudo command above. Existing data must also follow those instructions before starting or updating.
 
 The server listens on:
 - **TCP :9600**: TLS control plane
@@ -198,7 +203,7 @@ upgrade guidance for duplicate sibling names.
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Go 1.26.8 |
+| Language | Go 1.26.11 |
 | GUI | [Fyne](https://fyne.io/) v2 |
 | Audio I/O | [PortAudio](http://www.portaudio.com/) via [gordonklaus/portaudio](https://github.com/gordonklaus/portaudio) |
 | Voice Codec | [Opus](https://opus-codec.org/) via [hraban/opus](https://github.com/hraban/opus) |

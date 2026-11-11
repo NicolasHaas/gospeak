@@ -179,56 +179,15 @@ graph TB
 ```
 
 - Tokens are 256-bit random values (64 hex characters)
-- Invite and personal tokens are stored as SHA-256 hashes. Pending bootstrap issuance also stores independent random retry material in the private database; protect database backups as credentials. Personal-token hashes are stored on the user record.
+- Invite and personal tokens are stored as SHA-256 hashes. Pending bootstrap issuance also stores secret retry material in the database. Protect database backups as credentials, including after setup completes.
 - Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). When legacy bookmark or settings files are found beside the executable, the client asks before migrating them. Choosing No keeps those files as the active persistence destinations. After confirmation, each original is removed only after its exact bytes are validated and published successfully; conflicting or concurrently changed files are preserved for manual resolution. Protect the user account and its config directory accordingly.
 - Invite tokens can have: role assignment, channel scope, max uses, expiration. New scoped invites require a permanent channel; existing temporary-scoped credentials and accounts are preserved. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide.
 - Redeeming an invite, creating its user, and storing the new personal-token hash happen in one database transaction. A failed user creation therefore does not consume an invite use. Credential failures use the same external error response, while detailed causes remain in server logs.
 - The client reserves personal-token callback capacity before authenticating. A full reliable callback queue rejects the connection before authentication. After successful authentication, token delivery survives media setup failure, cancellation and a replacement attempt, and stays bound to the original server/account. Saving follows that attempt's bookmark choice; a failed save leaves the token visible and copyable.
 - New non-bootstrap accounts are limited to 120 successful provisions per tracked source group per hour (one IPv4 address or one IPv6 /64; IPv4-mapped IPv6 counts as IPv4). People sharing a group share its budget. At tracker capacity, the idle entry that expires soonest is evicted to admit a fresh group; returning evicted groups start a new budget. In-flight reservations are never evicted. Failed attempts release their provisioning reservation but remain subject to the separate authentication-failure limit. This bound also applies in open-server mode and does not disable tokenless first login. This grouping does not change exact-address IP bans.
-- On first server run, an admin bootstrap credential is written atomically to
-  `bootstrap-admin.token` in the configured data directory. It is protected by
-  mode `0600` and owner checks on POSIX, or a protected owner-only ACL on
-  Windows, and is read without following the final symlink/reparse component.
-  Provisioning is transactional and retryable for one administrator, including
-  after response-delivery failures. The server invalidates the credential and
-  removes its file after that administrator proves possession of the returned
-  personal token. Normal logs contain only the credential path.
-  New owner issuance uses at least 128 bits of server randomness, persisted in the same
-  transaction as the owner binding, so response loss and restart return the same
-  personal token. An old setup-file copy and public username cannot derive it.
-  Finalization clears this retry material atomically with setup invalidation;
-  the durable owner marker and owner exemptions remain intact. While setup is
-  pending, possession of the setup credential still allows the bound owner's
-  retry, so complete personal-token authentication promptly. Old database
-  backups containing retry material remain sensitive after finalization.
-
-### Existing bootstrap owners and explicit rotation
-
-An owner already issued by an older server is NOT remediated by upgrading.
-Its personal token remains derivable from an old setup-file copy and its public
-username. Upgrade preserves both pending retries and finalized credentials;
-startup logs a warning for these legacy owners. It never rotates credentials,
-deletes accounts, or migrates client files automatically. An unused legacy
-setup credential acquires independent randomness at first provisioning.
-
-To remediate an existing owner, the operator must explicitly coordinate an
-offline credential rotation with that owner. Stop the server (closing all
-sessions), make a protected consistent database backup, and identify the owner
-from the single tokens row with kind = 1 and created_by > 0. Do not delete or
-replace this marker or the account. Generate a fresh 32-byte cryptographically
-random personal token, encoded as 64 lowercase hex characters, outside logs and
-shell history; securely deliver and retain it before replacing the old hash.
-Using parameterized statements in one SQLite transaction, update that owner's
-users.personal_token_hash to the SHA-256 hex digest of the new token and update
-personal_token_created_at to the current UTC database timestamp. Finalize its
-tokens row by setting max_uses = 1 and bootstrap_key = '' while retaining
-created_by, kind and use_count = 1. Check exactly one owner and marker were
-updated before commit; otherwise roll back. This is an explicit revocation:
-the old token and setup retry will no longer work. Remove the obsolete setup
-file, restart, and verify the owner authenticates with the new token and keeps
-its owner protections. Update the owner's bookmark only with their consent.
-Retain the backup securely for recovery; restoring it restores the old risk.
-No online rotation command or automatic revocation policy is introduced.
+- On first server run, an admin bootstrap credential is written atomically to `bootstrap-admin.token` in the configured data directory. It is protected by mode `0600` and owner checks on POSIX, or a protected owner-only ACL on Windows, and is read without following the final symlink/reparse component. Normal logs contain only the credential path.
+- Bootstrap provisioning is transactional and retryable for one administrator. Independent random retry material in the database keeps the personal token stable across response loss and restarts. Authenticate with that personal token promptly to invalidate the setup credential, clear the retry material and remove the setup file. Until then, possession of the setup credential allows retries for the bound owner.
+- Credentials are not rotated automatically. If startup warns that an owner credential requires rotation, coordinate offline rotation with that owner and preserve the owner account and marker.
 
 ### Open Server Mode
 
@@ -240,7 +199,7 @@ When `AllowNoToken` is enabled, clients can connect without an invite token and 
 graph TB
     subgraph Roles
         ADMIN[Admin<br/>Full control]
-        MOD[Moderator<br/>Kick users]
+        MOD[Moderator<br/>Kick users & delete chat]
         USER[User<br/>Join & talk]
     end
 
@@ -250,6 +209,7 @@ graph TB
         P3[KickUser]
         P4[BanUser]
         P5[ManageTokens]
+        P6[DeleteChatMessage]
         P7[ManageRoles]
     end
 
@@ -258,8 +218,10 @@ graph TB
     ADMIN --> P3
     ADMIN --> P4
     ADMIN --> P5
+    ADMIN --> P6
     ADMIN --> P7
     MOD --> P3
+    MOD --> P6
 ```
 
 Every admin operation is checked server-side via `rbac.HasPermission()` before execution. The client's role is determined by the stored user role, and logins require the user's personal token.

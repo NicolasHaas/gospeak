@@ -10,9 +10,11 @@ reproducible.
 ## Prerequisites
 
 - **Podman** (or Docker) is used for container builds.
-- **Go 1.26.8 or newer** is only needed for local development without containers.
+- **Go 1.26.11 or newer** is only needed for local development without containers.
 
 ## Quick Build
+
+Before starting the server, prepare its data mount using the [rootful or rootless instructions](#server-container).
 
 ### Using Docker Compose
 
@@ -99,11 +101,12 @@ architecture; Windows outputs remain `amd64`.
 
 ## Server Container
 
-The supplied Compose files drop all Linux capabilities and set
-`no-new-privileges`. The image still runs as root so existing named volumes,
-bind mounts, and cloud-init auto-updates remain compatible. Moving to a fixed
-unprivileged UID requires a tested ownership migration for existing database,
-certificate, and bootstrap files rather than silently stranding those files.
+The server runs as UID:GID `10001:10001`; `/data` is owned by that account with mode `0700`. Fresh named volumes inherit this directory. The supplied Compose files drop all Linux capabilities and set `no-new-privileges`.
+
+For a fresh development Compose bind mount with a rootful engine without user-namespace remapping, run `sudo install -d -m 0700 -o 10001 -g 10001 ./data` before starting. For rootless Podman, run `podman unshare install -d -m 0700 -o 10001 -g 10001 ./data` as the invoking user on a fresh path instead; do not first assign host UID 10001. Other engines, including rootless Docker, require their own user-namespace/mapping procedure: container UID 10001 is not necessarily host UID 10001.
+
+For existing bind mounts or named volumes, stop the server and restart/update automation, take a private backup, and migrate only the dedicated GoSpeak data path without following symlinks. The directory and its database, sidecars, certificates and bootstrap file must belong to container UID:GID `10001:10001`; retain `0700` directories and `0600` private files. Rootless namespace ownership changes work only on accessible data owned by or mapped to that rootless user. Data owned by host root or an external host UID (including host UID 10001) requires a privileged, explicitly scoped migration to the engine's actual mapped host owner first; an unprivileged namespace chown cannot repair it. Verify ownership and modes in the engine's namespace before starting or enabling auto-updates; wrong ownership fails closed. The image does not repair permissions or start as root.
+
 The runtime image contains only the statically linked server. It has no shell,
 package manager, C runtime, or CA bundle because the server accepts inbound TLS
 connections but does not make outbound TLS requests.
