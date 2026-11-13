@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -38,7 +39,11 @@ func NewControlClient(addr, expectedPin string) (*ControlClient, error) {
 }
 
 func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*ControlClient, error) {
-	tlsCfg, err := tlsConfig(addr, expectedPin)
+	return newControlClientContext(ctx, addr, expectedPin, nil)
+}
+
+func newControlClientContext(ctx context.Context, addr, expectedPin string, roots *x509.CertPool) (*ControlClient, error) {
+	tlsCfg, err := newTLSConfig(addr, expectedPin, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +59,12 @@ func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*Co
 	if !ok || len(tlsConn.ConnectionState().PeerCertificates) == 0 {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: control connection has no TLS peer identity")
+	}
+	if expectedPin == "" {
+		if _, err := pkiHistory(addr, true); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 
 	return &ControlClient{

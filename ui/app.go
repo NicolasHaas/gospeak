@@ -1256,9 +1256,9 @@ func (a *App) confirmServerTrust(controlAddr, received, expected string, connect
 	confirm := "Trust and Connect"
 	message := fmt.Sprintf("Verify this server fingerprint through a trusted channel before continuing:\n\n%s\n\nServer: %s", received, controlAddr)
 	if expected != "" {
-		title = "Server Identity Changed"
+		title = "Server Trust Changed"
 		confirm = "Re-trust and Connect"
-		message = fmt.Sprintf("WARNING: the saved server identity changed. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nSaved: %s\nNew:   %s\n\nServer: %s", expected, received, controlAddr)
+		message = fmt.Sprintf("WARNING: the server no longer matches its saved trust. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nPrevious trust: %s\nNew fingerprint: %s\n\nServer: %s", expected, received, controlAddr)
 	}
 	dialog.NewCustomConfirm(title, confirm, "Cancel", widget.NewLabel(message), func(ok bool) {
 		if !ok || attempt != a.connectAttempt {
