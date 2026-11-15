@@ -22,7 +22,15 @@ func TestConcurrentChannelAdmissionSharesWireBudget(t *testing.T) {
 		}
 		remaining -= cost
 	}
-	cost := model.ChannelStateBytes(model.Channel{Name: "y"})
+	cost := model.ChannelStateBytes(model.Channel{Name: "false"})
+	if remaining >= 2*cost {
+		runes := (remaining - cost - model.StateChannelFixedBytes) / model.StateJSONRuneBytes
+		filler := &model.Channel{Name: strings.Repeat("z", min(runes, model.MaxChannelNameLength)), Description: strings.Repeat("z", max(0, runes-model.MaxChannelNameLength))}
+		if err := f.NonTx().CreateChannel(filler); err != nil {
+			t.Fatal(err)
+		}
+		remaining -= model.ChannelStateBytes(*filler)
+	}
 	if remaining < cost || remaining >= 2*cost {
 		t.Fatalf("fixture requires exactly one slot, remaining %d", remaining)
 	}

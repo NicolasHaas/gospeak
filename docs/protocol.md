@@ -325,6 +325,12 @@ The server does **not** decode Opus audio. It:
 5. Forwards the original ciphertext **as-is** to all other members of that channel
 6. Skips the sender (no echo), deafened users and destinations without an unexpired return-routability proof
 
+### Incoming voice admission
+
+Clients admit voice only for the active connection generation, current channel and a known non-self channel member, after AEAD authentication and a per-session 64-packet replay check. Rejected packets do not allocate decoder/jitter state or refresh speaker activity. The shared media key does not prove a known speaker's authorship: a key holder able to bypass the client's server-source filtering, or a malicious server, remains outside this protection.
+
+`AuthResponse` and `ServerStateEvent` carry `live_session_ids`, a complete list of at most 1024 distinct nonzero session IDs, including connected sessions outside all channels. Channel members must occur in that list exactly once across channels. Replay history survives channel leave/rejoin and idle decoder cleanup; an authoritative disconnect retires replay and speaker state. Missing or null lifecycle data disables incoming voice without erasing replay history. An empty list is authoritative only when no channel members remain. Older clients ignore the added nested JSON field and retain their previous receive behavior; clients requiring lifecycle data cannot receive voice from servers that omit it. The 512 KiB control-frame ceiling is unchanged; channel-state admission reserves space for the roster.
+
 ### Nonce Construction
 
 The selected AEAD nonce (12 bytes) is deterministic and never reused while a voice key is active:

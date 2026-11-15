@@ -23,7 +23,7 @@ const (
 	// Reserve one maximum-size user per supported session and the auth envelope.
 	// Channel costs include JSON keys, widest IDs, punctuation and worst-case escaping.
 	MaxServerSessions      = 1024
-	StateUserBytes         = 4*MaxUsernameLength + 128
+	StateUserBytes         = 4*MaxUsernameLength + 128 + 11 // includes widest live-session ID and comma
 	StateEnvelopeBytes     = 4096
 	StateChannelFixedBytes = 192
 	StateJSONRuneBytes     = 6

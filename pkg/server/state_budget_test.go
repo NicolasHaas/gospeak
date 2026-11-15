@@ -35,8 +35,8 @@ func TestMaximumAcceptedStateFitsWireFrames(t *testing.T) {
 	// Constituent bounds prove all accepted mixtures fit, not just this fixture.
 	worstUser := pb.UserInfo{SessionID: math.MaxUint32, ID: math.MaxInt64, Username: strings.Repeat("𐐀", model.MaxUsernameLength), Role: "moderator"}
 	data, err := json.Marshal(worstUser)
-	if err != nil || len(data)+1 > model.StateUserBytes {
-		t.Fatalf("user bound: %d, %v", len(data)+1, err)
+	if err != nil || len(data)+1+11 > model.StateUserBytes {
+		t.Fatalf("user and widest roster ID bound: %d, %v", len(data)+1+11, err)
 	}
 	for _, text := range []string{"&", "𐐀", "\u2028"} {
 		ch := model.Channel{ID: math.MaxInt64, ParentID: math.MaxInt64, Name: "x" + strings.Repeat(text, model.MaxChannelNameLength-1), Description: strings.Repeat(text, model.MaxChannelDescLength), MaxUsers: model.MaxChannelUsers}
@@ -59,14 +59,15 @@ func TestMaximumAcceptedStateFitsWireFrames(t *testing.T) {
 		firstID = ch.ID
 		remaining -= model.ChannelStateBytes(*ch)
 	}
-	// Fill the remaining reservation exactly, then test the first rejected write.
-	last := &model.Channel{Name: strings.Repeat("x", (remaining-model.StateChannelFixedBytes)/6)}
+	// Fill to the last whole-rune reservation, then test the first rejected write.
+	runes := (remaining - model.StateChannelFixedBytes) / model.StateJSONRuneBytes
+	last := &model.Channel{Name: strings.Repeat("x", min(runes, model.MaxChannelNameLength)), Description: strings.Repeat("x", max(0, runes-model.MaxChannelNameLength))}
 	if err := st.NonTx().CreateChannel(last); err != nil {
 		t.Fatal(err)
 	}
 	remaining -= model.ChannelStateBytes(*last)
-	if remaining != 0 {
-		t.Fatalf("fixture did not hit exact budget: remainder %d", remaining)
+	if remaining != model.MaxChannelStateBytes%model.StateJSONRuneBytes {
+		t.Fatalf("fixture did not hit whole-rune budget: remainder %d", remaining)
 	}
 	before, err := st.NonTx().ListChannels()
 	if err != nil {
@@ -91,14 +92,15 @@ func TestMaximumAcceptedStateFitsWireFrames(t *testing.T) {
 		}
 		srv.channels.Join(sess.ID, firstID)
 	}
-	infos := srv.buildChannelInfos(before)
+	infos, liveSessionIDs := srv.buildVoiceState(before)
 	auth := &pb.AuthResponse{SessionID: math.MaxUint32, Username: worstUser.Username, Role: "moderator", ChannelScope: math.MaxInt64, EncryptionKey: bytes.Repeat([]byte{255}, 32), VoiceRegistrationKey: bytes.Repeat([]byte{255}, 32), MediaCipher: "chacha20", ScreenAddr: strings.Repeat("&", 256), ScreenAuthToken: strings.Repeat("f", 64), AutoToken: strings.Repeat("f", 64), ScreenShareEnabled: true, HistoryRequestIDs: true}
 	envelope, err := json.Marshal(&pb.ControlMessage{AuthResponse: auth})
 	if err != nil || len(envelope) > model.StateEnvelopeBytes {
 		t.Fatalf("auth envelope bound: %d, %v", len(envelope), err)
 	}
 	auth.Channels = infos
-	for _, msg := range []*pb.ControlMessage{{AuthResponse: auth}, {ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: true}}} {
+	auth.LiveSessionIDs = liveSessionIDs
+	for _, msg := range []*pb.ControlMessage{{AuthResponse: auth}, {ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: true, LiveSessionIDs: liveSessionIDs}}} {
 		var wire bytes.Buffer
 		if err := protocol.WriteControlMessage(&wire, msg); err != nil {
 			t.Fatal(err)

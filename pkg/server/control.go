@@ -1200,9 +1200,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			s.cleanupTempChannel(chID, st)
 		}
 
-		if chID > 0 {
-			s.broadcastServerState(st, handler)
-		}
+		s.broadcastServerState(st, handler)
 	}()
 
 	// Build channel list
@@ -1218,7 +1216,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		channels = initialChannels
 		s.broadcastServerState(st, handler)
 	}
-	channelInfos := s.buildChannelInfos(channels)
+	channelInfos, liveSessionIDs := s.buildVoiceState(channels)
 	screenAddr := ""
 	screenAuthToken := ""
 	if s.cfg.EnableScreenShare {
@@ -1242,6 +1240,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			ScreenShareEnabled:   s.cfg.EnableScreenShare,
 			AutoToken:            autoToken,
 			HistoryRequestIDs:    true,
+			LiveSessionIDs:       liveSessionIDs,
 		},
 	}
 	// Refresh authority and publish the first frame in one policy epoch. Enqueue
@@ -1266,6 +1265,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	s.finishPreAuth(preAuthConn)
+	s.broadcastServerState(st, handler)
 	// Readiness is open and moderation is unlocked. Serialize the repair with
 	// other state snapshots so an older in-flight broadcast cannot overtake it.
 	client := conn.(*controlClient)
@@ -2110,9 +2110,9 @@ func (s *Server) sendServerState(st datastore.DataProviderFactory, handler *Cont
 		s.broadcastServerState(st, handler)
 		return
 	}
-	infos := s.buildChannelInfos(channels)
+	infos, liveSessionIDs := s.buildVoiceState(channels)
 	msg := &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare, LiveSessionIDs: liveSessionIDs},
 	}
 	if client, ok := conn.(*controlClient); ok {
 		err := client.enqueue(queuedControlMessage{message: msg})
@@ -2166,9 +2166,9 @@ func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *Con
 		s.statePublicationMu.Unlock()
 		return
 	}
-	infos := s.buildChannelInfos(channels)
+	infos, liveSessionIDs := s.buildVoiceState(channels)
 	msg := &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare, LiveSessionIDs: liveSessionIDs},
 	}
 	handler.mu.RLock()
 	clients := make([]*controlClient, 0, len(handler.connMap))
@@ -2190,6 +2190,11 @@ func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *Con
 
 // buildChannelInfos converts model channels to protocol channel infos.
 func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
+	infos, _ := s.buildVoiceState(channels)
+	return infos
+}
+
+func (s *Server) buildVoiceState(channels []model.Channel) ([]pb.ChannelInfo, []uint32) {
 	infos := make([]pb.ChannelInfo, len(channels))
 	indices := make(map[int64]int, len(channels))
 	for i, ch := range channels {
@@ -2208,20 +2213,20 @@ func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 	// Snapshot sessions once: per-channel reads could count a moving session
 	// repeatedly and invalidate the reserved wire budget.
 	s.sessions.mu.RLock()
-	users := make([]pb.UserInfo, 0, len(s.sessions.sessions))
+	defer s.sessions.mu.RUnlock()
+	s.channels.mu.RLock()
+	defer s.channels.mu.RUnlock()
+	ids := make([]uint32, 0, len(s.sessions.sessions))
 	for _, sess := range s.sessions.sessions {
-		users = append(users, pb.UserInfo{
-			SessionID: sess.ID, ID: sess.UserID, Username: sess.Username,
-			Role: sess.Role.String(), Muted: sess.Muted, Deafened: sess.Deafened,
-		})
-	}
-	s.sessions.mu.RUnlock()
-	for _, user := range users {
-		if i, ok := indices[s.channels.ChannelOf(user.SessionID)]; ok {
-			infos[i].Users = append(infos[i].Users, user)
+		ids = append(ids, sess.ID)
+		if i, ok := indices[s.channels.sessionToChannel[sess.ID]]; ok {
+			infos[i].Users = append(infos[i].Users, pb.UserInfo{
+				SessionID: sess.ID, ID: sess.UserID, Username: sess.Username,
+				Role: sess.Role.String(), Muted: sess.Muted, Deafened: sess.Deafened,
+			})
 		}
 	}
-	return infos
+	return infos, ids
 }
 
 // cleanupTempChannel records when a temporary channel becomes empty. One

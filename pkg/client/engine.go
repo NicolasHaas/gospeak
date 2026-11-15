@@ -127,6 +127,9 @@ type connectionGeneration struct {
 	historyChannelID  int64
 
 	screenUnavailable bool
+	// Protected by mu; replay lifetime is the session, not its decoder/channel.
+	liveSessions map[uint32]struct{}
+	voiceReplay  map[uint32]*protocol.ReplayWindow
 }
 
 func newConnectionGeneration() *connectionGeneration {
@@ -143,6 +146,27 @@ func newConnectionGeneration() *connectionGeneration {
 
 func (g *connectionGeneration) finish() {
 	g.doneOnce.Do(func() { close(g.done) })
+}
+
+// updateLiveSessions runs under g.mu. Missing/invalid authority disables voice
+// without erasing history; only a complete valid snapshot can retire sessions.
+func (g *connectionGeneration) updateLiveSessions(ids []uint32, channels []pb.ChannelInfo) {
+	if protocol.ValidateLiveSessions(ids, channels) != nil {
+		g.liveSessions = nil
+		return
+	}
+	g.liveSessions = make(map[uint32]struct{}, len(ids))
+	for _, id := range ids {
+		g.liveSessions[id] = struct{}{}
+	}
+	for id := range g.voiceReplay {
+		if _, live := g.liveSessions[id]; !live {
+			delete(g.voiceReplay, id)
+		}
+	}
+	if g.voiceReplay == nil {
+		g.voiceReplay = make(map[uint32]*protocol.ReplayWindow)
+	}
 }
 
 func (g *connectionGeneration) begin() bool {
@@ -633,6 +657,7 @@ func (e *Engine) publishConnectedGeneration(g *connectionGeneration, authResp *p
 	e.screenShareEnabled = authResp.ScreenShareEnabled && !g.screenUnavailable
 	e.mediaCipher = authResp.MediaCipher
 	g.historyRequestIDs = authResp.HistoryRequestIDs
+	g.updateLiveSessions(authResp.LiveSessionIDs, authResp.Channels)
 	e.state = StateConnected
 	e.mu.Unlock()
 
@@ -951,12 +976,30 @@ func (e *Engine) playbackLoop(g *connectionGeneration) {
 // processIncomingVoice decrypts and queues a received voice packet. Decoding
 // and playback happen independently on the fixed playout clock.
 func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.VoicePacket) {
-	if pkt == nil {
+	if pkt == nil || g == nil {
 		return
 	}
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil || e.channelID <= 0 || pkt.ChannelID != uint64(e.channelID) || pkt.SessionID == e.sessionID {
+		return
+	}
+	if _, ok := g.liveSessions[pkt.SessionID]; !ok {
+		return
+	}
+	known := false
+	for _, channel := range e.channels {
+		if channel.ID == e.channelID {
+			known = slices.ContainsFunc(channel.Users, func(user pb.UserInfo) bool { return user.SessionID == pkt.SessionID })
+			break
+		}
+	}
+	if !known {
+		return
+	}
 	cipher := g.cipher
-	g.mu.Unlock()
 	if cipher == nil {
 		return
 	}
@@ -970,7 +1013,15 @@ func (e *Engine) processIncomingVoice(g *connectionGeneration, pkt *protocol.Voi
 		return
 	}
 
-	// Get or create decoder for this authenticated speaker.
+	window := g.voiceReplay[pkt.SessionID]
+	if window == nil {
+		window = &protocol.ReplayWindow{}
+	}
+	if !window.Accept(pkt.SeqNum) {
+		return
+	}
+	g.voiceReplay[pkt.SessionID] = window
+	// Get or create decoder only after authenticated admission and replay checks.
 	e.decoderMu.Lock()
 	_, ok := e.decoders[pkt.SessionID]
 	if !ok {
@@ -1246,6 +1297,23 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 	case msg.ServerStateEvent != nil:
 		g.mu.Lock()
 		e.mu.Lock()
+		if e.generation != g || e.state != StateConnected || g.ctx.Err() != nil {
+			e.mu.Unlock()
+			g.mu.Unlock()
+			return
+		}
+		g.updateLiveSessions(msg.ServerStateEvent.LiveSessionIDs, msg.ServerStateEvent.Channels)
+		if g.liveSessions != nil {
+			e.decoderMu.Lock()
+			for id := range e.decoders {
+				if _, live := g.liveSessions[id]; !live {
+					delete(e.decoders, id)
+					delete(e.jitterBufs, id)
+					delete(e.speakerLastSeen, id)
+				}
+			}
+			e.decoderMu.Unlock()
+		}
 		e.channels = msg.ServerStateEvent.Channels
 		e.screenShareEnabled = msg.ServerStateEvent.ScreenShareEnabled && !g.screenUnavailable
 		// Deletion and temporary-channel cleanup already publish the full list.

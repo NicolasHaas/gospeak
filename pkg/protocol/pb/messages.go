@@ -71,6 +71,7 @@ type AuthResponse struct {
 	ScreenShareEnabled   bool          `json:"screen_share_enabled,omitempty"`
 	AutoToken            string        `json:"auto_token,omitempty"` // set when server generated a token for this user
 	HistoryRequestIDs    bool          `json:"history_request_ids,omitempty"`
+	LiveSessionIDs       []uint32      `json:"live_session_ids"`
 }
 
 // ----- Channels -----
@@ -134,6 +135,7 @@ type UserStateUpdate struct {
 type ServerStateEvent struct {
 	Channels           []ChannelInfo `json:"channels"`
 	ScreenShareEnabled bool          `json:"screen_share_enabled,omitempty"`
+	LiveSessionIDs     []uint32      `json:"live_session_ids"`
 }
 
 // ----- Admin -----
