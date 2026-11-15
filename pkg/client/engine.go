@@ -53,6 +53,7 @@ const (
 	callbackUnban
 	callbackExport
 	callbackImport
+	callbackInvites
 )
 
 type latestCallbackKey struct {
@@ -121,6 +122,7 @@ type connectionGeneration struct {
 	keepaliveNow      chan struct{}
 	pendingJoins      map[int64]uint32
 	pendingResponses  map[callbackKind]uint32
+	inviteResponse    func(*pb.ControlMessage)
 	historySendMu     sync.Mutex
 	historyRequestIDs bool
 	historyRequestID  int64
@@ -1471,6 +1473,9 @@ func (e *Engine) handleEvent(g *connectionGeneration, msg *pb.ControlMessage) {
 		if callback := e.OnRoleChanged; callback != nil {
 			e.enqueueGenerationCallbackLocked(g, func() { callback(msg.SetUserRoleResp.Success, msg.SetUserRoleResp.Message) })
 		}
+
+	case msg.ListInvitesResp != nil || msg.RevokeInviteResp != nil:
+		e.handleInviteResponse(g, msg)
 
 	case msg.ListBansResp != nil:
 		if !g.consumeResponse(callbackBans) {

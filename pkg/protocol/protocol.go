@@ -46,6 +46,8 @@ var controlMessageFields = map[string]struct{}{
 	"user_state_update": {}, "server_state_event": {},
 	"create_channel_request": {}, "delete_channel_request": {},
 	"create_token_request": {}, "create_token_response": {},
+	"list_invites_request": {}, "list_invites_response": {},
+	"revoke_invite_request": {}, "revoke_invite_response": {},
 	"kick_user_request": {}, "ban_user_request": {},
 	"list_bans_request": {}, "list_bans_response": {},
 	"unban_request": {}, "unban_response": {},

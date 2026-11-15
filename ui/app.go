@@ -1317,6 +1317,7 @@ func (a *App) showServerSettings() {
 			container.NewHBox(widget.NewLabel("Uses (0 = unlimited):"), maxUsesEntry),
 			container.NewHBox(widget.NewLabel("Expires (days, 0 = never):"), expiresEntry),
 			createTokenBtn,
+			widget.NewButton("Manage Invites", a.showInviteListDialog),
 			widget.NewSeparator(),
 		)
 	}

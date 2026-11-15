@@ -34,6 +34,10 @@ message ControlMessage {
     DeleteChannelRequest  delete_channel_request  = 31;
     CreateTokenRequest    create_token_request    = 32;
     CreateTokenResponse   create_token_response   = 33;
+    ListInvitesRequest list_invites_request = 61;
+    ListInvitesResponse list_invites_response = 62;
+    RevokeInviteRequest revoke_invite_request = 63;
+    RevokeInviteResponse revoke_invite_response = 64;
     KickUserRequest       kick_user_request       = 34;
     BanUserRequest        ban_user_request        = 35;
     ListBansRequest       list_bans_request       = 53;
@@ -181,6 +185,31 @@ message CreateTokenRequest {
 
 message CreateTokenResponse {
   string token = 1; // raw token to share
+}
+
+message ListInvitesRequest {
+  int64 after_id = 1;
+  int32 limit = 2;
+}
+message InviteInfo {
+  int64 id = 1;
+  string role = 2;
+  int64 channel_scope = 3;
+  int64 created_by = 4;
+  int64 max_uses = 5;
+  int64 use_count = 6;
+  int64 expires_at = 7;
+  int64 created_at = 8;
+}
+message ListInvitesResponse {
+  repeated InviteInfo invites = 1;
+  bool has_more = 2;
+  string error = 3;
+}
+message RevokeInviteRequest { int64 invite_id = 1; }
+message RevokeInviteResponse {
+  bool revoked = 1;
+  string error = 2;
 }
 
 message KickUserRequest {

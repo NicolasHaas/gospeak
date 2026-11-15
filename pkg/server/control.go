@@ -1345,7 +1345,14 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			// A shared shortage is not evidence that this sender abused its budget.
 			// Heartbeats need no response: the client does not wait for Pong.
 			if msg.Ping == nil {
-				if err := writeControlMessage(conn, &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}); err != nil {
+				response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}
+				if msg.ListInvitesReq != nil {
+					response = &pb.ControlMessage{ListInvitesResp: &pb.ListInvitesResponse{Error: "server control capacity reached"}}
+				}
+				if msg.RevokeInviteReq != nil {
+					response = &pb.ControlMessage{RevokeInviteResp: &pb.RevokeInviteResponse{Error: "server control capacity reached"}}
+				}
+				if err := writeControlMessage(conn, response); err != nil {
 					return
 				}
 			}
@@ -1379,6 +1386,8 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 
 	case msg.CreateTokenReq != nil:
 		s.handleCreateToken(sessionID, msg.CreateTokenReq, st, conn)
+	case msg.ListInvitesReq != nil || msg.RevokeInviteReq != nil:
+		s.handleInvites(sessionID, msg, st, conn)
 
 	case msg.KickUserReq != nil:
 		s.handleKickUser(handler, sessionID, msg.KickUserReq, st, conn)

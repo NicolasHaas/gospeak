@@ -9,6 +9,7 @@ import (
 )
 
 const MaxBanPageSize = 100
+const MaxInvitePageSize = 100
 
 type DataProviderFactory interface {
 	NonTx() DataStore
@@ -96,12 +97,14 @@ type ChannelWriteProvider interface {
 }
 
 type TokenReadProvider interface {
+	ListInvites(afterID int64, limit int) ([]model.Token, bool, error)
 	HasTokens() (bool, error)
 	BootstrapTokenState() (BootstrapTokenState, error)
 	HasLegacyBootstrapOwner() (bool, error)
 }
 
 type TokenWriteProvider interface {
+	RevokeInvite(id int64) (bool, error)
 	CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error
 	CreateBootstrapToken(hash string) error
 	FinalizeBootstrapToken(userID int64) (bool, error)

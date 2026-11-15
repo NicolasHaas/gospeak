@@ -4,6 +4,10 @@ package pb
 
 // ControlMessage wraps all control plane messages.
 type ControlMessage struct {
+	ListInvitesReq   *ListInvitesRequest   `json:"list_invites_request,omitempty"`
+	ListInvitesResp  *ListInvitesResponse  `json:"list_invites_response,omitempty"`
+	RevokeInviteReq  *RevokeInviteRequest  `json:"revoke_invite_request,omitempty"`
+	RevokeInviteResp *RevokeInviteResponse `json:"revoke_invite_response,omitempty"`
 	// Only one of these fields should be set.
 	AuthRequest         *AuthRequest                   `json:"auth_request,omitempty"`
 	AuthResponse        *AuthResponse                  `json:"auth_response,omitempty"`
@@ -162,6 +166,36 @@ type CreateTokenRequest struct {
 
 type CreateTokenResponse struct {
 	Token string `json:"token"`
+}
+
+type ListInvitesRequest struct {
+	AfterID int64 `json:"after_id,omitempty"`
+	Limit   int   `json:"limit,omitempty"`
+}
+
+type InviteInfo struct {
+	ID           int64  `json:"id"`
+	Role         string `json:"role"`
+	ChannelScope int64  `json:"channel_scope"`
+	CreatedBy    int64  `json:"created_by"`
+	MaxUses      int64  `json:"max_uses"`
+	UseCount     int64  `json:"use_count"`
+	ExpiresAt    int64  `json:"expires_at"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+type ListInvitesResponse struct {
+	Invites []InviteInfo `json:"invites"`
+	HasMore bool         `json:"has_more,omitempty"`
+	Error   string       `json:"error,omitempty"`
+}
+
+type RevokeInviteRequest struct {
+	InviteID int64 `json:"invite_id"`
+}
+type RevokeInviteResponse struct {
+	Revoked bool   `json:"revoked"`
+	Error   string `json:"error,omitempty"`
 }
 
 type KickUserRequest struct {

@@ -27,6 +27,8 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `DeleteChannelRequest`
 - `CreateTokenRequest`
 - `CreateTokenResponse`
+- `ListInvitesRequest` / `ListInvitesResponse`
+- `RevokeInviteRequest` / `RevokeInviteResponse`
 - `KickUserRequest`
 - `BanUserRequest`
 - `ListBansRequest`
@@ -53,6 +55,10 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `ImportChannelsResponse`
 - `ErrorResponse`
 - `Ping` / `Pong`
+
+### Invite management
+
+Administrators can use Server Settings - Manage Invites to list invite metadata and revoke a selected numeric invite ID. `ListInvitesRequest` uses a nonnegative `after_id` cursor and a `limit` of 1-100 (zero defaults to 100); `has_more` indicates another page. Pages include expired and exhausted invites, but never bootstrap credentials, raw invite values or hashes. Both invite operations return their own response with an `error` on denial or failure. Revocation sets the invite's expiry to 1970-01-01 00:00:01 UTC and retains its metadata row; an absent or already-revoked invite returns `revoked: false`. Existing accounts and their personal credentials remain valid. Invite creation limits and expiry policy are unchanged.
 
 ### Control heartbeat
 
