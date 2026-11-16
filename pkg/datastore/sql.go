@@ -532,6 +532,17 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: "ALTER TABLE tokens ADD COLUMN bootstrap_key TEXT", table: "tokens", column: "bootstrap_key"},
 			},
 		},
+		{
+			version: 14,
+			steps: []migrationStep{
+				// The pre-kind first-run admin invite was logged and had no
+				// creator, scope, use limit or expiry. Retain its lifecycle row
+				// so startup cannot mistake this database for a fresh install.
+				{statement: `UPDATE tokens SET expires_at = '1970-01-01 00:00:01'
+					WHERE kind = 0 AND role = 2 AND created_by = 0 AND channel_scope = 0
+					AND max_uses = 0 AND expires_at IS NULL AND bootstrap_key IS NULL`},
+			},
+		},
 	}
 
 	for _, m := range migrations {
