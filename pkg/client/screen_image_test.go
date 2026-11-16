@@ -27,6 +27,8 @@ func TestDecodeScreenImageRejectsUntrustedMetadata(t *testing.T) {
 	}{
 		{"mismatch", "jpeg", 1, 1},
 		{"zero", "jpeg", 0, 2},
+		{"negative", "jpeg", -1, 2},
+		{"large product", "jpeg", 2147483647, 2147483647},
 		{"oversized declaration", "jpeg", 8193, 2},
 		{"wrong format", "png", 2, 2},
 	} {
@@ -50,6 +52,7 @@ func TestDecodeScreenImageChecksJPEGHeaderBeforeDecode(t *testing.T) {
 		width, height uint16
 	}{
 		{"axis", 65535, 2}, {"pixels", 8192, 8192}, {"bomb", 65535, 65535},
+		{"width cap", 1281, 1}, {"height cap", 1, 1281},
 	} {
 		t.Run(dims.name, func(t *testing.T) {
 			bomb := append([]byte(nil), data...)
@@ -67,6 +70,15 @@ func TestDecodeScreenImageChecksJPEGHeaderBeforeDecode(t *testing.T) {
 				t.Fatalf("lying JPEG did not hit pre-decode header guard: %v", err)
 			}
 		})
+	}
+}
+
+func TestDecodeScreenImageRejectsOversizedValidJPEG(t *testing.T) {
+	for _, dims := range [][2]int{{1281, 1}, {1, 1281}} {
+		data := screenTestJPEG(t, dims[0], dims[1])
+		if _, err := decodeScreenImage(&protocol.ScreenFrame{Width: int32(dims[0]), Height: int32(dims[1]), Format: "jpeg", Data: data}); err == nil || err.Error() != "invalid screen image metadata" {
+			t.Fatalf("valid %dx%d JPEG bypassed pre-decode geometry guard: %v", dims[0], dims[1], err)
+		}
 	}
 }
 

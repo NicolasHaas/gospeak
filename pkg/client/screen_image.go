@@ -7,11 +7,12 @@ import (
 	"image/jpeg"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
+	"github.com/NicolasHaas/gospeak/pkg/screenshare"
 )
 
 const (
-	maxScreenImageDimension = 8192
-	maxScreenImagePixels    = 16 * 1024 * 1024
+	maxScreenImageDimension = screenshare.DefaultMaxWidth
+	maxScreenImagePixels    = maxScreenImageDimension * maxScreenImageDimension
 )
 
 func decodeScreenImage(frame *protocol.ScreenFrame) (image.Image, error) {

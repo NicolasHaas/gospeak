@@ -16,7 +16,7 @@ const (
 )
 
 func EncodeJPEG(img image.Image, maxWidth int, quality int) ([]byte, int32, int32, error) {
-	if maxWidth <= 0 {
+	if maxWidth <= 0 || maxWidth > DefaultMaxWidth {
 		maxWidth = DefaultMaxWidth
 	}
 	if quality <= 0 || quality > 100 {
@@ -26,13 +26,19 @@ func EncodeJPEG(img image.Image, maxWidth int, quality int) ([]byte, int32, int3
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return nil, 0, 0, fmt.Errorf("screen image dimensions out of range: %dx%d", width, height)
+	}
+	// Fit both orientations within the receiver's canvas budget, without enlargement.
+	scale := math.Min(float64(maxWidth)/float64(width), float64(DefaultMaxWidth)/float64(height))
 	scaled := img
-	if width > maxWidth {
-		targetHeight := height * maxWidth / width
-		dst := image.NewRGBA(image.Rect(0, 0, maxWidth, targetHeight))
+	if scale < 1 {
+		targetWidth := max(1, int(float64(width)*scale))
+		targetHeight := max(1, int(float64(height)*scale))
+		dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
 		draw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
 		scaled = dst
-		width = maxWidth
+		width = targetWidth
 		height = targetHeight
 	}
 
