@@ -14,6 +14,15 @@ import (
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
+// ScreenTLSError identifies a screen-plane handshake failure. The underlying
+// trust error remains inspectable, but must not authorize control-server trust.
+type ScreenTLSError struct{ Err error }
+
+func (e *ScreenTLSError) Error() string {
+	return fmt.Sprintf("client: screen TLS handshake: %v", e.Err)
+}
+func (e *ScreenTLSError) Unwrap() error { return e.Err }
+
 type ScreenPacketHandler func(pkt *protocol.ScreenPacket)
 
 // screenTransportUnavailable is emitted only before TLS or authentication starts.
@@ -81,7 +90,7 @@ func newScreenClientContextWithTrust(ctx context.Context, addr string, sessionID
 	conn := tls.Client(raw, tlsCfg)
 	if err := conn.HandshakeContext(dialCtx); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("client: screen TLS handshake: %w", err)
+		return nil, &ScreenTLSError{Err: err}
 	}
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopCancel()

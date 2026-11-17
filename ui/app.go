@@ -1214,14 +1214,7 @@ func (a *App) showConnectDialog() {
 							return
 						}
 						if err != nil {
-							var untrusted *client.UntrustedServerError
-							var changed *client.ServerIdentityChangedError
-							if errors.As(err, &untrusted) {
-								a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
-								return
-							}
-							if errors.As(err, &changed) {
-								a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
+							if a.handleServerTrustError(err, controlAddr, connect) {
 								return
 							}
 							slog.Error("connect failed", "err", err)
@@ -1248,6 +1241,25 @@ func (a *App) showConnectDialog() {
 	)
 	d.Resize(fyne.NewSize(420, 420))
 	d.Show()
+}
+
+func (a *App) handleServerTrustError(err error, controlAddr string, connect func(string)) bool {
+	// Check the plane before unwrapping shared trust errors, even for the same address.
+	var screenTLS *client.ScreenTLSError
+	if errors.As(err, &screenTLS) {
+		return false
+	}
+	var untrusted *client.UntrustedServerError
+	var changed *client.ServerIdentityChangedError
+	if errors.As(err, &untrusted) {
+		a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
+		return true
+	}
+	if errors.As(err, &changed) {
+		a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
+		return true
+	}
+	return false
 }
 
 func (a *App) confirmServerTrust(controlAddr, received, expected string, connect func(string)) {
