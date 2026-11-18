@@ -172,7 +172,7 @@ Screen sharing is disabled by default; enable it with `-screen-share`.
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account |
 | `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-account control-message cost burst |
-| `-control-messages-per-second` | `20` | Per-session and aggregate per-account control-message cost replenished each second |
+| `-control-messages-per-second` | `10` | Per-session and aggregate per-account control-message cost replenished each second |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst |
 | `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second |
 | `-export-users` | `false` | Export all users as YAML and exit |

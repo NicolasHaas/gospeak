@@ -60,13 +60,37 @@ and `gospeak_session_active_sources` expose source pressure without addresses.
 `gospeak_session_rejections_total{reason="source"}` counts denials. Global and
 per-account session limits still apply.
 
-Control messages are charged against three token buckets:
+Control messages are charged against session, account and server-wide budgets:
 
 | Scope | Default burst | Default refill |
 |-------|---------------|----------------|
-| Session | 60 points | 20 points/second |
-| Account aggregate | 60 points | 20 points/second |
-| Server-wide | 300 points | 100 points/second |
+| Session | 60 points | 10 points/second |
+| Account aggregate | 60 points | 10 points/second |
+| Server-wide ordinary total | 300 points | 100 points/second |
+
+Concurrent sessions share the account's 60-point burst and 10-point/second refill, not one account allowance per connection. The refill can sustain two cost-five operations per second across that account, or a lighter mix; heartbeats and refused/invalid requests also spend it. Eight simultaneous join-plus-history selections cost 80 points, so they do not fit one 60-point burst without pacing. A server-wide increase is not implied by these local limits: encoded payloads, fanout and storage can make the same charged cost much more expensive to execute.
+
+The ordinary total is partitioned into shared capacity (240 points, 80/second)
+and an interactive fallback (60 points, 20/second). Every request tries shared
+capacity first. Only join, chat, mute/deafen state updates, leave and Ping may
+then use the fallback. Lists, history, administration and screen operations
+cannot spend it. Account and session budgets still charge first, including
+requests ultimately refused globally; handler authorization and validation
+still apply. Invalid protected attempts and encoded padding also pay.
+
+For custom ordinary burst B and refill R, the fallback receives
+`max(5, floor(B/5))` burst and `max(1, floor(R/5))` refill; shared receives the
+remainders. This split requires B >= 10 and R >= 2 after existing normalization.
+Budgets above 2^53 also stay unsplit to avoid extra float64 integer rounding.
+Smaller budgets stay unsplit, without class isolation, so cost-five operations
+remain possible and neither capacity nor refill is increased. A request must
+fit one bucket: credits are not combined to admit a larger encoded frame.
+
+This isolates interactive traffic from bulk traffic, not accounts from one
+another. Protected traffic can collectively exhaust both ordinary buckets.
+It does not guarantee handler success, latency or CPU capacity. The ordinary
+total remains 300 + 100*T cost units over T seconds at defaults; with the
+unchanged moderation reserve below, the envelope remains 320 + 105*T.
 
 Message costs are weighted by work:
 
@@ -90,9 +114,15 @@ in a burst and one per second; encoded size can raise their cost. Account and
 session budgets still charge first. Target permissions, self-action and
 bootstrap-owner checks still apply; invalid role-qualified attempts also pay.
 The reserve excludes other traffic and administration, survives reconnects,
-and uses the same error/retry contract when empty. Global-budget metrics
-measure the ordinary bucket. The reserve provides bounded moderation recovery.
-Ordinary accounts and sources continue to share the server-wide bucket.
+and uses the same error/retry contract when empty. Global-budget usage,
+high-water, limit and refill metrics measure only shared ordinary capacity,
+excluding both reserves; their default limit/refill are now 240/80.
+`gospeak_control_budget_interactive_usage`, `_limit` and `_refill_per_second`
+measure the interactive fallback (zero capacity/refill for unsplit budgets).
+Rejection counters increment only after all eligible paths fail. The moderation
+reserve still provides bounded moderation recovery, separately from the
+ordinary partition. Ordinary accounts and sources share these class pools;
+reconnecting does not reset them.
 
 ## Rejections, labels, and logs
 

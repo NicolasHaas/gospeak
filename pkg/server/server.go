@@ -35,8 +35,8 @@ type Config struct {
 	MaxSessions                 int           // maximum concurrent authenticated sessions
 	MaxSessionsPerUser          int           // maximum concurrent sessions for one account
 	MaxSessionsPerSource        int           // pending and active sessions per IPv4 address / IPv6 /64
-	ControlMessageBurst         int           // maximum control-message cost burst per session
-	ControlMessagesPerSec       int           // control-message cost replenished per second per session
+	ControlMessageBurst         int           // maximum control-message cost burst per session and account
+	ControlMessagesPerSec       int           // control-message cost replenished per second per session and account
 	ControlGlobalBurst          int           // maximum server-wide control-message cost burst
 	ControlGlobalMessagesPerSec int           // server-wide control-message cost replenished per second
 
@@ -69,7 +69,7 @@ func DefaultConfig() Config {
 		MaxSessionsPerUser:          8,
 		MaxSessionsPerSource:        64,
 		ControlMessageBurst:         60,
-		ControlMessagesPerSec:       20,
+		ControlMessagesPerSec:       10,
 		ControlGlobalBurst:          300,
 		ControlGlobalMessagesPerSec: 100,
 	}
@@ -123,6 +123,7 @@ type Server struct {
 	controlBudgets          map[uint32]*controlMessageLimiter
 	controlUserBudgets      *controlUserBudgetManager
 	controlGlobalBudget     *controlMessageLimiter
+	controlInteractivePool  *controlMessageLimiter
 	controlModerationBudget *controlMessageLimiter
 	tempChannels            *tempChannelLifecycle
 
@@ -161,7 +162,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		cfg.ControlMessageBurst = controlExpensiveCost
 	}
 	if cfg.ControlMessagesPerSec <= 0 {
-		cfg.ControlMessagesPerSec = 20
+		cfg.ControlMessagesPerSec = 10
 	}
 	if cfg.ControlGlobalBurst <= 0 {
 		cfg.ControlGlobalBurst = 300
@@ -176,7 +177,7 @@ func New(cfg Config, deps Dependencies) *Server {
 	controlUserBudgets := newControlUserBudgetManager(cfg.ControlMessageBurst, cfg.ControlMessagesPerSec, time.Now)
 	controlUserBudgets.maxEntries = max(controlUserBudgets.maxEntries, cfg.MaxSessions)
 	controlUserBudgets.highWater = &metrics.ControlUserBudgetHighWater
-	controlGlobalBudget := newControlMessageLimiter(cfg.ControlGlobalBurst, cfg.ControlGlobalMessagesPerSec, time.Now)
+	controlGlobalBudget, controlInteractivePool := newGlobalControlBudgets(cfg.ControlGlobalBurst, cfg.ControlGlobalMessagesPerSec, time.Now)
 	controlGlobalBudget.highWater = &metrics.ControlGlobalBudgetHighWater
 	return &Server{
 		cfg:                     cfg,
@@ -202,6 +203,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		controlBudgets:          make(map[uint32]*controlMessageLimiter),
 		controlUserBudgets:      controlUserBudgets,
 		controlGlobalBudget:     controlGlobalBudget,
+		controlInteractivePool:  controlInteractivePool,
 		controlModerationBudget: newControlMessageLimiter(controlModerationBurst, controlModerationRefill, time.Now),
 		tempChannels:            newTempChannelLifecycle(cfg.AllowNoToken),
 		ctx:                     ctx,

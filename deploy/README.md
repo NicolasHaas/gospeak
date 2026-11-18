@@ -198,7 +198,7 @@ These flags map directly to `gospeak-server` and are all supported options.
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
 | `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
-| `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
+| `-control-messages-per-second` | `10` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
 | `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
 | `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
 | `-media-cipher` | `aes128` | Voice and screen AEAD: `aes128`, `aes256`, or `chacha20` |

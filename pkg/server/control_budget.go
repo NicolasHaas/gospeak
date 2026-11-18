@@ -32,11 +32,35 @@ type controlBudgetDecision struct {
 	Usage     int
 }
 
+// Partition the configured ordinary budget, never add capacity. Keep both
+// buckets able to admit cost-five requests and positively refilling.
+func newGlobalControlBudgets(burst, refill int, now func() time.Time) (*controlMessageLimiter, *controlMessageLimiter) {
+	reservedBurst, reservedRefill := 0, 0
+	if burst >= 2*controlExpensiveCost && refill >= 2 && int64(burst) <= 1<<53 && int64(refill) <= 1<<53 {
+		reservedBurst = max(controlExpensiveCost, burst/5)
+		reservedRefill = max(1, refill/5)
+	}
+	// ponytail: undersized custom budgets stay unsplit; class isolation needs
+	// capacity for two cost-five buckets and two positive integer refills.
+	// Also keep inexact float64 integer budgets unsplit to avoid extra rounding.
+	return newControlMessageLimiter(burst-reservedBurst, refill-reservedRefill, now),
+		newControlMessageLimiter(reservedBurst, reservedRefill, now)
+}
+
 // Local/account budgets are charged before this fallback. Target authorization
 // stays in the kick/ban handlers; role-qualified invalid attempts also pay.
 func (s *Server) allowGlobalControl(sessionID uint32, message *pb.ControlMessage, payloadBytes int) controlBudgetDecision {
 	decision := s.controlGlobalBudget.AllowSized(message, payloadBytes)
 	if decision.Allowed {
+		return decision
+	}
+	// Shared capacity is tried first; bulk and administrative traffic cannot
+	// consume the interactive fallback. Handler validation still follows charging.
+	if message.JoinChannelRequest != nil || message.ChatMsg != nil ||
+		message.UserStateUpdate != nil || message.LeaveChannelRequest != nil || message.Ping != nil {
+		if interactive := s.controlInteractivePool.AllowSized(message, payloadBytes); interactive.Allowed {
+			return interactive
+		}
 		return decision
 	}
 	var permission rbac.Permission
