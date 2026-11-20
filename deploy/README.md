@@ -181,6 +181,8 @@ You should be able to handle around 100 active users at ~12h/day in common cases
 
 These flags map directly to `gospeak-server` and are all supported options.
 
+Operator-configured `-cert` / `-key` pairs are reread on new TLS handshakes at most once per minute per control or screen listener. Renew with the same key to preserve identity; publish a complete matching pair before the next poll. Invalid replacements leave a still-valid cached pair in use, with one-minute retries; new handshakes fail closed once that cache is invalid. GoSpeak never modifies these files. Existing connections are unaffected. Key changes require normal client verification and TOFU re-trust; use a coordinated restart because the two listeners can briefly cache different identities.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-control` | `:9600` | TCP/TLS control plane bind address |

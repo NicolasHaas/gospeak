@@ -64,12 +64,17 @@ func newTLSCertificateSourceAt(cfg Config, now time.Time) (*tlsCertificateSource
 	if err != nil {
 		return nil, fmt.Errorf("parse loaded TLS certificate: %w", err)
 	}
+	var retryAt time.Time
+	if cfg.CertFile != "" {
+		retryAt = now.Add(time.Minute)
+	}
 	return &tlsCertificateSource{
 		cfg:       cfg,
 		automatic: cfg.CertFile == "" && cfg.KeyFile == "",
 		cert:      &cert,
 		leaf:      leaf,
 		load:      loadOrGenerateTLSAt,
+		retryAt:   retryAt,
 	}, nil
 }
 
@@ -80,36 +85,40 @@ func (s *tlsCertificateSource) getCertificate(*tls.ClientHelloInfo) (*tls.Certif
 func (s *tlsCertificateSource) getCertificateAt(now time.Time) (*tls.Certificate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.automatic {
+	if !s.automatic && now.Before(s.retryAt) && s.renewErr == nil {
 		if now.Before(s.leaf.NotBefore) || now.After(s.leaf.NotAfter) {
 			return nil, fmt.Errorf("configured TLS certificate is not valid at %s", now.Format(time.RFC3339))
 		}
 		return s.cert, nil
 	}
-	if s.leaf.NotAfter.After(now.Add(automaticCertRenewBefore)) {
+	if s.automatic && s.leaf.NotAfter.After(now.Add(automaticCertRenewBefore)) {
 		return s.cert, nil
 	}
 	cert, err := tls.Certificate{}, s.renewErr
+	var leaf *x509.Certificate
 	if !now.Before(s.retryAt) {
 		cert, err = s.load(s.cfg, now)
+		if err == nil {
+			leaf, err = validCertificateLeaf(cert, now)
+		}
 		if err != nil {
 			s.retryAt = now.Add(time.Minute)
 			s.renewErr = err
-			slog.Warn("automatic TLS certificate renewal failed", "err", err, "expires", s.leaf.NotAfter)
+			slog.Warn("TLS certificate refresh failed", "automatic", s.automatic, "err", err, "expires", s.leaf.NotAfter)
 		}
 	}
 	if err != nil {
 		if _, validityErr := validCertificateLeaf(*s.cert, now); validityErr == nil {
 			return s.cert, nil
 		}
-		return nil, fmt.Errorf("renew automatic TLS certificate after cached certificate became invalid: %w", err)
-	}
-	leaf, err := certificateLeaf(cert)
-	if err != nil {
-		return nil, fmt.Errorf("parse renewed TLS certificate: %w", err)
+		return nil, fmt.Errorf("refresh TLS certificate after cached certificate became invalid: %w", err)
 	}
 	s.cert = &cert
 	s.leaf = leaf
+	if !s.automatic {
+		s.retryAt = now.Add(time.Minute)
+	}
+	s.renewErr = nil
 	return s.cert, nil
 }
 
@@ -179,7 +188,6 @@ func loadTLSKeyPair(certPath, keyPath, source string) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("load %s TLS certificate %q and key %q: %w", source, certPath, keyPath, err)
 	}
-	slog.Info("loaded TLS certificate", "cert", certPath, "source", source)
 	return cert, nil
 }
 
