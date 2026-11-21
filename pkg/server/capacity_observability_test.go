@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/NicolasHaas/gospeak/pkg/model"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	"log/slog"
 	"net"
 	"net/http/httptest"
@@ -307,8 +309,18 @@ func TestScreenTransportErrorsDoNotExposeEndpoints(t *testing.T) {
 				outbound: make(chan []byte, 1),
 				done:     make(chan struct{}),
 			}
-			client.outbound <- []byte("frame")
-			srv.writeScreenPackets(7, client)
+			sender := mustCreateSession(t, srv.sessions, 1, "sender", model.RoleUser)
+			viewer := mustCreateSession(t, srv.sessions, 2, "viewer", model.RoleUser)
+			srv.sessions.SetChannel(sender.ID, 1)
+			if _, err := srv.screenShare.Start(1, sender.ID, 1, "sender", 100, 100); err != nil {
+				t.Fatal(err)
+			}
+			frame, err := protocol.MarshalScreenPacketFrame(&protocol.ScreenPacket{SessionID: sender.ID, SeqNum: 1, Payload: []byte("frame")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.outbound <- frame
+			srv.writeScreenPackets(viewer.ID, client)
 			if strings.Contains(logs.String(), "192.0.2.10") || strings.Contains(logs.String(), "203.0.113.77") {
 				t.Fatalf("screen transport log leaked endpoint: %q", logs.String())
 			}

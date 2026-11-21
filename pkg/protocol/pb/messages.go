@@ -4,10 +4,22 @@ package pb
 
 // ControlMessage wraps all control plane messages.
 type ControlMessage struct {
-	ListInvitesReq   *ListInvitesRequest   `json:"list_invites_request,omitempty"`
-	ListInvitesResp  *ListInvitesResponse  `json:"list_invites_response,omitempty"`
-	RevokeInviteReq  *RevokeInviteRequest  `json:"revoke_invite_request,omitempty"`
-	RevokeInviteResp *RevokeInviteResponse `json:"revoke_invite_response,omitempty"`
+	PersonalTokenStatusReq     *PersonalTokenStatusRequest     `json:"personal_token_status_request,omitempty"`
+	PersonalTokenStatusResp    *PersonalTokenStatusResponse    `json:"personal_token_status_response,omitempty"`
+	RotatePersonalTokenReq     *RotatePersonalTokenRequest     `json:"rotate_personal_token_request,omitempty"`
+	RotatePersonalTokenResp    *RotatePersonalTokenResponse    `json:"rotate_personal_token_response,omitempty"`
+	RevokePersonalTokenReq     *RevokePersonalTokenRequest     `json:"revoke_personal_token_request,omitempty"`
+	RevokePersonalTokenResp    *RevokePersonalTokenResponse    `json:"revoke_personal_token_response,omitempty"`
+	IssuePersonalRecoveryReq   *IssuePersonalRecoveryRequest   `json:"issue_personal_recovery_request,omitempty"`
+	IssuePersonalRecoveryResp  *IssuePersonalRecoveryResponse  `json:"issue_personal_recovery_response,omitempty"`
+	RevokePersonalRecoveryReq  *RevokePersonalRecoveryRequest  `json:"revoke_personal_recovery_request,omitempty"`
+	RevokePersonalRecoveryResp *RevokePersonalRecoveryResponse `json:"revoke_personal_recovery_response,omitempty"`
+	RedeemPersonalRecoveryReq  *RedeemPersonalRecoveryRequest  `json:"redeem_personal_recovery_request,omitempty"`
+	RedeemPersonalRecoveryResp *RedeemPersonalRecoveryResponse `json:"redeem_personal_recovery_response,omitempty"`
+	ListInvitesReq             *ListInvitesRequest             `json:"list_invites_request,omitempty"`
+	ListInvitesResp            *ListInvitesResponse            `json:"list_invites_response,omitempty"`
+	RevokeInviteReq            *RevokeInviteRequest            `json:"revoke_invite_request,omitempty"`
+	RevokeInviteResp           *RevokeInviteResponse           `json:"revoke_invite_response,omitempty"`
 	// Only one of these fields should be set.
 	AuthRequest         *AuthRequest                   `json:"auth_request,omitempty"`
 	AuthResponse        *AuthResponse                  `json:"auth_response,omitempty"`
@@ -53,9 +65,77 @@ type ControlMessage struct {
 	Pong                *Pong                          `json:"pong,omitempty"`
 }
 
+// ----- Personal credentials -----
+
+type PersonalTokenStatusRequest struct {
+	TargetID int64 `json:"target_id"` // zero selects the authenticated account
+}
+
+type PersonalTokenStatusResponse struct {
+	TargetID     int64  `json:"target_id"`
+	Username     string `json:"username"`
+	Role         string `json:"role"`
+	ChannelScope int64  `json:"channel_scope"`
+	Version      int64  `json:"version"`
+	Error        string `json:"error,omitempty"`
+}
+
+type RotatePersonalTokenRequest struct {
+	Version      int64  `json:"version"`
+	CurrentToken string `json:"current_token"`
+	Replacement  string `json:"replacement"`
+}
+
+type RotatePersonalTokenResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+type RevokePersonalTokenRequest struct {
+	TargetID int64 `json:"target_id"`
+	Version  int64 `json:"version"`
+}
+
+type RevokePersonalTokenResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+type IssuePersonalRecoveryRequest struct {
+	TargetID int64 `json:"target_id"`
+	Version  int64 `json:"version"`
+}
+
+type IssuePersonalRecoveryResponse struct {
+	TargetID  int64  `json:"target_id"`
+	Grant     string `json:"grant,omitempty"`
+	ExpiresAt int64  `json:"expires_at"`
+	Version   int64  `json:"version"`
+	Error     string `json:"error,omitempty"`
+}
+
+type RevokePersonalRecoveryRequest struct {
+	TargetID int64 `json:"target_id"`
+	Version  int64 `json:"version"`
+}
+
+type RevokePersonalRecoveryResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+type RedeemPersonalRecoveryRequest struct {
+	TargetID    int64  `json:"target_id"`
+	Username    string `json:"username"`
+	Grant       string `json:"grant"`
+	Replacement string `json:"replacement"`
+}
+
+type RedeemPersonalRecoveryResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
 // ----- Auth -----
 
 type AuthRequest struct {
+	PersonalOnly bool     `json:"personal_only,omitempty"`
 	Token        string   `json:"token"` // empty = token-less join (if server allows)
 	Username     string   `json:"username"`
 	MediaCiphers []string `json:"media_ciphers"`
@@ -76,6 +156,8 @@ type AuthResponse struct {
 	AutoToken            string        `json:"auto_token,omitempty"` // set when server generated a token for this user
 	HistoryRequestIDs    bool          `json:"history_request_ids,omitempty"`
 	LiveSessionIDs       []uint32      `json:"live_session_ids"`
+	UserID               int64         `json:"user_id,omitempty"`
+	CredentialVersion    int64         `json:"credential_version,omitempty"`
 }
 
 // ----- Channels -----

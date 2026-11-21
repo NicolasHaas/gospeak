@@ -76,6 +76,7 @@ type UserReadProvider interface {
 	ListUsers() ([]model.User, error)
 	IsBootstrapUser(userID int64) (bool, error)
 	BootstrapUserID() (int64, bool, error)
+	PersonalTokenVersion(userID int64) (int64, error)
 }
 
 type UserWriteProvider interface {
@@ -115,6 +116,12 @@ type TokenTransactionProvider interface {
 	ValidateToken(hash string) (*model.Token, error)
 	ProvisionUser(hash, username, personalTokenHash string, createdAt time.Time, allowTokenless bool) (*model.User, error)
 	ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error)
+	// ReplacePersonalToken is a versioned CAS. Callers check live/persisted
+	// authority in this same writer transaction before changing credentials.
+	ReplacePersonalToken(userID, version int64, expectedHash, replacementHash string, createdAt time.Time) (bool, error)
+	IssuePersonalRecovery(userID, version int64, grantHash string, now time.Time, issuedBy int64) (bool, error)
+	RevokePersonalRecovery(userID, version int64) (bool, error)
+	RedeemPersonalRecovery(userID int64, grantHash, replacementHash string, now time.Time) (bool, error)
 }
 
 type BanReadProvider interface {

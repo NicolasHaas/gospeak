@@ -106,6 +106,7 @@ type App struct {
 	connectAttempt  uint64 // UI-owned credential callback epoch
 	connectPending  bool
 	bookmarkLoadErr error
+	credentialBusy  bool // UI-owned lifecycle operation, independent of media generation
 
 	// errorDialog is the single reused modal for server errors; consecutive
 	// errors update its text instead of stacking dialogs.
@@ -1189,6 +1190,18 @@ func (a *App) showConnectDialog() {
 				voiceAddr = net.JoinHostPort(controlHost, defaultVoicePort)
 			}
 
+			attempts, pendingErr := a.bookmarks.PersonalCredentialAttempts()
+			if pendingErr != nil {
+				dialog.ShowError(pendingErr, a.window)
+				return
+			}
+			for _, pending := range attempts {
+				if pending.ControlAddr == controlAddr && pending.Username == username {
+					dialog.ShowInformation("Credential change pending", "Check the saved candidate in Settings - Personal Credential before reconnecting. No old credential was tried.", a.window)
+					a.showPersonalCredentialDialog()
+					return
+				}
+			}
 			token := bookmarkTokenFor(selectedBookmark, controlAddr, username, tokenEntry.Text)
 			a.connectAttempt++
 			attempt := a.connectAttempt
@@ -1330,6 +1343,7 @@ func (a *App) showServerSettings() {
 			container.NewHBox(widget.NewLabel("Expires (days, 0 = never):"), expiresEntry),
 			createTokenBtn,
 			widget.NewButton("Manage Invites", a.showInviteListDialog),
+			widget.NewButton("Manage Personal Credentials", a.showPersonalTokenAdminDialog),
 			widget.NewSeparator(),
 		)
 	}
@@ -1519,6 +1533,7 @@ func (a *App) showSettingsDialog() {
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Audio", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewButton("Personal Credential", a.showPersonalCredentialDialog),
 		widget.NewSeparator(),
 		widget.NewLabel("Input Device:"),
 		inputSelect,

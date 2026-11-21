@@ -96,13 +96,16 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 		}
 
 		if protocol.IsVoiceRegistration(buf[:n]) {
+			s.credentialWorkMu.RLock()
 			reply, ok := s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now())
 			if !ok {
 				s.metrics.VoicePacketsDropped.Add(1)
 			}
 			if reply != nil {
+				_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 				_, _ = conn.WriteToUDP(reply, remoteAddr)
 			}
+			s.credentialWorkMu.RUnlock()
 			continue
 		}
 
@@ -120,47 +123,53 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			continue
 		}
 
-		actualChannel, ok := s.acceptVoicePacket(pkt, remoteAddr)
-		if !ok {
-			s.metrics.VoicePacketsDropped.Add(1)
+		s.relayVoicePacket(conn, pkt, remoteAddr, buf[:n])
+	}
+}
+
+func (s *Server) relayVoicePacket(conn *net.UDPConn, pkt *protocol.VoicePacket, remoteAddr *net.UDPAddr, rawPacket []byte) {
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	actualChannel, ok := s.acceptVoicePacket(pkt, remoteAddr)
+	if !ok {
+		s.metrics.VoicePacketsDropped.Add(1)
+		return
+	}
+
+	// Track per-session voice debug stats
+	var stat *perSessionVoiceStat
+	if s.voiceDebugEnabled {
+		stat = s.getOrCreateStat(pkt.SessionID)
+		stat.packetsReceived.Add(1)
+		stat.lastActivity.Store(time.Now().UnixNano())
+	}
+
+	channelID := actualChannel
+	members := s.channels.Members(channelID)
+
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+
+	for _, memberSID := range members {
+		if memberSID == pkt.SessionID {
+			continue // don't echo back to sender
+		}
+
+		memberSession, ok := s.sessions.GetSnapshot(memberSID)
+		if !ok || memberSession.UDPAddr == nil {
 			continue
 		}
-
-		// Track per-session voice debug stats
-		var stat *perSessionVoiceStat
-		if s.voiceDebugEnabled {
-			stat = s.getOrCreateStat(pkt.SessionID)
-			stat.packetsReceived.Add(1)
-			stat.lastActivity.Store(time.Now().UnixNano())
+		if memberSession.Deafened {
+			continue // don't send to deafened users
 		}
 
-		channelID := actualChannel
-		members := s.channels.Members(channelID)
-
-		rawPacket := buf[:n] // forward the original authenticated ciphertext unchanged
-
-		for _, memberSID := range members {
-			if memberSID == pkt.SessionID {
-				continue // don't echo back to sender
-			}
-
-			memberSession, ok := s.sessions.GetSnapshot(memberSID)
-			if !ok || memberSession.UDPAddr == nil {
-				continue
-			}
-			if memberSession.Deafened {
-				continue // don't send to deafened users
-			}
-
-			_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
-			if err != nil {
-				s.logVoiceError(slog.LevelDebug, "voice forward error", err)
-			} else {
-				s.metrics.VoicePacketsOut.Add(1)
-				s.metrics.VoiceBytesOut.Add(int64(n))
-				if stat != nil {
-					stat.packetsForwarded.Add(1)
-				}
+		_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
+		if err != nil {
+			s.logVoiceError(slog.LevelDebug, "voice forward error", err)
+		} else {
+			s.metrics.VoicePacketsOut.Add(1)
+			s.metrics.VoiceBytesOut.Add(int64(len(rawPacket)))
+			if stat != nil {
+				stat.packetsForwarded.Add(1)
 			}
 		}
 	}

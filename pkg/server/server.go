@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"net/http"
@@ -106,6 +107,8 @@ type Server struct {
 	accountProvisionLimiter *accountProvisionLimiter
 	bootstrapMu             sync.Mutex
 	remoteModerationMu      sync.Mutex
+	// ponytail: global work drain; per-account barriers if mutation latency matters.
+	credentialWorkMu        sync.RWMutex
 	sessionBanMu            sync.Mutex
 	sessionBanChecks        map[int64]int
 	sessionBanPending       map[int64]bool
@@ -438,12 +441,7 @@ func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) 
 	for {
 		select {
 		case frame := <-client.outbound:
-			if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
-				slog.Error("set screen write deadline", "session", sessionID)
-				s.removeScreenConn(sessionID, client)
-				return
-			}
-			if err := protocol.WriteScreenPacketFrame(client.conn, frame); err != nil {
+			if err := s.writeLiveScreenFrame(sessionID, client, frame); err != nil {
 				slog.Warn("screen write failed", "session", sessionID)
 				s.removeScreenConn(sessionID, client)
 				return
@@ -452,6 +450,24 @@ func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) 
 			return
 		}
 	}
+}
+
+func (s *Server) writeLiveScreenFrame(sessionID uint32, client *screenClientConn, frame []byte) error {
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	// Revalidate queued sender and recipient authority at the actual writer.
+	if len(frame) < 4+protocol.ScreenHeaderSize {
+		return nil
+	}
+	sender, senderLive := s.sessions.GetSnapshot(binary.BigEndian.Uint32(frame[4:8]))
+	_, receiverLive := s.sessions.GetSnapshot(sessionID)
+	if !receiverLive || !senderLive || !s.screenShare.IsSharer(sender.ID, sender.ChannelID) {
+		return nil
+	}
+	if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
+		return err
+	}
+	return protocol.WriteScreenPacketFrame(client.conn, frame)
 }
 
 func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
@@ -467,14 +483,19 @@ func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
 // removeSessionAndScreenConn retires the control session and detaches its
 // screen socket under the same lifecycle lock used by bindScreenConn.
 func (s *Server) removeSessionAndScreenConn(sessionID uint32) {
+	client := s.detachSessionAndScreenConn(sessionID)
+	if client != nil {
+		client.close()
+	}
+}
+
+func (s *Server) detachSessionAndScreenConn(sessionID uint32) *screenClientConn {
 	s.screenMu.Lock()
 	client := s.screenConns[sessionID]
 	delete(s.screenConns, sessionID)
 	s.sessions.Remove(sessionID)
 	s.screenMu.Unlock()
-	if client != nil {
-		client.close()
-	}
+	return client
 }
 
 func (s *Server) sendScreenPacketToSession(sessionID uint32, pkt *protocol.ScreenPacket) bool {

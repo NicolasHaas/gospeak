@@ -39,6 +39,12 @@ const (
 )
 
 var controlMessageFields = map[string]struct{}{
+	"personal_token_status_request": {}, "personal_token_status_response": {},
+	"rotate_personal_token_request": {}, "rotate_personal_token_response": {},
+	"revoke_personal_token_request": {}, "revoke_personal_token_response": {},
+	"issue_personal_recovery_request": {}, "issue_personal_recovery_response": {},
+	"revoke_personal_recovery_request": {}, "revoke_personal_recovery_response": {},
+	"redeem_personal_recovery_request": {}, "redeem_personal_recovery_response": {},
 	"auth_request": {}, "auth_response": {},
 	"channel_list_request": {}, "channel_list_response": {},
 	"join_channel_request": {}, "channel_join_response": {},

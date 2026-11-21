@@ -136,13 +136,18 @@ type queuedControlMessage struct {
 
 type controlClient struct {
 	net.Conn
-	sessionID   uint32
-	peerIP      string
-	sendQueue   chan *queuedControlMessage
-	done        chan struct{}
-	mu          sync.Mutex
-	closed      bool
-	authPending bool // registered for bans, but ordinary publication is not ready
+	sessionID             uint32
+	peerIP                string
+	sendQueue             chan *queuedControlMessage
+	done                  chan struct{}
+	mu                    sync.Mutex
+	closed                bool
+	terminal              bool // detached response transport, never command/event authority
+	writeMu               sync.Mutex
+	beforeCredentialDrain func() // test scheduling seam, set before workers start
+	afterQueueReceive     func() // test scheduling seam, set before workers start
+	credentialHash        string // credential verified at activation, immutable afterwards
+	authPending           bool   // registered for bans, but ordinary publication is not ready
 
 	statePending bool                  // a suppressed state broadcast needs a post-auth snapshot
 	pendingState *queuedControlMessage // replaceable suffix, protected by mu
@@ -197,7 +202,7 @@ func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
 
 func (c *controlClient) enqueue(item queuedControlMessage) error {
 	c.mu.Lock()
-	if c.closed {
+	if c.closed || c.terminal {
 		c.mu.Unlock()
 		return errControlClientClosed
 	}
@@ -241,8 +246,11 @@ func (c *controlClient) writeLoop() {
 		case <-c.done:
 			return
 		case queued := <-c.sendQueue:
+			if c.afterQueueReceive != nil {
+				c.afterQueueReceive()
+			}
 			c.mu.Lock()
-			if c.closed {
+			if c.closed || c.terminal {
 				c.mu.Unlock()
 				return
 			}
@@ -251,11 +259,20 @@ func (c *controlClient) writeLoop() {
 				c.pendingState = nil
 			}
 			c.mu.Unlock()
+			c.writeMu.Lock()
+			c.mu.Lock()
+			retired := c.closed || c.terminal
+			c.mu.Unlock()
+			if retired {
+				c.writeMu.Unlock()
+				return
+			}
 			err := c.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
 			if err == nil {
 				err = protocol.WriteControlMessage(c.Conn, item.message)
 			}
 			_ = c.SetWriteDeadline(time.Time{})
+			c.writeMu.Unlock()
 			if item.result != nil {
 				item.result <- err
 			}
@@ -824,7 +841,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}()
 
-	// First message must be AuthRequest.
+	// Authentication or a one-use recovery redemption; neither grants authority
+	// until its own persisted checks succeed.
 	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.PreAuthTimeout))
 	msg, err := protocol.ReadControlMessage(conn)
 	if err != nil {
@@ -832,6 +850,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear deadline
+	if msg.RedeemPersonalRecoveryReq != nil {
+		if s.redeemPersonalRecovery(handler, st, conn, msg.RedeemPersonalRecoveryReq) {
+			markCredentialsValid()
+		}
+		return
+	}
 
 	if msg.AuthRequest == nil {
 		sendError(conn, 1, "first message must be auth_request")
@@ -882,6 +906,10 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}
 
+	if authReq.PersonalOnly && (user == nil || user.Username != authReq.Username) {
+		sendError(conn, 2, "authentication failed")
+		return
+	}
 	// Keep required state before creating credentials that must reach the client.
 	var initialChannels []model.Channel
 	if user == nil {
@@ -1153,9 +1181,29 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 	}
+	// Serialize the final credential check and registration with credential
+	// mutation + retirement. The initial lookup predates ban coordination.
+	credentialHash := tokenHash
+	if autoToken != "" {
+		credentialHash = crypto.HashToken(autoToken)
+	}
+	s.remoteModerationMu.Lock()
+	credentialUser, credentialErr := st.NonTx().GetUserByPersonalTokenHash(credentialHash)
+	if credentialErr != nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 3, "internal error")
+		return
+	}
+	if credentialUser == nil || credentialUser.ID != user.ID {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 2, "authentication failed")
+		return
+	}
 	session, banned := s.activateAfterBanChecks(user.ID, peerIP, sessionReservation, persistedBan, persistedIPBan, bypassIPBan, func(session *model.Session) {
 		conn = handler.registerConn(session.ID, conn, true)
+		conn.(*controlClient).credentialHash = credentialHash
 	})
+	s.remoteModerationMu.Unlock()
 	banCheckUserID = 0
 	peerIP = ""
 	if banned {
@@ -1169,39 +1217,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 	sessionID := session.ID
 
-	defer func() {
-		stopEvent, stopped := s.screenShare.StopBySession(sessionID)
-		// Cleanup on disconnect
-		chID := s.channels.Leave(sessionID)
-		if stopped && stopEvent != nil {
-			s.metrics.ScreenSharesStopped.Add(1)
-			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
-			slog.Info("screen share stopped", "user", user.Username, "session", sessionID, "channel", stopEvent.ChannelID, "reason", "disconnect")
-			handler.broadcastToChannel(stopEvent.ChannelID, &pb.ControlMessage{ScreenShareEvent: stopEvent}, sessionID)
-		} else {
-			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
-		}
-		handler.removeConn(sessionID)
-		s.removeSessionAndScreenConn(sessionID)
-		s.removeVoiceStat(sessionID)
-		s.metrics.TotalDisconnects.Add(1)
-		slog.Debug("client disconnected", "user", user.Username, "session", sessionID)
-
-		if chID > 0 {
-			handler.broadcastToChannel(chID, &pb.ControlMessage{
-				ChannelLeftEvent: &pb.ChannelLeftEvent{
-					ChannelID: chID,
-					UserID:    user.ID,
-					Username:  user.Username,
-				},
-			}, sessionID)
-
-			// Auto-delete temp channels when empty
-			s.cleanupTempChannel(chID, st)
-		}
-
-		s.broadcastServerState(st, handler)
-	}()
+	defer s.cleanupControlSession(handler, st, sessionID)
 
 	// Build channel list
 	channels, err := st.NonTx().ListChannels()
@@ -1247,17 +1263,27 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	// is bounded and nonblocking; no network operation runs under this lock.
 	s.remoteModerationMu.Lock()
 	currentUser, roleErr := st.NonTx().GetUserByID(user.ID)
-	if roleErr == nil && currentUser != nil {
+	_, sessionLive := s.sessions.GetSnapshot(sessionID)
+	credentialCurrent := roleErr == nil && currentUser != nil && currentUser.PersonalTokenHash == credentialHash && sessionLive
+	if credentialCurrent {
+		authResp.AuthResponse.UserID = currentUser.ID
+		authResp.AuthResponse.CredentialVersion, roleErr = st.NonTx().PersonalTokenVersion(currentUser.ID)
 		if sessionRole != currentUser.Role {
 			sessionRole = currentUser.Role
 			s.sessions.UpdateRoleByUserID(user.ID, sessionRole)
 		}
 		authResp.AuthResponse.Role = sessionRole.String()
-		err = conn.(*controlClient).enqueue(queuedControlMessage{message: authResp})
+		if roleErr == nil {
+			err = conn.(*controlClient).enqueue(queuedControlMessage{message: authResp})
+		}
 	}
 	s.remoteModerationMu.Unlock()
 	if roleErr != nil || currentUser == nil {
 		conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 3, Message: "internal error"}})
+		return
+	}
+	if !credentialCurrent {
+		conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 2, Message: "authentication failed"}})
 		return
 	}
 	if err != nil {
@@ -1352,6 +1378,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 				if msg.RevokeInviteReq != nil {
 					response = &pb.ControlMessage{RevokeInviteResp: &pb.RevokeInviteResponse{Error: "server control capacity reached"}}
 				}
+				if isPersonalTokenRequest(msg) {
+					response = personalTokenResponse(msg, "server control capacity reached")
+				}
 				if err := writeControlMessage(conn, response); err != nil {
 					return
 				}
@@ -1365,6 +1394,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 
 // handleMessage dispatches a control message to the appropriate handler.
 func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *pb.ControlMessage, st datastore.DataProviderFactory, conn net.Conn) {
+	if isPersonalTokenRequest(msg) {
+		s.handlePersonalToken(handler, sessionID, msg, st, conn)
+		return
+	}
+	// Drain already accepted work before credential mutation completion. This
+	// lock is not a DB/policy lock and may span bounded outbound work.
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	if _, live := s.sessions.GetSnapshot(sessionID); !live && msg.ListInvitesReq == nil && msg.RevokeInviteReq == nil {
+		return
+	}
 	switch {
 	case msg.JoinChannelRequest != nil:
 		s.handleJoinChannel(handler, sessionID, msg.JoinChannelRequest, st, conn)

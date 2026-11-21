@@ -63,10 +63,15 @@ func TestConnectDialogBindsSavedToken(t *testing.T) {
 			if tc.edit == "server" {
 				bookmarkAddr = "trusted.example:9600"
 			}
-			bs := &client.BookmarkStore{Bookmarks: []client.Bookmark{
+			bs := client.NewBookmarkStore()
+			bs.Bookmarks = []client.Bookmark{
 				{Name: "First", ControlAddr: bookmarkAddr, Username: "Alice", Token: "saved-token", LastUsed: 2},
 				{Name: "Second", ControlAddr: addr, Username: "Bob", Token: "second-token", LastUsed: 1},
-			}, TrustedServerPins: map[string]string{addr: client.SPKIFingerprint(certServer.Certificate())}}
+			}
+			bs.TrustedServerPins = map[string]string{addr: client.SPKIFingerprint(certServer.Certificate())}
+			if err := bs.Save(); err != nil {
+				t.Fatal(err)
+			}
 			a := &App{fyneApp: f, window: f.NewWindow("GoSpeak"), engine: client.NewEngine(), bookmarks: bs}
 			defer a.window.Close()
 			a.showConnectDialog()

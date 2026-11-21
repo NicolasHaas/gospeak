@@ -543,6 +543,15 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 					AND max_uses = 0 AND expires_at IS NULL AND bootstrap_key IS NULL`},
 			},
 		},
+		{
+			version: 15,
+			steps: []migrationStep{
+				{statement: "ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0", table: "users", column: "credential_version"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_hash TEXT NOT NULL DEFAULT ''", table: "users", column: "recovery_hash"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_expires_at INTEGER NOT NULL DEFAULT 0", table: "users", column: "recovery_expires_at"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_issued_by INTEGER NOT NULL DEFAULT 0", table: "users", column: "recovery_issued_by"},
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -808,7 +817,7 @@ func (s *baseProvider) UpdateUserPersonalToken(userID int64, hash string, create
 	createdAtStr := formatDBTime(createdAt)
 	_, err := s.ExecContext(
 		context.Background(),
-		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ? WHERE id = ?",
+		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ?, credential_version = credential_version + 1, recovery_hash = '', recovery_expires_at = 0, recovery_issued_by = 0 WHERE id = ?",
 		hash,
 		createdAtStr,
 		userID,

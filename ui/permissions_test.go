@@ -141,7 +141,7 @@ func TestRolePermissionControls(t *testing.T) {
 				}
 			}
 			a.showServerSettings() // Also guard the dialog independently of toolbar visibility.
-			for _, name := range []string{"Create Token", "Manage Invites", "Create Channel", "Manage Bans", "Export Channels (YAML)", "Export Users (YAML)", "Import Channels (YAML)"} {
+			for _, name := range []string{"Create Token", "Manage Invites", "Manage Personal Credentials", "Create Channel", "Manage Bans", "Export Channels (YAML)", "Export Users (YAML)", "Import Channels (YAML)"} {
 				checkButton(name, admin)
 			}
 			clearDialogs()

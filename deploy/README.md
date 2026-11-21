@@ -159,6 +159,8 @@ bootstrap rows, reset the database or fabricate a credential to bypass refusal.
 After the bootstrap administrator authenticates with its personal token, the
 server retires the bootstrap file; a finalized backup need not contain it.
 
+For lost owner/admin personal credentials, stop the service and retain an untouched matching database backup before opening it with the current tools (opening can apply migrations). Privately generate and retain a fresh 64-character lowercase hexadecimal replacement in an owner-only file, never a shell argument, environment variable or log. Build `go build -o gospeak-recover-token ./cmd/recover-token`, then inspect the exact existing target with `./gospeak-recover-token -db /absolute/server.db -user-id ID -username NAME -stopped-service -inspect`. Confirm its ID, name, role and channel scope, then run the same command without `-inspect`, adding `-expected-version VERSION < /private/replacement.token`. The acknowledgement flag does not detect a running server: keeping it stopped is the operator's responsibility. The tool replaces only that credential, invalidates recovery grants and finalizes pending owner setup without deleting the owner marker or changing identity, role or scope. Restart and authenticate the retained replacement; if an outcome is uncertain, retain that exact candidate and inspect before retrying, never restore the old hash. No remote recovery of owner/admin accounts is provided by this tool.
+
 ## Bandwidth example (budget VPS)
 
 As a rough example, a small VPS with 20 TB/month bandwidth (e.g., a ~EUR 3.5/month Hetzner CX11)
