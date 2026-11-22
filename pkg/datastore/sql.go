@@ -158,6 +158,8 @@ func sqliteConnectionDSN(dbPath string) (string, error) {
 	// pragma avoids SQLite syntax variants changing these required values
 	// after the driver sorts and executes repeated _pragma parameters.
 	query.Del("_pragma")
+	query.Del("_foreign_keys")
+	query.Del("_fk")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
 	// Transactions may read before writing: acquire the WAL writer before

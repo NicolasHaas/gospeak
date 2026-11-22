@@ -14,7 +14,7 @@ Thank you for your interest in contributing to GoSpeak! This document provides g
 
 ### Prerequisites
 
-- Go 1.26.11 or later
+- Go 1.27.4 or later
 - Podman or Docker (for container builds)
 - System dependencies for local builds (see below)
 
@@ -24,7 +24,8 @@ Thank you for your interest in contributing to GoSpeak! This document provides g
 # Install system dependencies
 sudo apt-get install -y portaudio19-dev libopus-dev pkg-config \
   libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev \
-  libxinerama-dev libxi-dev libxxf86vm-dev
+  libxinerama-dev libxi-dev libxxf86vm-dev \
+  libwayland-dev libxkbcommon-dev libegl-dev
 
 # Build
 go build -tags nolibopusfile ./cmd/server/

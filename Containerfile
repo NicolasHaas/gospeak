@@ -1,6 +1,6 @@
 # GoSpeak Build Container
 # Independent server, Linux and Windows builds; apt/cmake precede source copies.
-FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS go-base
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-base
 
 # Linux client dependencies (also used by development and release inspection).
 FROM go-base AS builder-base
@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxinerama-dev \
     libxi-dev \
     libxxf86vm-dev \
+    libwayland-dev \
+    libxkbcommon-dev \
+    libegl-dev \
     # Build tools
     gcc \
     libc6-dev \

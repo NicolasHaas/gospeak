@@ -203,7 +203,7 @@ upgrade guidance for duplicate sibling names.
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Go 1.26.11 |
+| Language | Go 1.27.4 |
 | GUI | [Fyne](https://fyne.io/) v2 |
 | Audio I/O | [PortAudio](http://www.portaudio.com/) via [gordonklaus/portaudio](https://github.com/gordonklaus/portaudio) |
 | Voice Codec | [Opus](https://opus-codec.org/) via [hraban/opus](https://github.com/hraban/opus) |

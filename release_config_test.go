@@ -27,6 +27,22 @@ func TestCIUsesImmutableToolingAndSupportsManualRuns(t *testing.T) {
 	assertImmutableActionRefs(t, workflow)
 }
 
+func TestLinuxClientRecipesIncludeWaylandDependencies(t *testing.T) {
+	for path, count := range map[string]int{
+		".github/workflows/ci.yml": 3,
+		"Containerfile":            1,
+		"CONTRIBUTING.md":          1,
+		"docs/building.md":         1,
+	} {
+		contents := readProjectFile(t, path)
+		for _, dependency := range []string{"libwayland-dev", "libxkbcommon-dev", "libegl-dev"} {
+			if got := strings.Count(contents, dependency); got != count {
+				t.Errorf("%s has %d %s prerequisites, want %d", path, got, dependency, count)
+			}
+		}
+	}
+}
+
 func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 	workflow := readProjectFile(t, ".github/workflows/release.yml")
 	assertImmutableActionRefs(t, workflow)
@@ -53,7 +69,7 @@ func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 
 func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 	containerfile := readProjectFile(t, "Containerfile")
-	if !strings.Contains(containerfile, "FROM golang:1.26.11-bookworm@sha256:") {
+	if !strings.Contains(containerfile, "FROM golang:1.27.4-bookworm@sha256:") {
 		t.Error("container build does not use the release Go toolchain version")
 	}
 	digest := regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)

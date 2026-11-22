@@ -10,7 +10,7 @@ reproducible.
 ## Prerequisites
 
 - **Podman** (or Docker) is used for container builds.
-- **Go 1.26.11 or newer** is only needed for local development without containers.
+- **Go 1.27.4 or newer** is only needed for local development without containers.
 
 ## Quick Build
 
@@ -50,9 +50,9 @@ docker compose --profile dev run --build lint
 Release CI inspects Linux dependencies with `ldd`, Windows imports with
 `objdump`, and macOS dependencies with `otool -L`. The Windows PortAudio and
 Opus libraries are linked statically. Linux users need the runtime PortAudio,
-Opus, OpenGL, and X11 libraries supplied by their distribution. On Debian or
+Opus, OpenGL, X11, and Wayland libraries supplied by their distribution. On Debian or
 Ubuntu, install `libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2
-libxinerama1 libxi6 libxxf86vm1`. macOS users need `portaudio` and `opus` from
+libxinerama1 libxi6 libxxf86vm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 libegl1`. macOS users need `portaudio` and `opus` from
 Homebrew until GoSpeak ships an application bundle.
 
 Release tags must use SemVer without build metadata. Push one release tag at a
@@ -157,7 +157,8 @@ For local development, you need the native dependencies installed:
 sudo apt install build-essential pkg-config \
   portaudio19-dev libopus-dev libgl1-mesa-dev \
   libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-  libxi-dev libxxf86vm-dev
+  libxi-dev libxxf86vm-dev \
+  libwayland-dev libxkbcommon-dev libegl-dev
 
 go build -tags nolibopusfile ./cmd/server/
 go build -tags nolibopusfile ./cmd/client/
@@ -181,7 +182,7 @@ go build -tags nolibopusfile ./cmd/client/
 
 ### macOS
 
-Go 1.26 builds require macOS 12 Monterey or newer.
+Go 1.27 builds require macOS 13 Ventura or newer.
 Install the Xcode Command Line Tools first so a C compiler is available, then:
 
 ```bash
