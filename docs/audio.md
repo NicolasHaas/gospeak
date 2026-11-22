@@ -1,12 +1,16 @@
 # GoSpeak Audio Pipeline
 
-GoSpeak uses PortAudio for hardware I/O and Opus for codec, with a Voice Activity Detection (VAD) system to suppress silence.
+GoSpeak uses PortAudio for hardware I/O and Opus for codec, with a Voice
+Activity Detection (VAD) system to suppress silence.
 
-The audio subsystem follows an **interface-based (onion) architecture**. This allows swapping audio backends for different platforms (e.g., Android Oboe, iOS AVAudioEngine) without changing the client logic.
+The audio subsystem follows an **interface-based (onion) architecture**. This
+allows swapping audio backends for different platforms (e.g., Android Oboe, iOS
+AVAudioEngine) without changing the client logic.
 
 ## Audio Interfaces
 
-All audio interfaces are defined in [`pkg/audio/interface.go`](../pkg/audio/interface.go):
+All audio interfaces are defined in
+[`pkg/audio/interface.go`](../pkg/audio/interface.go):
 
 | Interface | Methods | Default Implementation |
 |-----------|---------|------------------------|
@@ -19,9 +23,9 @@ All audio interfaces are defined in [`pkg/audio/interface.go`](../pkg/audio/inte
 | `DeviceLister` | `ListInputDevices()`, `ListOutputDevices()` | No concrete default type; `devices.go` exposes package functions |
 
 Compile-time checks (`var _ Interface = (*Impl)(nil)`) cover `CaptureDevice`,
-`PlaybackDevice`, `Encoder`, `Decoder`, and `VAD`. `DecoderFactory` is adapted in
-`pkg/client`, while device enumeration is exposed through package functions rather
-than a `DeviceLister` implementation.
+`PlaybackDevice`, `Encoder`, `Decoder`, and `VAD`. `DecoderFactory` is adapted
+in `pkg/client`, while device enumeration is exposed through package functions
+rather than a `DeviceLister` implementation.
 
 ## Audio Stack
 
@@ -151,7 +155,15 @@ stateDiagram-v2
 | Hold Frames | 15 | Number of frames to keep transmitting after voice stops (15 × 20ms = 300ms) |
 | Pre-buffer | 3 | Frames buffered before voice onset for smooth start (3 × 20ms = 60ms) |
 
-The VAD threshold, input/output volume, and selected devices are user-configurable via the settings dialog and persisted in `settings.yaml` under the operating system's user config directory (`gospeak/`). Press Apply to change devices or input/output volume without reconnecting. Volume runs from 0% (silent) to 100% (unchanged), defaults to 100%, and changes only GoSpeak audio, not the system mixer. Input volume is applied before the meter, VAD, and encoding; output volume is applied once after the saturating speaker mix. The 60 ms VAD pre-buffer is transmitted when speech starts so word beginnings are not clipped.
+The VAD threshold, input/output volume, and selected devices are
+user-configurable via the settings dialog and persisted in `settings.yaml` under
+the operating system's user config directory (`gospeak/`). Press Apply to change
+devices or input/output volume without reconnecting. Volume runs from 0%
+(silent) to 100% (unchanged), defaults to 100%, and changes only GoSpeak audio,
+not the system mixer. Input volume is applied before the meter, VAD, and
+encoding; output volume is applied once after the saturating speaker mix. The 60
+ms VAD pre-buffer is transmitted when speech starts so word beginnings are not
+clipped.
 
 ## Jitter Buffer
 
@@ -162,8 +174,8 @@ Each remote speaker gets a dedicated jitter buffer that:
 3. **Drops late packets** (SeqNum too far behind the playback cursor)
 4. **Waits for a 20 ms playout window** before releasing the first frame, so
    ordinary UDP reordering does not immediately trigger packet-loss concealment
-5. **Runs on a fixed 20 ms playout clock** and emits packet-loss concealment only
-   after the missing frame's deadline has elapsed
+5. **Runs on a fixed 20 ms playout clock** and emits packet-loss concealment
+   only after the missing frame's deadline has elapsed
 6. **Stays bounded to 15 frames** and resynchronizes after larger sequence jumps
    instead of accumulating packets or producing a long PLC burst
 
@@ -174,15 +186,29 @@ forever; the next talk spurt starts a fresh jitter window.
 
 ## PortAudio Initialization
 
-PortAudio initialization can be slow, especially on Windows. `ui.NewApp` starts it in the background. Connection-time audio setup waits for that attempt in a connection-generation worker, not on the GUI thread.
+PortAudio initialization can be slow, especially on Windows. `ui.NewApp` starts
+it in the background. Connection-time audio setup waits for that attempt in a
+connection-generation worker, not on the GUI thread.
 
-Initialization errors are logged. If opening the audio streams fails, control and chat stay connected and the client reports that audio is unavailable.
+Initialization errors are logged. If opening the audio streams fails, control
+and chat stay connected and the client reports that audio is unavailable.
 
 ## Device Selection
 
-Users can select input/output audio devices in Audio Settings. Names are matched against PortAudio devices that support the selected direction. Apply opens only changed streams and keeps the server connection, channel membership, mute/deafen state, and chat intact. If opening a replacement fails, the previous streams keep running and the client shows the underlying error; failed selections are not saved. Apply can also retry audio setup after an initialization failure.
+Users can select input/output audio devices in Audio Settings. Names are matched
+against PortAudio devices that support the selected direction. Apply opens only
+changed streams and keeps the server connection, channel membership, mute/deafen
+state, and chat intact. If opening a replacement fails, the previous streams
+keep running and the client shows the underlying error; failed selections are
+not saved. Apply can also retry audio setup after an initialization failure.
 
-At connection time, an unavailable saved device falls back to the system default with a warning that includes the original error. Live Apply does not silently fall back. It opens replacements before closing working streams, so a backend that cannot open both at once may reject a switch while keeping the old device. Switching waits for any in-flight native audio read/write; it cannot interrupt a hung native call. Devices are not switched automatically when hardware is plugged in or removed.
+At connection time, an unavailable saved device falls back to the system default
+with a warning that includes the original error. Live Apply does not silently
+fall back. It opens replacements before closing working streams, so a backend
+that cannot open both at once may reject a switch while keeping the old device.
+Switching waits for any in-flight native audio read/write; it cannot interrupt a
+hung native call. Devices are not switched automatically when hardware is
+plugged in or removed.
 
 ## Multi-Speaker Mixing
 
@@ -205,6 +231,6 @@ graph TB
 On every 20 ms playout tick, at most one due frame is decoded per active
 speaker. Those PCM frames are summed with `int16` saturation and sent to
 PortAudio as exactly one frame, so concurrent speakers do not multiply the
-playout duration. A speaker without a due frame contributes silence. Decoder
-and jitter-buffer state is created lazily and removed after 30 seconds without
-a packet.
+playout duration. A speaker without a due frame contributes silence. Decoder and
+jitter-buffer state is created lazily and removed after 30 seconds without a
+packet.

@@ -1,6 +1,7 @@
 # Deployment
 
-This folder contains a Rocky Linux 10 cloud-init example for common cloud providers.
+This folder contains a Rocky Linux 10 cloud-init example for common cloud
+providers.
 
 ## Files
 
@@ -15,8 +16,11 @@ This folder contains a Rocky Linux 10 cloud-init example for common cloud provid
 1. Edit `deploy/cloud-init.yaml`:
    - Replace the SSH public key placeholder.
    - Adjust the open mode, schedules, and ports to your needs.
-2. In your cloud provider console, create a server with a Rocky Linux 10 image and paste the contents of `deploy/cloud-init.yaml` into the user-data field.
-3. At the cloud provider firewall, only allow inbound `9600/tcp`, `9601/udp`, and `9603/tcp` from the internet. Allow `22/tcp` only from your public IP for admin access.
+2. In your cloud provider console, create a server with a Rocky Linux 10 image
+   and paste the contents of `deploy/cloud-init.yaml` into the user-data field.
+3. At the cloud provider firewall, only allow inbound `9600/tcp`, `9601/udp`,
+   and `9603/tcp` from the internet. Allow `22/tcp` only from your public IP for
+   admin access.
 4. Boot the server and check the service:
 
 ```bash
@@ -25,21 +29,31 @@ systemctl status gospeak
 
 ## Hands-off secure install
 
-This configuration is designed to be hands-off after first boot while staying secure.
+This configuration is designed to be hands-off after first boot while staying
+secure.
 
 - SSH key-only access, root login disabled.
-- Firewall allows only SSH, the control port, the voice port, and the screen-share port.
-- OS updates are applied automatically via `dnf-automatic` with a reboot when needed.
+- Firewall allows only SSH, the control port, the voice port, and the
+  screen-share port.
+- OS updates are applied automatically via `dnf-automatic` with a reboot when
+  needed.
 - The GoSpeak container auto-updates via Podman auto-update and a systemd timer.
 - The supplied container services drop all capabilities and use
   `no-new-privileges`.
 
-The server image runs as UID:GID `10001:10001`. Cloud-init provisions `/var/lib/gospeak` for this owner with mode `0700`; fresh Compose named volumes inherit the image's private `/data`. Existing root-owned data must be migrated while stopped before enabling image auto-updates; follow the [volume ownership instructions](../docs/building.md#server-container). Existing database, sidecar, TLS and bootstrap files must also belong to this account; the image never changes ownership at startup.
+The server image runs as UID:GID `10001:10001`. Cloud-init provisions
+`/var/lib/gospeak` for this owner with mode `0700`; fresh Compose named volumes
+inherit the image's private `/data`. Existing root-owned data must be migrated
+while stopped before enabling image auto-updates; follow the
+[volume ownership instructions](../docs/building.md#server-container). Existing
+database, sidecar, TLS and bootstrap files must also belong to this account; the
+image never changes ownership at startup.
 
 ## Open server mode
 
-The provided cloud-init starts GoSpeak with `-open` and `-screen-share`, which allows anyone to join without a token and enables per-channel screen sharing.
-To require tokens, remove `-open` from `deploy/cloud-init.yaml`. On first start,
+The provided cloud-init starts GoSpeak with `-open` and `-screen-share`, which
+allows anyone to join without a token and enables per-channel screen sharing. To
+require tokens, remove `-open` from `deploy/cloud-init.yaml`. On first start,
 GoSpeak writes an admin bootstrap credential to
 `/var/lib/gospeak/bootstrap-admin.token`; read it over SSH with:
 
@@ -64,34 +78,34 @@ cat ./bootstrap-admin.token
 ## Backup and restore
 
 Stop the server before copying its files. SQLite uses WAL mode: copying only
-`gospeak.db` while a writer is running can lose committed data. YAML exports
-are not database backups. The users export contains IDs, names, roles and
-creation times, but omits `channel_scope` and personal-token hashes. There is
-no full user importer. Channel YAML omits stored IDs, temporary channels,
-credentials, bans and chat history.
+`gospeak.db` while a writer is running can lose committed data. YAML exports are
+not database backups. The users export contains IDs, names, roles and creation
+times, but omits `channel_scope` and personal-token hashes. There is no full
+user importer. Channel YAML omits stored IDs, temporary channels, credentials,
+bans and chat history.
 
 ### Backup
 
 1. Record the server version and effective startup command, including `-db`,
    `-data`, `-cert`, `-key`, `-channels-file` and retention settings. Relative
-   paths resolve from the process working directory. `-data` does not relocate
-   a separately configured `-db`. Save the service/Compose configuration,
-   channel YAML and any environment/secret files needed to reproduce startup.
+   paths resolve from the process working directory. `-data` does not relocate a
+   separately configured `-db`. Save the service/Compose configuration, channel
+   YAML and any environment/secret files needed to reproduce startup.
 2. Stop the service (`systemctl stop gospeak`, or
    `docker compose -f deploy/compose.yaml stop gospeak` for the supplied Compose
-   deployment). Wait for it to exit successfully and
-   ensure no other GoSpeak process or SQLite tool is using the database. Keep
-   auto-update/restart automation from starting it during the copy.
+   deployment). Wait for it to exit successfully and ensure no other GoSpeak
+   process or SQLite tool is using the database. Keep auto-update/restart
+   automation from starting it during the copy.
 3. Copy the complete database set and data directory to private backup storage:
    the database, any remaining matching `-wal` and `-shm` sidecars,
    `server.crt`, `server.key`, and `bootstrap-admin.token` if present. Also copy
-   separately configured TLS files and the configuration recorded above.
-   A clean shutdown normally checkpoints/removes sidecars; never discard a
-   remaining WAL just because the process stopped. Do not mix files from
-   different backup times.
+   separately configured TLS files and the configuration recorded above. A clean
+   shutdown normally checkpoints/removes sidecars; never discard a remaining WAL
+   just because the process stopped. Do not mix files from different backup
+   times.
 
-For a host deployment where the database and automatic files all live under
-one directory, run the following as the service owner after stopping it. Set
+For a host deployment where the database and automatic files all live under one
+directory, run the following as the service owner after stopping it. Set
 absolute paths for your installation; the backup destination must be new and
 outside the source directory. This example does not cover external config or
 custom TLS paths, which must be copied separately while still stopped.
@@ -106,17 +120,17 @@ cp -a "$source/." "$backup/"
 ```
 
 For a named container volume, stop the container first and copy the complete
-volume through a trusted host-side volume backup mechanism; the server image
-has no shell or SQLite CLI. Preserve ownership for the account that will run
-the restored service. On Unix, protect backup directories with `0700` and
-secret/database files with `0600`; check these modes and ownership rather
-than relying on `umask` to tighten files copied with `cp -a`. On Windows,
-retain owner-only ACLs. Restrict access to backup storage and encrypt off-host
-copies. The database contains chat text, names, account scopes, token hashes
-and explicit IP bans; private TLS keys and bootstrap credentials are secrets.
-Do not put them in Git, logs or support reports. Server backups do not include
-client bookmarks/personal tokens stored on client machines, or live sessions
-and in-memory media keys. Restoring the TLS key preserves saved TOFU identity.
+volume through a trusted host-side volume backup mechanism; the server image has
+no shell or SQLite CLI. Preserve ownership for the account that will run the
+restored service. On Unix, protect backup directories with `0700` and
+secret/database files with `0600`; check these modes and ownership rather than
+relying on `umask` to tighten files copied with `cp -a`. On Windows, retain
+owner-only ACLs. Restrict access to backup storage and encrypt off-host copies.
+The database contains chat text, names, account scopes, token hashes and
+explicit IP bans; private TLS keys and bootstrap credentials are secrets. Do not
+put them in Git, logs or support reports. Server backups do not include client
+bookmarks/personal tokens stored on client machines, or live sessions and
+in-memory media keys. Restoring the TLS key preserves saved TOFU identity.
 
 ### Restore and verify
 
@@ -142,29 +156,45 @@ and in-memory media keys. Restoring the TLS key preserves saved TOFU identity.
    keep an untouched backup before testing an upgrade. A YAML channel file can
    create channels on startup; use the corresponding saved configuration.
 3. On a disposable restored copy, run SQLite `PRAGMA integrity_check;` (expect
-   `ok`) and `PRAGMA foreign_key_check;` (expect no rows). Compare saved channel,
-   user/scope and message counts/content without printing secrets. Start the
-   server with isolated loopback listeners and the restored paths before
-   switching production. Check successful startup, then test account access,
-   channel scope and history. Startup retention sweeps and empty temporary
-   channel cleanup can remove rows according to the saved settings.
+   `ok`) and `PRAGMA foreign_key_check;` (expect no rows). Compare saved
+   channel, user/scope and message counts/content without printing secrets.
+   Start the server with isolated loopback listeners and the restored paths
+   before switching production. Check successful startup, then test account
+   access, channel scope and history. Startup retention sweeps and empty
+   temporary channel cleanup can remove rows according to the saved settings.
 
-A pending bootstrap requires the original `bootstrap-admin.token` from the
-same backup. If it is missing, malformed or insecurely permissioned, startup
-refuses it; this is fail-closed recovery, not a request to generate a replacement.
-A different valid-looking token cannot recover the original credential's
-hash or retry-derived personal token. Recover the original file from a matching
-backup, or keep the service stopped for operator-local recovery. Do not delete
-bootstrap rows, reset the database or fabricate a credential to bypass refusal.
-After the bootstrap administrator authenticates with its personal token, the
-server retires the bootstrap file; a finalized backup need not contain it.
+A pending bootstrap requires the original `bootstrap-admin.token` from the same
+backup. If it is missing, malformed or insecurely permissioned, startup refuses
+it; this is fail-closed recovery, not a request to generate a replacement. A
+different valid-looking token cannot recover the original credential's hash or
+retry-derived personal token. Recover the original file from a matching backup,
+or keep the service stopped for operator-local recovery. Do not delete bootstrap
+rows, reset the database or fabricate a credential to bypass refusal. After the
+bootstrap administrator authenticates with its personal token, the server
+retires the bootstrap file; a finalized backup need not contain it.
 
-For lost owner/admin personal credentials, stop the service and retain an untouched matching database backup before opening it with the current tools (opening can apply migrations). Privately generate and retain a fresh 64-character lowercase hexadecimal replacement in an owner-only file, never a shell argument, environment variable or log. Build `go build -o gospeak-recover-token ./cmd/recover-token`, then inspect the exact existing target with `./gospeak-recover-token -db /absolute/server.db -user-id ID -username NAME -stopped-service -inspect`. Confirm its ID, name, role and channel scope, then run the same command without `-inspect`, adding `-expected-version VERSION < /private/replacement.token`. The acknowledgement flag does not detect a running server: keeping it stopped is the operator's responsibility. The tool replaces only that credential, invalidates recovery grants and finalizes pending owner setup without deleting the owner marker or changing identity, role or scope. Restart and authenticate the retained replacement; if an outcome is uncertain, retain that exact candidate and inspect before retrying, never restore the old hash. No remote recovery of owner/admin accounts is provided by this tool.
+For lost owner/admin personal credentials, stop the service and retain an
+untouched matching database backup before opening it with the current tools
+(opening can apply migrations). Privately generate and retain a fresh
+64-character lowercase hexadecimal replacement in an owner-only file, never a
+shell argument, environment variable or log. Build
+`go build -o gospeak-recover-token ./cmd/recover-token`, then inspect the exact
+existing target with
+`./gospeak-recover-token -db /absolute/server.db -user-id ID -username NAME -stopped-service -inspect`.
+Confirm its ID, name, role and channel scope, then run the same command without
+`-inspect`, adding `-expected-version VERSION < /private/replacement.token`. The
+acknowledgement flag does not detect a running server: keeping it stopped is the
+operator's responsibility. The tool replaces only that credential, invalidates
+recovery grants and finalizes pending owner setup without deleting the owner
+marker or changing identity, role or scope. Restart and authenticate the
+retained replacement; if an outcome is uncertain, retain that exact candidate
+and inspect before retrying, never restore the old hash. No remote recovery of
+owner/admin accounts is provided by this tool.
 
 ## Bandwidth example (budget VPS)
 
-As a rough example, a small VPS with 20 TB/month bandwidth (e.g., a ~EUR 3.5/month Hetzner CX11)
-can serve many users.
+As a rough example, a small VPS with 20 TB/month bandwidth (e.g., a ~EUR
+3.5/month Hetzner CX11) can serve many users.
 
 Very rough math (assume ~64 kbps per audio stream including overhead):
 
@@ -177,13 +207,21 @@ Very rough math (assume ~64 kbps per audio stream including overhead):
 - 50 active users, 3-5 speakers: ~9.6-16.0 Mbps => ~1.6-2.6 TB/month
 - 100 active users, 5-10 speakers: ~32.0-64.0 Mbps => ~5.2-10.4 TB/month
 
-You should be able to handle around 100 active users at ~12h/day in common cases.
+You should be able to handle around 100 active users at ~12h/day in common
+cases.
 
 ## Server options
 
 These flags map directly to `gospeak-server` and are all supported options.
 
-Operator-configured `-cert` / `-key` pairs are reread on new TLS handshakes at most once per minute per control or screen listener. Renew with the same key to preserve identity; publish a complete matching pair before the next poll. Invalid replacements leave a still-valid cached pair in use, with one-minute retries; new handshakes fail closed once that cache is invalid. GoSpeak never modifies these files. Existing connections are unaffected. Key changes require normal client verification and TOFU re-trust; use a coordinated restart because the two listeners can briefly cache different identities.
+Operator-configured `-cert` / `-key` pairs are reread on new TLS handshakes at
+most once per minute per control or screen listener. Renew with the same key to
+preserve identity; publish a complete matching pair before the next poll.
+Invalid replacements leave a still-valid cached pair in use, with one-minute
+retries; new handshakes fail closed once that cache is invalid. GoSpeak never
+modifies these files. Existing connections are unaffected. Key changes require
+normal client verification and TOFU re-trust; use a coordinated restart because
+the two listeners can briefly cache different identities.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -191,14 +229,14 @@ Operator-configured `-cert` / `-key` pairs are reread on new TLS handshakes at m
 | `-voice` | `:9601` | UDP voice plane bind address |
 | `-db` | `gospeak.db` | SQLite database file path |
 | `-cert` | *(empty)* | Custom TLS certificate, including self-signed; must be used with `-key` |
-| `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, a self-signed pair is loaded or generated in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
+| `-key` | *(empty)* | Matching TLS private key; must be used with `-cert`. When both flags are empty, `server.crt` and `server.key` are loaded or generated in `-data`; the first new TLS connection within 30 days of expiry renews the automatic self-signed certificate without rotating the key or TOFU identity |
 | `-data` | `.` | Data directory for generated TLS and bootstrap files; database location is controlled separately by `-db` |
-| `-open` | `false` | Allow users to join without a token |
-| `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
+| `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
+| `-screen` | `:9603` | TCP/TLS screen-share relay bind address; at most 256 bytes when screen sharing is enabled |
 | `-screen-share` | `false` | Enable per-channel screen sharing |
 | `-channels-file` | *(empty)* | YAML file defining channels created on startup |
-| `-metrics` | *(empty)* | Prometheus `/metrics` and `/healthz` bind address; disabled by default |
-| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
+| `-metrics` | *(empty)* | Plaintext Prometheus `/metrics` and `/healthz` HTTP bind address; disabled by default. Use a trusted bind such as `127.0.0.1:9602` |
+| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; supported range 1..1024, non-positive values use the default |
 | `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
 | `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
 | `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
@@ -206,17 +244,20 @@ Operator-configured `-cert` / `-key` pairs are reread on new TLS handshakes at m
 | `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
 | `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
 | `-media-cipher` | `aes128` | Voice and screen AEAD: `aes128`, `aes256`, or `chacha20` |
-| `-chat-history-limit` | `500` | Messages retained per channel (`0` disables persistence, 1..10000 retains history) |
+| `-chat-history-limit` | `500` | Messages retained per channel (`0` disables persistence, not live chat; 1..10000 retains history) |
 | `-chat-max-age` | `720h` | Maximum message age (`0` disables expiry) |
 | `-export-users` | `false` | Export all users as YAML and exit |
 | `-export-channels` | `false` | Export all channels as YAML and exit |
 | `-log-level` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `-log-format` | `text` | Log format: `text` or `json` |
 
-Channel files use a single `channels:` YAML document; nested channels use the same `channels:` key. The parser rejects unknown fields, aliases, merges, oversized files, and duplicate sibling names. An upgrade also stops if the existing database already has two channels with the same name under one parent; back up the database and resolve those conflicts rather than deleting an arbitrary row.
+Use the [channel configuration guide](../docs/channels.md) for YAML fields,
+nested examples, parser limits, and transactional create-only imports. Startup
+rejects existing duplicate sibling names; back up the database and resolve those
+conflicts rather than deleting an arbitrary row.
 
-The supplied Compose and cloud-init commands inherit the source limit of 64.
-For a larger shared NAT, add `-max-sessions-per-source <limit>` to the Compose
+The supplied Compose and cloud-init commands inherit the source limit of 64. For
+a larger shared NAT, add `-max-sessions-per-source <limit>` to the Compose
 `command` list or the cloud-init Quadlet `Exec` line. This limits pending and
 active sessions across accounts without changing `-open` or exact-address bans.
 See [capacity semantics](../docs/monitoring.md#capacity-semantics).
@@ -225,5 +266,9 @@ See [capacity semantics](../docs/monitoring.md#capacity-semantics).
 
 - `9600/tcp`: TLS control plane
 - `9601/udp`: encrypted voice
-- `9603/tcp`: encrypted screen-share relay (required when `-screen-share` is enabled)
-- `9602/tcp`: optional plaintext metrics and health HTTP. It is disabled and not published by default. If enabled, bind it to a trusted interface or require explicit controls such as IP allowlisting, authenticated proxy access, and TLS.
+- `9603/tcp`: encrypted screen-share relay (required when `-screen-share` is
+  enabled)
+- `9602/tcp`: optional plaintext metrics and health HTTP. It is disabled and not
+  published by default. If enabled, bind it to a trusted interface or require
+  explicit controls such as IP allowlisting, authenticated proxy access, and
+  TLS.

@@ -10,11 +10,13 @@ reproducible.
 ## Prerequisites
 
 - **Podman** (or Docker) is used for container builds.
-- **Go 1.27.4 or newer** is only needed for local development without containers.
+- **Go 1.27.4 or newer** is only needed for local development without
+  containers.
 
 ## Quick Build
 
-Before starting the server, prepare its data mount using the [rootful or rootless instructions](#server-container).
+Before starting the server, prepare its data mount using the
+[rootful or rootless instructions](#server-container).
 
 ### Using Docker Compose
 
@@ -50,10 +52,11 @@ docker compose --profile dev run --build lint
 Release CI inspects Linux dependencies with `ldd`, Windows imports with
 `objdump`, and macOS dependencies with `otool -L`. The Windows PortAudio and
 Opus libraries are linked statically. Linux users need the runtime PortAudio,
-Opus, OpenGL, X11, and Wayland libraries supplied by their distribution. On Debian or
-Ubuntu, install `libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2
-libxinerama1 libxi6 libxxf86vm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 libegl1`. macOS users need `portaudio` and `opus` from
-Homebrew until GoSpeak ships an application bundle.
+Opus, OpenGL, X11, and Wayland libraries supplied by their distribution. On
+Debian or Ubuntu, install
+`libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 libegl1`.
+macOS users need `portaudio` and `opus` from Homebrew until GoSpeak ships an
+application bundle.
 
 Release tags must use SemVer without build metadata. Push one release tag at a
 time and wait for its workflow to finish: GitHub Actions keeps only one pending
@@ -92,20 +95,40 @@ architecture; Windows outputs remain `amd64`.
 
 ### Layer Caching Strategy
 
-1. **System dependencies** are installed before source copies and release metadata.
-2. **Windows native libraries** depend on their pinned source refs and CMake config,
-   not Go source or version metadata.
+1. **System dependencies** are installed before source copies and release
+   metadata.
+2. **Windows native libraries** depend on their pinned source refs and CMake
+   config, not Go source or version metadata.
 3. **Go modules** stay cached until `go.mod` or `go.sum` changes.
 4. **Go source and version flags** feed only the requested build paths. Source
    changes rerun compilation, not apt or CMake.
 
 ## Server Container
 
-The server runs as UID:GID `10001:10001`; `/data` is owned by that account with mode `0700`. Fresh named volumes inherit this directory. The supplied Compose files drop all Linux capabilities and set `no-new-privileges`.
+The server runs as UID:GID `10001:10001`; `/data` is owned by that account with
+mode `0700`. Fresh named volumes inherit this directory. The supplied Compose
+files drop all Linux capabilities and set `no-new-privileges`.
 
-For a fresh development Compose bind mount with a rootful engine without user-namespace remapping, run `sudo install -d -m 0700 -o 10001 -g 10001 ./data` before starting. For rootless Podman, run `podman unshare install -d -m 0700 -o 10001 -g 10001 ./data` as the invoking user on a fresh path instead; do not first assign host UID 10001. Other engines, including rootless Docker, require their own user-namespace/mapping procedure: container UID 10001 is not necessarily host UID 10001.
+For a fresh development Compose bind mount with a rootful engine without
+user-namespace remapping, run `sudo install -d -m 0700 -o 10001 -g 10001 ./data`
+before starting. For rootless Podman, run
+`podman unshare install -d -m 0700 -o 10001 -g 10001 ./data` as the invoking
+user on a fresh path instead; do not first assign host UID 10001. Other engines,
+including rootless Docker, require their own user-namespace/mapping procedure:
+container UID 10001 is not necessarily host UID 10001.
 
-For existing bind mounts or named volumes, stop the server and restart/update automation, take a private backup, and migrate only the dedicated GoSpeak data path without following symlinks. The directory and its database, sidecars, certificates and bootstrap file must belong to container UID:GID `10001:10001`; retain `0700` directories and `0600` private files. Rootless namespace ownership changes work only on accessible data owned by or mapped to that rootless user. Data owned by host root or an external host UID (including host UID 10001) requires a privileged, explicitly scoped migration to the engine's actual mapped host owner first; an unprivileged namespace chown cannot repair it. Verify ownership and modes in the engine's namespace before starting or enabling auto-updates; wrong ownership fails closed. The image does not repair permissions or start as root.
+For existing bind mounts or named volumes, stop the server and restart/update
+automation, take a private backup, and migrate only the dedicated GoSpeak data
+path without following symlinks. The directory and its database, sidecars,
+certificates and bootstrap file must belong to container UID:GID `10001:10001`;
+retain `0700` directories and `0600` private files. Rootless namespace ownership
+changes work only on accessible data owned by or mapped to that rootless user.
+Data owned by host root or an external host UID (including host UID 10001)
+requires a privileged, explicitly scoped migration to the engine's actual mapped
+host owner first; an unprivileged namespace chown cannot repair it. Verify
+ownership and modes in the engine's namespace before starting or enabling
+auto-updates; wrong ownership fails closed. The image does not repair
+permissions or start as root.
 
 The runtime image contains only the statically linked server. It has no shell,
 package manager, C runtime, or CA bundle because the server accepts inbound TLS
@@ -122,30 +145,12 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 
 ### Server Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-control` | `:9600` | TCP/TLS control plane bind address |
-| `-voice` | `:9601` | UDP voice bind address |
-| `-db` | `gospeak.db` | SQLite database path |
-| `-data` | `.` | Directory for automatic TLS and bootstrap credential files; `-db` controls the database separately |
-| `-cert` | *(empty)* | Custom TLS certificate, including self-signed; requires `-key` |
-| `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
-| `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
-| `-screen` | `:9603` | TCP/TLS screen-share relay bind address; at most 256 bytes when screen sharing is enabled |
-| `-screen-share` | `false` | Enable per-channel screen sharing |
-| `-channels-file` | *(none)* | YAML file defining channels to create on startup |
-| `-metrics` | *(empty)* | HTTP bind address for Prometheus `/metrics` and `/healthz`; disabled by default |
-| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; supported range 1..1024, non-positive values use the default |
-| `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
-| `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
-| `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
-| `-control-messages-per-second` | `10` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
-| `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
-| `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
-| `-export-users` | `false` | Export all users as YAML and exit |
-| `-export-channels` | `false` | Export all channels as YAML and exit |
+The [server options reference](../deploy/README.md#server-options) lists all
+flags, defaults, and supported limits.
 
-File-backed exports require an existing `-db` source. A missing source fails before database creation or migration. Normal server startup still creates a missing database.
+File-backed exports require an existing `-db` source. A missing source fails
+before database creation or migration. Normal server startup still creates a
+missing database.
 
 ## Local Development (Without Containers)
 
@@ -182,8 +187,8 @@ go build -tags nolibopusfile ./cmd/client/
 
 ### macOS
 
-Go 1.27 builds require macOS 13 Ventura or newer.
-Install the Xcode Command Line Tools first so a C compiler is available, then:
+Go 1.27 builds require macOS 13 Ventura or newer. Install the Xcode Command Line
+Tools first so a C compiler is available, then:
 
 ```bash
 brew install pkg-config portaudio opus

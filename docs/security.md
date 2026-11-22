@@ -4,9 +4,20 @@ GoSpeak encrypts the control, voice, and screen planes. The optional metrics and
 health endpoint is plaintext, unauthenticated HTTP, so it is disabled by default
 and must be restricted separately when enabled.
 
-> **Note on the shared key model:** Voice uses one server-wide media key distributed to all clients. Screen sharing uses a separate key per active share, distributed to the sharer and authorized channel members. The server generates both keys and can decrypt media if compromised.
+> **Note on the shared key model:** Voice uses one server-wide media key
+> distributed to all clients. Screen sharing uses a separate key per active
+> share, distributed to the sharer and authorized channel members. The server
+> generates both keys and can decrypt media if compromised.
 
-Text chat is protected in transit by the control connection's TLS, not end-to-end encrypted. By default, the server stores message text and sender names in SQLite, returns up to 30 days of history, and targets 500 retained messages per channel. Age-expired rows are removed by bounded sweeps, so they may remain in the database longer. Operators can change `-chat-max-age` and `-chat-history-limit`, or set the history limit to `0` for live-only chat. This hides existing stored messages without deleting them; they can reappear if storage is re-enabled. The server checks channel scope for reads and writes; moderators and administrators can delete stored messages.
+Text chat is protected in transit by the control connection's TLS, not
+end-to-end encrypted. By default, the server stores message text and sender
+names in SQLite, returns up to 30 days of history, and targets 500 retained
+messages per channel. Age-expired rows are removed by bounded sweeps, so they
+may remain in the database longer. Operators can change `-chat-max-age` and
+`-chat-history-limit`, or set the history limit to `0` for live-only chat. This
+hides existing stored messages without deleting them; they can reappear if
+storage is re-enabled. The server checks channel scope for reads and writes;
+moderators and administrators can delete stored messages.
 
 ## Threat Model
 
@@ -52,19 +63,62 @@ graph TB
 
 ## Control Plane Security (TLS 1.3)
 
-- The control plane uses **TLS 1.3** (the latest version) for all TCP connections
-- Clients send a control Ping every 60 seconds. The server closes authenticated control connections after five minutes without a complete valid message; voice and screen traffic do not renew this idle deadline. After authentication, both client and server allow five seconds to finish a control frame after its first plaintext byte arrives. Partial traffic does not extend the completion deadline.
-- On first run, the server automatically generates a **self-signed ECDSA P-256 certificate** when both `-cert` and `-key` are empty
-- The automatic certificate is valid for 1 year, with SAN for `localhost`, `127.0.0.1`, and `::1`
-- The first new TLS connection within 30 days of expiry renews it, even if the server has stayed up continuously. Renewal keeps the existing private key, so saved TOFU fingerprints remain valid. If renewal fails while the cached certificate is still valid, GoSpeak serves that certificate and retries on a later connection; it fails closed after expiry
-- Files at the automatic paths must contain GoSpeak's self-signed ECDSA P-256 material. Configure CA-issued, RSA, or otherwise operator-managed pairs explicitly with `-cert` and `-key`
-- Custom matching certificate/key pairs, including self-signed pairs, can be provided via `-cert` and `-key`. Each listener rereads the pair on new handshakes at most once per minute, validates it before replacing its cache, and never writes operator files. Invalid replacements retain a still-valid cache with one-minute retries; an invalid cache fails closed. Same-key renewals preserve identity; key changes still require normal client verification and TOFU re-trust. Control and screen caches are independent, so coordinate a restart for key changes
-- Certificate handling fails closed: partial configuration, missing files, malformed PEM, mismatched keys, expired or not-yet-valid custom certificates, and damaged or foreign automatic files stop startup without overwriting existing material
-- Initial automatic files are published without replacing existing paths; the private key is created with mode `0600`. Renewal syncs a same-directory temporary certificate before replacing only `server.crt` and leaves `server.key` unchanged. Unix uses an atomic rename plus directory sync; Windows uses `MoveFileEx` with replace-existing and write-through flags
-- Clients first try normal system-PKI and hostname verification. A certificate that is not publicly trusted is rejected until the user verifies and explicitly accepts its SHA-256 SubjectPublicKeyInfo fingerprint
-- Accepted TOFU pins are stored by normalized control address in the bookmark file. Subsequent control connections require the same public key; screen connections require the exact identity established by the control connection
-- Client settings and token-bearing bookmarks are read and replaced only through single-link files owned by the current user. GoSpeak rejects symlinks and reparse points throughout current and legacy paths, tightens Unix files to `0600`, and applies current-user-only Windows ACLs before reading. Legacy files remain usable in place until the user explicitly approves migration. Confirmed migration copies the exact validated bytes, never clobbers differing current configuration, revalidates the source before cleanup, and removes each legacy file only after securely publishing an equivalent protected replacement. If safe deletion is unavailable, migration reports the cleanup error and keeps the legacy path
-- A changed TOFU pin is treated as a possible MITM and blocks the connection. Replacing it requires an explicit re-trust confirmation that displays both fingerprints
+- The control plane uses **TLS 1.3** (the latest version) for all TCP
+  connections
+- Clients send a control Ping every 60 seconds. The server closes authenticated
+  control connections after five minutes without a complete valid message; voice
+  and screen traffic do not renew this idle deadline. After authentication, both
+  client and server allow five seconds to finish a control frame after its first
+  plaintext byte arrives. Partial traffic does not extend the completion
+  deadline.
+- On first run, the server automatically generates a **self-signed ECDSA P-256
+  certificate** when both `-cert` and `-key` are empty
+- The automatic certificate is valid for 1 year, with SAN for `localhost`,
+  `127.0.0.1`, and `::1`
+- The first new TLS connection within 30 days of expiry renews it, even if the
+  server has stayed up continuously. Renewal keeps the existing private key, so
+  saved TOFU fingerprints remain valid. If renewal fails while the cached
+  certificate is still valid, GoSpeak serves that certificate and retries on a
+  later connection; it fails closed after expiry
+- Files at the automatic paths must contain GoSpeak's self-signed ECDSA P-256
+  material. Configure CA-issued, RSA, or otherwise operator-managed pairs
+  explicitly with `-cert` and `-key`
+- Custom matching certificate/key pairs, including self-signed pairs, can be
+  provided via `-cert` and `-key`. Each listener rereads the pair on new
+  handshakes at most once per minute, validates it before replacing its cache,
+  and never writes operator files. Invalid replacements retain a still-valid
+  cache with one-minute retries; an invalid cache fails closed. Same-key
+  renewals preserve identity; key changes still require normal client
+  verification and TOFU re-trust. Control and screen caches are independent, so
+  coordinate a restart for key changes
+- Certificate handling fails closed: partial configuration, missing files,
+  malformed PEM, mismatched keys, expired or not-yet-valid custom certificates,
+  and damaged or foreign automatic files stop startup without overwriting
+  existing material
+- Initial automatic files are published without replacing existing paths; the
+  private key is created with mode `0600`. Renewal syncs a same-directory
+  temporary certificate before replacing only `server.crt` and leaves
+  `server.key` unchanged. Unix uses an atomic rename plus directory sync;
+  Windows uses `MoveFileEx` with replace-existing and write-through flags
+- Clients first try normal system-PKI and hostname verification. A certificate
+  that is not publicly trusted is rejected until the user verifies and
+  explicitly accepts its SHA-256 SubjectPublicKeyInfo fingerprint
+- Accepted TOFU pins are stored by normalized control address in the bookmark
+  file. Subsequent control connections require the same public key; screen
+  connections require the exact identity established by the control connection
+- Client settings and token-bearing bookmarks are read and replaced only through
+  single-link files owned by the current user. GoSpeak rejects symlinks and
+  reparse points throughout current and legacy paths, tightens Unix files to
+  `0600`, and applies current-user-only Windows ACLs before reading. Legacy
+  files remain usable in place until the user explicitly approves migration.
+  Confirmed migration copies the exact validated bytes, never clobbers differing
+  current configuration, revalidates the source before cleanup, and removes each
+  legacy file only after securely publishing an equivalent protected
+  replacement. If safe deletion is unavailable, migration reports the cleanup
+  error and keeps the legacy path
+- A changed TOFU pin is treated as a possible MITM and blocks the connection.
+  Replacing it requires an explicit re-trust confirmation that displays both
+  fingerprints
 
 ### TLS Configuration
 
@@ -75,11 +129,25 @@ tlsCfg := &tls.Config{
 }
 ```
 
-The client uses `VerifyConnection` as the mandatory verification path. Public certificates are checked against the operating-system roots and requested hostname. Screen connections also require the same SHA-256 SPKI fingerprint as the authenticated control connection, including in system-PKI mode. Control and screen TLS endpoints must use the same public key. For a saved self-signed server, the callback compares the peer's SHA-256 SPKI fingerprint to the stored pin and also rejects certificates outside their validity period. `InsecureSkipVerify` is set only to delegate the built-in verification to that non-optional callback; it never means unconditional acceptance.
+The client uses `VerifyConnection` as the mandatory verification path. Public
+certificates are checked against the operating-system roots and requested
+hostname. Screen connections also require the same SHA-256 SPKI fingerprint as
+the authenticated control connection, including in system-PKI mode. Control and
+screen TLS endpoints must use the same public key. For a saved self-signed
+server, the callback compares the peer's SHA-256 SPKI fingerprint to the stored
+pin and also rejects certificates outside their validity period.
+`InsecureSkipVerify` is set only to delegate the built-in verification to that
+non-optional callback; it never means unconditional acceptance.
 
 ### Self-Signed Upgrade and Recovery
 
-Existing bookmarks load without a pin and therefore prompt on their first connection after upgrading. Compare the displayed fingerprint with a value obtained directly from the server operator before accepting it. If a server certificate or key is intentionally replaced, the next connection fails with an identity-change warning. Verify the new fingerprint independently before using the explicit re-trust action. Do not re-trust an unexpected change merely to restore connectivity.
+Existing bookmarks load without a pin and therefore prompt on their first
+connection after upgrading. Compare the displayed fingerprint with a value
+obtained directly from the server operator before accepting it. If a server
+certificate or key is intentionally replaced, the next connection fails with an
+identity-change warning. Verify the new fingerprint independently before using
+the explicit re-trust action. Do not re-trust an unexpected change merely to
+restore connectivity.
 
 ## Voice encryption
 
@@ -100,21 +168,51 @@ sequenceDiagram
 ```
 
 - One shared voice key per server process (generated at startup)
-- Key is distributed to each client during authentication, inside the encrypted TLS tunnel
+- Key is distributed to each client during authentication, inside the encrypted
+  TLS tunnel
 - All clients in the server share the same voice key
-- The server selects `-media-cipher aes128|aes256|chacha20` (`aes128` by default). It rejects clients that do not advertise the selected suite. The client checks the TLS-authenticated response's explicit suite and key length before opening media connections. Missing or unknown suites fail closed; older clients and servers must upgrade together.
+- The server selects `-media-cipher aes128|aes256|chacha20` (`aes128` by
+  default). It rejects clients that do not advertise the selected suite. The
+  client checks the TLS-authenticated response's explicit suite and key length
+  before opening media connections. Missing or unknown suites fail closed; older
+  clients and servers must upgrade together.
 
 ### UDP Endpoint Registration
 
-The shared media key does not authorize a UDP source address. Each control session receives a separate random 256-bit registration key in `AuthResponse`, protected by TLS. Its HMAC proves key possession, but a key holder could still spoof a packet's source. GSR2 therefore requires a random, session/address-bound challenge response within three seconds before installing a new, changed or expired destination. Requests use increasing 64-bit counters; returned proofs are one-use. Endpoint changes remain limited to one per five seconds. Ordinary voice packets never establish or change the endpoint.
+The shared media key does not authorize a UDP source address. Each control
+session receives a separate random 256-bit registration key in `AuthResponse`,
+protected by TLS. Its HMAC proves key possession, but a key holder could still
+spoof a packet's source. GSR2 therefore requires a random, session/address-bound
+challenge response within three seconds before installing a new, changed or
+expired destination. Requests use increasing 64-bit counters; returned proofs
+are one-use. Endpoint changes remain limited to one per five seconds. Ordinary
+voice packets never establish or change the endpoint.
 
-The client refreshes registration every five seconds even while silent. After 30 seconds without valid authenticated endpoint activity, forwarding stops until a fresh challenge exchange succeeds. Invalid or replayed traffic cannot keep a recipient alive. One pending challenge per session and equal-sized request/reply datagrams bound retained state and reflection; accepted registration legs share the voice pacing budget. Unauthenticated input has fixed-size parsing/HMAC work and receives no challenge. These bounds do not provide an aggregate UDP CPU or bandwidth guarantee.
+The client refreshes registration every five seconds even while silent. After 30
+seconds without valid authenticated endpoint activity, forwarding stops until a
+fresh challenge exchange succeeds. Invalid or replayed traffic cannot keep a
+recipient alive. One pending challenge per session and equal-sized request/reply
+datagrams bound retained state and reflection; accepted registration legs share
+the voice pacing budget. Unauthenticated input has fixed-size parsing/HMAC work
+and receives no challenge. These bounds do not provide an aggregate UDP CPU or
+bandwidth guarantee.
 
-GSR2 clients and servers must upgrade together; GSR1 HMAC-only registration has no fallback. This prevents an off-path key holder from directing voice at an unanswered spoofed destination. An on-path attacker can still observe challenges or drop traffic. Connectivity remains direct UDP with no STUN or TURN service. See the [wire format and expiry rules](protocol.md#authenticated-endpoint-registration).
+GSR2 clients and servers must upgrade together; GSR1 HMAC-only registration has
+no fallback. This prevents an off-path key holder from directing voice at an
+unanswered spoofed destination. An on-path attacker can still observe challenges
+or drop traffic. Connectivity remains direct UDP with no STUN or TURN service.
+See the
+[wire format and expiry rules](protocol.md#authenticated-endpoint-registration).
 
 ### Voice forwarding limits
 
-Each session has packet and byte budgets for authenticated, replay-accepted voice traffic. The packet budget refills at 50 packets per second and holds a burst of 100 packets. The byte budget refills at 50 times the maximum voice packet size per second and holds 100 times that size; it counts the voice header and encrypted payload. Packets that exceed either budget are dropped before forwarding. These limits bound per-session forwarding, not aggregate bandwidth or packet-authentication CPU.
+Each session has packet and byte budgets for authenticated, replay-accepted
+voice traffic. The packet budget refills at 50 packets per second and holds a
+burst of 100 packets. The byte budget refills at 50 times the maximum voice
+packet size per second and holds 100 times that size; it counts the voice header
+and encrypted payload. Packets that exceed either budget are dropped before
+forwarding. These limits bound per-session forwarding, not aggregate bandwidth
+or packet-authentication CPU.
 
 ### Encryption Process
 
@@ -125,12 +223,16 @@ For each voice packet:
    - Bytes 4-7: `SeqNum` (uint32, big-endian)
    - Bytes 8-11: `0x00000000` (padding)
 
-   Session IDs are allocated without reuse for the lifetime of the shared voice key, including after disconnect. Sequence numbers start at one and may not wrap; an exhausted sender must reconnect before sending more voice data.
+   Session IDs are allocated without reuse for the lifetime of the shared voice
+   key, including after disconnect. Sequence numbers start at one and may not
+   wrap; an exhausted sender must reconnect before sending more voice data.
 
 2. **Authenticated encryption**:
-   - **Algorithm**: AES-128-GCM, AES-256-GCM, or ChaCha20-Poly1305, as selected by the server
+   - **Algorithm**: AES-128-GCM, AES-256-GCM, or ChaCha20-Poly1305, as selected
+     by the server
    - **Plaintext**: Opus-encoded audio frame
-   - **Additional Data (AD)**: 20-byte packet header (SessionID + SeqNum + Timestamp + ChannelID)
+   - **Additional Data (AD)**: 20-byte packet header (SessionID + SeqNum +
+     Timestamp + ChannelID)
    - **Output**: Ciphertext + 16-byte authentication tag
 
 3. **Packet assembly**:
@@ -151,15 +253,36 @@ For each voice packet:
 
 ## Screen share encryption
 
-- One key for the selected media cipher is generated for each active screen share. Active events carry the suite; clients disconnect on a missing or mismatched choice or invalid key.
-- The key is delivered over the TLS control plane to the sharer and to users already in the channel when the share starts.
-- If additional users join later, the sharer can share the active key with the current channel members again in one action.
+- One key for the selected media cipher is generated for each active screen
+  share. Active events carry the suite; clients disconnect on a missing or
+  mismatched choice or invalid key.
+- The key is delivered over the TLS control plane to the sharer and to users
+  already in the channel when the share starts.
+- If additional users join later, the sharer can share the active key with the
+  current channel members again in one action.
 - Encrypted screen packets travel on the dedicated screen TLS connection.
-- The server transiently authenticates and opens each packet, then forwards the original authenticated ciphertext to subscribed viewers without parsing, decoding, logging, or retaining frame plaintext.
-- Viewers treat authenticated frames as untrusted input. Before decoding pixels, they require JPEG format, positive dimensions no larger than 8192 per axis and 16,777,216 pixels in total, and an exact match between the frame metadata and JPEG header. Invalid frames are dropped. These checks require an updated client; the relay does not protect older viewers from malicious image content.
-- Relay tuning: a share with no authenticated activity for 15 seconds is expired (a janitor sweeps every 5 seconds), and the sharer may send at most one frame per 500 milliseconds; faster frames are identified at the fixed header, then their payloads are drained and discarded without a payload-sized allocation to keep the stream synchronized.
+- The server transiently authenticates and opens each packet, then forwards the
+  original authenticated ciphertext to subscribed viewers without parsing,
+  decoding, logging, or retaining frame plaintext.
+- Viewers treat authenticated frames as untrusted input. Before decoding pixels,
+  they require JPEG format, positive dimensions no larger than 8192 per axis and
+  16,777,216 pixels in total, and an exact match between the frame metadata and
+  JPEG header. Invalid frames are dropped. These checks require an updated
+  client; the relay does not protect older viewers from malicious image content.
+- Relay tuning: a share with no authenticated activity for 15 seconds is expired
+  (a janitor sweeps every 5 seconds), and the sharer may send at most one frame
+  per 500 milliseconds; faster frames are identified at the fixed header, then
+  their payloads are drained and discarded without a payload-sized allocation to
+  keep the stream synchronized.
 
-Screen packet nonces follow the same deterministic pattern as voice, using the sharer's `SessionID` and a sequence number that continues across key changes within one authenticated control connection. A new key creates fresh replay state on the server and viewers, but does not reset the sender's counter. The counter resets only for a new control-connection generation, and sharing stops before it can wrap. The ordered relay authenticates a frame before committing its strictly increasing sequence, so duplicate and out-of-order frames are rejected without letting forged high sequences poison the state.
+Screen packet nonces follow the same deterministic pattern as voice, using the
+sharer's `SessionID` and a sequence number that continues across key changes
+within one authenticated control connection. A new key creates fresh replay
+state on the server and viewers, but does not reset the sender's counter. The
+counter resets only for a new control-connection generation, and sharing stops
+before it can wrap. The ordered relay authenticates a frame before committing
+its strictly increasing sequence, so duplicate and out-of-order frames are
+rejected without letting forged high sequences poison the state.
 
 ## Authentication & Token System
 
@@ -179,21 +302,89 @@ graph TB
 ```
 
 - Tokens are 256-bit random values (64 hex characters)
-- Invite and personal tokens are stored as SHA-256 hashes. Pending bootstrap issuance also stores secret retry material in the database. Protect database backups as credentials, including after setup completes.
-- Saved client bookmarks contain personal tokens in plaintext so the client can reconnect. The bookmark file is atomically written with mode `0600` under the operating system's user config directory (`gospeak/`). When legacy bookmark or settings files are found beside the executable, the client asks before migrating them. Choosing No keeps those files as the active persistence destinations. After confirmation, each original is removed only after its exact bytes are validated and published successfully; conflicting or concurrently changed files are preserved for manual resolution. Protect the user account and its config directory accordingly.
-- Invite tokens can have: role assignment, channel scope, max uses, expiration. New scoped invites require a permanent channel; existing temporary-scoped credentials and accounts are preserved. A non-zero channel scope is enforced by the server: the client auto-joins that channel and cannot join another channel. The generated personal token retains this restriction on later logins. Existing users and unscoped tokens remain server-wide.
-- Redeeming an invite, creating its user, and storing the new personal-token hash happen in one database transaction. A failed user creation therefore does not consume an invite use. Credential failures use the same external error response, while detailed causes remain in server logs.
-- The client reserves personal-token callback capacity before authenticating. A full reliable callback queue rejects the connection before authentication. After successful authentication, token delivery survives media setup failure, cancellation and a replacement attempt, and stays bound to the original server/account. Saving follows that attempt's bookmark choice; a failed save leaves the token visible and copyable.
-- New non-bootstrap accounts are limited to 120 successful provisions per tracked source group per hour (one IPv4 address or one IPv6 /64; IPv4-mapped IPv6 counts as IPv4). People sharing a group share its budget. At tracker capacity, the idle entry that expires soonest is evicted to admit a fresh group; returning evicted groups start a new budget. In-flight reservations are never evicted. Failed attempts release their provisioning reservation but remain subject to the separate authentication-failure limit. This bound also applies in open-server mode and does not disable tokenless first login. This grouping does not change exact-address IP bans.
-- On first server run, an admin bootstrap credential is written atomically to `bootstrap-admin.token` in the configured data directory. It is protected by mode `0600` and owner checks on POSIX, or a protected owner-only ACL on Windows, and is read without following the final symlink/reparse component. Normal logs contain only the credential path.
-- Bootstrap provisioning is transactional and retryable for one administrator. Independent random retry material in the database keeps the personal token stable across response loss and restarts. Authenticate with that personal token promptly to invalidate the setup credential, clear the retry material and remove the setup file. Until then, possession of the setup credential allows retries for the bound owner.
-- Upgrades expire the unlimited, non-expiring administrator invite logged by pre-bootstrap servers. Existing accounts and their personal tokens remain unchanged, as do user-created invitations and bootstrap owner markers. The expired row stays in the database so startup cannot issue a replacement setup credential. If no usable administrator account exists, operator-local database recovery is required.
-- In Settings - Personal Credential, every account can rotate its own personal token after private staging; failed saves send no mutation. Rotation and revocation retire all target control, voice and screen sessions, leaving only a bounded initiating response transport, then require reconnection. Pending candidates survive restart; check the saved candidate before retrying that exact operation, and never replace it because an acknowledgement was lost. If recovery is needed, explicitly redeem a fresh grant for the same account while retaining the candidate, or enter and verify an operator-recovered personal credential to reconcile the pending record. Admins can revoke ordinary accounts/moderators; only the bootstrap owner can revoke another admin, and no other remote actor can revoke the owner. Server Settings - Manage Personal Credentials issues account-bound 15-minute single-use recovery grants for ordinary accounts only, or revokes them; hand grants over privately so the recovering user chooses their own final token. Owner/admin recovery is operator-local. Already emitted network bytes cannot be recalled.
-- Credentials are not rotated automatically. If startup warns that an owner credential requires rotation, coordinate offline rotation with that owner and preserve the owner account and marker. The stopped-service `cmd/recover-token` tool accepts a privately retained replacement through protected stdin and atomically finalizes pending owner setup while preserving account ID, role, scope and the owner marker; see [operator recovery](../deploy/README.md#backup-and-restore). Never supply personal credentials in command-line arguments or environment variables.
+- Invite and personal tokens are stored as SHA-256 hashes. Pending bootstrap
+  issuance also stores secret retry material in the database. Protect database
+  backups as credentials, including after setup completes.
+- Saved client bookmarks contain personal tokens in plaintext so the client can
+  reconnect. The bookmark file is atomically written with mode `0600` under the
+  operating system's user config directory (`gospeak/`). When legacy bookmark or
+  settings files are found beside the executable, the client asks before
+  migrating them. Choosing No keeps those files as the active persistence
+  destinations. After confirmation, each original is removed only after its
+  exact bytes are validated and published successfully; conflicting or
+  concurrently changed files are preserved for manual resolution. Protect the
+  user account and its config directory accordingly.
+- Invite tokens can have: role assignment, channel scope, max uses, expiration.
+  New scoped invites require a permanent channel; existing temporary-scoped
+  credentials and accounts are preserved. A non-zero channel scope is enforced
+  by the server: the client auto-joins that channel and cannot join another
+  channel. The generated personal token retains this restriction on later
+  logins. Existing users and unscoped tokens remain server-wide.
+- Redeeming an invite, creating its user, and storing the new personal-token
+  hash happen in one database transaction. A failed user creation therefore does
+  not consume an invite use. Credential failures use the same external error
+  response, while detailed causes remain in server logs.
+- The client reserves personal-token callback capacity before authenticating. A
+  full reliable callback queue rejects the connection before authentication.
+  After successful authentication, token delivery survives media setup failure,
+  cancellation and a replacement attempt, and stays bound to the original
+  server/account. Saving follows that attempt's bookmark choice; a failed save
+  leaves the token visible and copyable.
+- New non-bootstrap accounts are limited to 120 successful provisions per
+  tracked source group per hour (one IPv4 address or one IPv6 /64; IPv4-mapped
+  IPv6 counts as IPv4). People sharing a group share its budget. At tracker
+  capacity, the idle entry that expires soonest is evicted to admit a fresh
+  group; returning evicted groups start a new budget. In-flight reservations are
+  never evicted. Failed attempts release their provisioning reservation but
+  remain subject to the separate authentication-failure limit. This bound also
+  applies in open-server mode and does not disable tokenless first login. This
+  grouping does not change exact-address IP bans.
+- On first server run, an admin bootstrap credential is written atomically to
+  `bootstrap-admin.token` in the configured data directory. It is protected by
+  mode `0600` and owner checks on POSIX, or a protected owner-only ACL on
+  Windows, and is read without following the final symlink/reparse component.
+  Normal logs contain only the credential path.
+- Bootstrap provisioning is transactional and retryable for one administrator.
+  Independent random retry material in the database keeps the personal token
+  stable across response loss and restarts. Authenticate with that personal
+  token promptly to invalidate the setup credential, clear the retry material
+  and remove the setup file. Until then, possession of the setup credential
+  allows retries for the bound owner.
+- Upgrades expire the unlimited, non-expiring administrator invite logged by
+  pre-bootstrap servers. Existing accounts and their personal tokens remain
+  unchanged, as do user-created invitations and bootstrap owner markers. The
+  expired row stays in the database so startup cannot issue a replacement setup
+  credential. If no usable administrator account exists, operator-local database
+  recovery is required.
+- In Settings - Personal Credential, every account can rotate its own personal
+  token after private staging; failed saves send no mutation. Rotation and
+  revocation retire all target control, voice and screen sessions, leaving only
+  a bounded initiating response transport, then require reconnection. Pending
+  candidates survive restart; check the saved candidate before retrying that
+  exact operation, and never replace it because an acknowledgement was lost. If
+  recovery is needed, explicitly redeem a fresh grant for the same account while
+  retaining the candidate, or enter and verify an operator-recovered personal
+  credential to reconcile the pending record. Admins can revoke ordinary
+  accounts/moderators; only the bootstrap owner can revoke another admin, and no
+  other remote actor can revoke the owner. Server Settings - Manage Personal
+  Credentials issues account-bound 15-minute single-use recovery grants for
+  ordinary accounts only, or revokes them; hand grants over privately so the
+  recovering user chooses their own final token. Owner/admin recovery is
+  operator-local. Already emitted network bytes cannot be recalled.
+- Credentials are not rotated automatically. If startup warns that an owner
+  credential requires rotation, coordinate offline rotation with that owner and
+  preserve the owner account and marker. The stopped-service `cmd/recover-token`
+  tool accepts a privately retained replacement through protected stdin and
+  atomically finalizes pending owner setup while preserving account ID, role,
+  scope and the owner marker; see
+  [operator recovery](../deploy/README.md#backup-and-restore). Never supply
+  personal credentials in command-line arguments or environment variables.
 
 ### Open Server Mode
 
-When `AllowNoToken` is enabled, clients can connect without an invite token and receive the `user` role. The server issues a **personal token** on first login; that personal token is required for future logins with the same username.
+When `AllowNoToken` is enabled, clients can connect without an invite token and
+receive the `user` role. The server issues a **personal token** on first login;
+that personal token is required for future logins with the same username.
 
 ## Role-Based Access Control (RBAC)
 
@@ -226,24 +417,46 @@ graph TB
     MOD --> P6
 ```
 
-Every admin operation is checked server-side via `rbac.HasPermission()` before execution. The client's role is determined by the stored user role, and logins require the user's personal token.
+Every admin operation is checked server-side via `rbac.HasPermission()` before
+execution. The client's role is determined by the stored user role, and logins
+require the user's personal token.
 
 ### Moderation and ban privacy
 
-- Moderators may kick ordinary users only. They cannot kick moderators or administrators and cannot create, inspect, or remove bans.
-- Administrators may kick or ban ordinary users, moderators, and other administrators. Self-kick and self-ban are rejected.
-- The administrator provisioned through the bootstrap credential is the remote recovery anchor: it cannot be remotely banned or demoted. Operator-local database recovery remains possible. A later exact-address ban also does not disconnect or block this account.
-- An account ban is identity-only, terminates all current sessions for that account, and is synchronized with authentication so a racing reconnect cannot publish a new session. Zero duration means permanent; positive durations are capped at ten years and invalid values are rejected.
-- An IP ban is a separate, explicit administrator choice tied to one selected live session. It stores one canonical exact address only; it never expands to a subnet. IPv4-mapped IPv6 addresses are normalized to IPv4.
-- Exact-address bans can affect unrelated users behind a shared NAT or VPN. The client warns before creating one, and all matching non-bootstrap sessions are disconnected.
-- Normal kicks and account bans never persist an IP address. Client-supplied moderation reasons are neither persisted, logged, nor echoed to affected connections; disconnect notices are generic. Runtime address use for connection handling and rate limiting remains in memory.
-- Upgrading removes legacy ban reasons and clears legacy IP data that was not created through the explicit IP-ban action.
-- Active account and exact-address bans can be listed in bounded cursor pages and removed only by administrators.
+- Moderators may kick ordinary users only. They cannot kick moderators or
+  administrators and cannot create, inspect, or remove bans.
+- Administrators may kick or ban ordinary users, moderators, and other
+  administrators. Self-kick and self-ban are rejected.
+- The administrator provisioned through the bootstrap credential is the remote
+  recovery anchor: it cannot be remotely banned or demoted. Operator-local
+  database recovery remains possible. A later exact-address ban also does not
+  disconnect or block this account.
+- An account ban is identity-only, terminates all current sessions for that
+  account, and is synchronized with authentication so a racing reconnect cannot
+  publish a new session. Zero duration means permanent; positive durations are
+  capped at ten years and invalid values are rejected.
+- An IP ban is a separate, explicit administrator choice tied to one selected
+  live session. It stores one canonical exact address only; it never expands to
+  a subnet. IPv4-mapped IPv6 addresses are normalized to IPv4.
+- Exact-address bans can affect unrelated users behind a shared NAT or VPN. The
+  client warns before creating one, and all matching non-bootstrap sessions are
+  disconnected.
+- Normal kicks and account bans never persist an IP address. Client-supplied
+  moderation reasons are neither persisted, logged, nor echoed to affected
+  connections; disconnect notices are generic. Runtime address use for
+  connection handling and rate limiting remains in memory.
+- Upgrading removes legacy ban reasons and clears legacy IP data that was not
+  created through the explicit IP-ban action.
+- Active account and exact-address bans can be listed in bounded cursor pages
+  and removed only by administrators.
 
 ## Recommendations for Production
 
 1. **Use proper TLS certificates** (e.g., Let's Encrypt) instead of self-signed
-2. **Restart the server** periodically to generate fresh voice encryption keys (a new key is generated on every startup)
+2. **Restart the server** periodically to generate fresh voice encryption keys
+   (a new key is generated on every startup)
 3. **Use strong tokens** (the default 256-bit random is good)
-4. **Restrict network access**. Only expose ports 9600/tcp, 9601/udp, and 9603/tcp when screen sharing is enabled.
-5. **Protect bootstrap credentials**. Read `bootstrap-admin.token` only through the server administrator account and retain the returned personal token.
+4. **Restrict network access**. Only expose ports 9600/tcp, 9601/udp, and
+   9603/tcp when screen sharing is enabled.
+5. **Protect bootstrap credentials**. Read `bootstrap-admin.token` only through
+   the server administrator account and retain the returned personal token.
