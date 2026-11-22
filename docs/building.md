@@ -64,6 +64,42 @@ run in a concurrency group. Stable releases also update the `latest` container
 tag; prereleases publish only their versioned tag. The GitHub release is created
 only after the scanned container image has been published.
 
+## Friday vulnerability monitoring
+
+`Friday vulnerabilities` runs Fridays at 07:00 UTC (08:00 Zurich in winter,
+09:00 in summer), or manually from Actions. GitHub may delay scheduled runs.
+The workflow must be present on the default branch **main** to activate the
+schedule; it explicitly checks out **v1**, the active release branch. Preparing
+it on v1 alone does not activate it. Change that ref when v1 is retired.
+
+Enable GitHub Settings > Notifications > Actions email/web notifications,
+optionally failed workflows only. Scheduled notifications go to the workflow
+creator (or the last cron editor/re-enabler); Nicolas should own that actor.
+After adoption, run it manually and verify a failed run actually notifies the
+intended account. Neither activation nor delivery is verified by local tests.
+
+- Go: pinned Trivy scans a conservative dependency inventory, including upstream
+  test/tool requirements. Native Go commands download all selected modules into
+  a temporary manifest's sums; only that copy is marked Go 1.16 to enable Trivy's
+  documented go.sum merge. Every selected `go list -m all` dependency/version
+  must appear in the actual scanner report or the job fails. Extra sum entries
+  may produce conservative alerts. Pinned govulncheck separately scans the real
+  toolchain standard library, not the dependency graph. All advisory severities
+  fail; neither check is called-symbol analysis or a C-library scan.
+- Linux: rebuilds only `builder-base`, then Trivy scans Debian OS packages,
+  including PortAudio/Opus. HIGH, CRITICAL and UNKNOWN severity matches fail,
+  including unfixed findings. This covers fresh build inputs, not already
+  installed clients or every Linux distribution. No weekly advisory DB cache.
+- Windows: OSV queries the exact PortAudio/Opus source commits in Containerfile,
+  following pagination. All matches fail, including unscored ones. Empty results
+  do **not** establish upstream indexing completeness; coverage stays UNKNOWN.
+- macOS: floating Homebrew libraries and installed/bundled dylibs are **not
+  covered**. Debian results and Windows commits do not establish Mac coverage.
+
+Tool/network errors fail the relevant job, too. Read the job summary and logs
+for scope, source commit, scanner/database identity, findings and errors. A green
+run means no selected database matches, not proof that no vulnerability exists.
+
 ## Container Build Stages
 
 ```mermaid
