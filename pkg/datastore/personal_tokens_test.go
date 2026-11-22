@@ -29,7 +29,7 @@ func TestPersonalTokenCASRejectsStaleReplacement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		changed, err := tx.ReplacePersonalToken(user.ID, 1, expected, replacement, time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -59,7 +59,7 @@ func credentialTx(t *testing.T, st *datastore.ProviderFactory, change func(datas
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	changed, err := change(tx)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +326,7 @@ func TestPersonalTokenCASConcurrentWriterOrders(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer tx.Rollback()
+			defer func() { _ = tx.Rollback() }()
 			firstHash, secondHash := crypto.HashToken("candidate"), ""
 			if first == "revoke" {
 				firstHash, secondHash = secondHash, firstHash
@@ -348,7 +348,7 @@ func TestPersonalTokenCASConcurrentWriterOrders(t *testing.T) {
 					finished <- result{false, err}
 					return
 				}
-				defer second.Rollback()
+				defer func() { _ = second.Rollback() }()
 				changed, err := second.ReplacePersonalToken(u.ID, 1, old, secondHash, time.Now())
 				if err == nil {
 					err = second.Commit()

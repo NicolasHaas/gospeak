@@ -229,7 +229,7 @@ func TestInteractiveWireChargingAndFinalRejections(t *testing.T) {
 	}
 	// A valid padded envelope crosses the 16KiB byte-cost boundary on the wire.
 	payload := `{"ping":{}}` + strings.Repeat(" ", controlBytesPerCost+1-len(`{"ping":{}}`))
-	if err := binary.Write(peer, binary.BigEndian, uint32(len(payload))); err != nil {
+	if err := binary.Write(peer, binary.BigEndian, uint32(controlBytesPerCost+1)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.Write([]byte(payload)); err != nil {

@@ -141,7 +141,3 @@ func newTLSConfigWithTrust(addr string, trust tlsTrustPolicy, roots *x509.CertPo
 	}
 	return cfg, nil
 }
-
-func tlsConfig(addr, expectedPin string) (*tls.Config, error) {
-	return newTLSConfig(addr, expectedPin, nil)
-}

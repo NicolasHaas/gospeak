@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/NicolasHaas/gospeak/pkg/model"
-	"github.com/NicolasHaas/gospeak/pkg/protocol"
 	"log/slog"
 	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NicolasHaas/gospeak/pkg/model"
+	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
 func TestPreAuthCapacityMetricsTrackOccupancyAndRejections(t *testing.T) {

@@ -2,11 +2,12 @@ package server
 
 import (
 	"context"
+	"testing"
+
 	"github.com/NicolasHaas/gospeak/pkg/client"
 	"github.com/NicolasHaas/gospeak/pkg/crypto"
 	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol/pb"
-	"testing"
 )
 
 func TestPersonalCredentialCASLossFreshGrantRestart(t *testing.T) {
@@ -21,7 +22,9 @@ func TestPersonalCredentialCASLossFreshGrantRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Close()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
 	candidate, _ := crypto.GenerateToken()
 	attempt, _ := crypto.GenerateToken()
 	p := client.PendingPersonalCredential{ControlAddr: addr, ServerIdentity: pin, Username: target.Username, AccountID: target.ID, OldToken: old, Candidate: candidate, Attempt: attempt, Version: auth.CredentialVersion}

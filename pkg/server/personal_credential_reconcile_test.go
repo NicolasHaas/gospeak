@@ -75,7 +75,7 @@ type personalACKLossConn struct{ net.Conn }
 
 func (c personalACKLossConn) Write(data []byte) (int, error) {
 	if bytes.Contains(data, []byte(`"rotate_personal_token_response"`)) || bytes.Contains(data, []byte(`"redeem_personal_recovery_response"`)) {
-		_ = c.Conn.Close()
+		_ = c.Close()
 		return 0, io.ErrClosedPipe
 	}
 	return c.Conn.Write(data)

@@ -55,7 +55,7 @@ func TestLiveSessionRosterWireValidation(t *testing.T) {
 					t.Fatal(err)
 				}
 				wire.Reset()
-				if err := binary.Write(&wire, binary.BigEndian, uint32(len(data))); err != nil {
+				if err := binary.Write(&wire, binary.BigEndian, uint32(len(data))); err != nil { // #nosec G115 -- JSON is a bounded synthetic roster fixture, not external input.
 					t.Fatal(err)
 				}
 				wire.Write(data)
@@ -71,7 +71,9 @@ func TestLiveSessionRosterWireValidation(t *testing.T) {
 	// Legacy envelopes remain readable; clients must disable voice on nil authority.
 	for _, text := range []string{`{"server_state_event":{"channels":[]}}`, `{"auth_response":{"session_id":1}}`} {
 		var wire bytes.Buffer
-		binary.Write(&wire, binary.BigEndian, uint32(len(text)))
+		if err := binary.Write(&wire, binary.BigEndian, uint32(len(text))); err != nil { // #nosec G115 -- Fixed legacy JSON fixtures are far smaller than uint32.
+			t.Fatal(err)
+		}
 		wire.WriteString(text)
 		if _, err := ReadControlMessage(&wire); err != nil {
 			t.Fatal(err)

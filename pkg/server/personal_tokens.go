@@ -63,7 +63,7 @@ func (s *Server) mutatePersonalToken(handler *ControlHandler, sessionID uint32, 
 	if err != nil {
 		return fail("could not change credential")
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	actor, err := tx.GetUserByID(session.UserID)
 	if err != nil || actor == nil || actor.PersonalTokenHash == "" || actor.PersonalTokenHash != client.credentialHash {
 		return fail("permission denied")
@@ -200,7 +200,7 @@ func (s *Server) redeemPersonalRecovery(handler *ControlHandler, st datastore.Da
 		if err != nil {
 			return false
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		target, err := tx.GetUserByID(req.TargetID)
 		if err != nil || target == nil || target.Username != req.Username {
 			return false
@@ -294,13 +294,13 @@ func (s *Server) finishRetiredSessions(handler *ControlHandler, st datastore.Dat
 		_ = r.client.Close()
 		// Close interrupts an in-flight writer; join it before reporting completion.
 		r.client.writeMu.Lock()
-		r.client.writeMu.Unlock()
+		r.client.writeMu.Unlock() //nolint:staticcheck // SA2001: join the interrupted writer before reporting retirement.
 	}
 	if response != nil {
 		if terminal {
 			c := initiating.(*controlClient)
 			c.writeMu.Lock()
-			_ = c.Conn.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
+			_ = c.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
 			_ = protocol.WriteControlMessage(c.Conn, response)
 			c.writeMu.Unlock()
 			_ = c.Close()

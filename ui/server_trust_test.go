@@ -66,7 +66,7 @@ func TestServerTrustRouting(t *testing.T) {
 				}
 				root, _ := os.UserConfigDir()
 				path := filepath.Join(root, "gospeak", "servers.yaml")
-				before, errRead := os.ReadFile(path)
+				before, errRead := os.ReadFile(path) // #nosec G304 -- Read the synthetic bookmark in the isolated test config root.
 				if errRead != nil {
 					t.Fatal(errRead)
 				}
@@ -86,7 +86,7 @@ func TestServerTrustRouting(t *testing.T) {
 					if store.PinForAddr(addr) != "original-pin" || retries != 0 {
 						t.Error("screen failure mutated trust or retried")
 					}
-					after, e := os.ReadFile(path)
+					after, e := os.ReadFile(path) // #nosec G304 -- Re-read the same synthetic bookmark to assert trust was not changed.
 					if e != nil || string(after) != string(before) {
 						t.Error("screen failure saved control trust")
 					}
@@ -144,7 +144,7 @@ func TestControlTrustSaveFailureDoesNotRetry(t *testing.T) {
 	if retries != 0 {
 		t.Fatal("retried after failed save")
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- Read only the synthetic bookmark under the isolated test config root.
 	if err != nil || string(data) != original {
 		t.Fatal("failed save overwrote unreadable bookmarks")
 	}

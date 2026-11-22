@@ -29,10 +29,10 @@ func TestLegacyLoggedAdminInviteUpgradeDoesNotRestartBootstrap(t *testing.T) {
 				_ = raw.Close()
 				t.Fatal(err)
 			}
-			_, fixtureErr := raw.Exec(string(fixture))
+			_, fixtureErr := raw.ExecContext(t.Context(), string(fixture))
 			wantUses := 0
 			if fixtureErr == nil && populated {
-				_, fixtureErr = raw.Exec("INSERT INTO users (username, role, personal_token_hash) VALUES ('legacy-admin', 2, ?); UPDATE tokens SET use_count = 1", crypto.HashToken("synthetic-independent-personal"))
+				_, fixtureErr = raw.ExecContext(t.Context(), "INSERT INTO users (username, role, personal_token_hash) VALUES ('legacy-admin', 2, ?); UPDATE tokens SET use_count = 1", crypto.HashToken("synthetic-independent-personal"))
 				wantUses = 1
 			}
 			closeErr := raw.Close()
@@ -62,7 +62,7 @@ func TestLegacyLoggedAdminInviteUpgradeDoesNotRestartBootstrap(t *testing.T) {
 				state, stateErr := f.NonTx().BootstrapTokenState()
 				var count, uses int
 				var expiry string
-				rowErr := f.DB.QueryRow("SELECT COUNT(*), use_count, expires_at FROM tokens").Scan(&count, &uses, &expiry)
+				rowErr := f.DB.QueryRowContext(t.Context(), "SELECT COUNT(*), use_count, expires_at FROM tokens").Scan(&count, &uses, &expiry)
 				closeErr := f.Close()
 				if stateErr != nil || state != datastore.BootstrapTokenAbsent || rowErr != nil || count != 1 || uses != wantUses || expiry != "1970-01-01 00:00:01" || closeErr != nil {
 					t.Fatalf("bootstrap recreated/legacy lifecycle changed: state=%v stateErr=%v count=%d uses=%d expiry=%q rowErr=%v closeErr=%v", state, stateErr, count, uses, expiry, rowErr, closeErr)

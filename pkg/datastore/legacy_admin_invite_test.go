@@ -25,12 +25,12 @@ func TestMigrationLegacyLoggedAdminInvite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := raw.Exec(string(fixture)); err != nil {
+			if _, err := raw.ExecContext(t.Context(), string(fixture)); err != nil {
 				t.Fatal(err)
 			}
 			// v0.3.0 control.go generates an independent personal token after
 			// redeeming the logged invite; it never installs the invite hash.
-			if _, err := raw.Exec(`INSERT INTO users (username, role, personal_token_hash) VALUES ('legacy-admin', 2, 'independent-personal-hash'); UPDATE tokens SET use_count = 1`); err != nil {
+			if _, err := raw.ExecContext(t.Context(), `INSERT INTO users (username, role, personal_token_hash) VALUES ('legacy-admin', 2, 'independent-personal-hash'); UPDATE tokens SET use_count = 1`); err != nil {
 				t.Fatal(err)
 			}
 			closeRawSQLite(t, raw)
@@ -41,7 +41,7 @@ func TestMigrationLegacyLoggedAdminInvite(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := f.DB.Exec("UPDATE tokens SET expires_at = NULL; UPDATE schema_migrations SET version = 13"); err != nil {
+				if _, err := f.DB.ExecContext(t.Context(), "UPDATE tokens SET expires_at = NULL; UPDATE schema_migrations SET version = 13"); err != nil {
 					t.Fatal(err)
 				}
 				if err := f.Close(); err != nil {
@@ -95,7 +95,7 @@ func TestMigrationLegacyLoggedAdminInvite(t *testing.T) {
 			}
 			var uses, maxUses int
 			var expiry string
-			if err := f.DB.QueryRow("SELECT use_count, max_uses, COALESCE(expires_at, '') FROM tokens").Scan(&uses, &maxUses, &expiry); err != nil || uses != 1 || maxUses != 0 || expiry != "1970-01-01 00:00:01" {
+			if err := f.DB.QueryRowContext(t.Context(), "SELECT use_count, max_uses, COALESCE(expires_at, '') FROM tokens").Scan(&uses, &maxUses, &expiry); err != nil || uses != 1 || maxUses != 0 || expiry != "1970-01-01 00:00:01" {
 				t.Fatalf("legacy lifecycle row: uses=%d max=%d expiry=%q err=%v", uses, maxUses, expiry, err)
 			}
 		})
@@ -108,7 +108,7 @@ func TestMigrationLegacyAdminInvitePreservesOtherCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := f.DB.Exec(`
+	if _, err := f.DB.ExecContext(t.Context(), `
 		INSERT INTO users (username, role, personal_token_hash) VALUES ('owner', 2, 'personal');
 		INSERT INTO channels (name) VALUES ('permanent');
 		INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, use_count, expires_at, bootstrap_key) VALUES
@@ -167,7 +167,7 @@ func TestMigrationLegacyAdminInviteRollsBackOnVersionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.DB.Exec(`INSERT INTO tokens (hash, role) VALUES ('legacy-logged-admin-hash', 2);
+	if _, err := f.DB.ExecContext(t.Context(), `INSERT INTO tokens (hash, role) VALUES ('legacy-logged-admin-hash', 2);
 		UPDATE schema_migrations SET version = 13;
 		CREATE TRIGGER reject_version BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'reject version'); END;`); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestMigrationLegacyAdminInviteRollsBackOnVersionFailure(t *testing.T) {
 		t.Fatal("failed migration partially invalidated a token")
 	}
 	var version int
-	if err := f.DB.QueryRow("SELECT version FROM schema_migrations").Scan(&version); err != nil || version != 13 {
+	if err := f.DB.QueryRowContext(t.Context(), "SELECT version FROM schema_migrations").Scan(&version); err != nil || version != 13 {
 		t.Fatalf("failed migration advanced schema version: %d %v", version, err)
 	}
 	if err := f.Close(); err != nil {
@@ -190,7 +190,7 @@ func TestMigrationLegacyAdminInviteRollsBackOnVersionFailure(t *testing.T) {
 
 func legacyInviteRows(t *testing.T, f *ProviderFactory) [][]any {
 	t.Helper()
-	rows, err := f.DB.Query("SELECT * FROM tokens ORDER BY id")
+	rows, err := f.DB.QueryContext(t.Context(), "SELECT * FROM tokens ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
 	}

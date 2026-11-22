@@ -31,7 +31,7 @@ func recoveryFixture(t *testing.T, owner, finalized bool) (string, *model.User) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		if _, err := tx.BootstrapPersonalTokenKey("setup"); err != nil {
 			t.Fatal(err)
 		}
@@ -145,10 +145,10 @@ func TestLocalRecoveryRefusesWrongTargetInvalidInputAndUnstoppedService(t *testi
 				if err := os.WriteFile(secretPath, []byte(candidate), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(secretPath, 0644); err != nil {
+				if err := os.Chmod(secretPath, 0644); err != nil { // #nosec G302 -- Negative fixture deliberately makes synthetic input world-readable.
 					t.Fatal(err)
 				}
-				f, err := os.Open(secretPath)
+				f, err := os.Open(secretPath) // #nosec G304 -- Path is the synthetic shared-input fixture under t.TempDir.
 				if err != nil {
 					t.Fatal(err)
 				}

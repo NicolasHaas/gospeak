@@ -53,7 +53,7 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	if err != nil {
 		return errors.New("could not start recovery transaction")
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	user, err := tx.GetUserByID(*id)
 	if err != nil || user == nil || user.Username != *username {
 		return errors.New("recovery target identity mismatch")

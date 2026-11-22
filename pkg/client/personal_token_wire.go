@@ -35,7 +35,7 @@ func (c *ControlClient) PersonalTokenExchange(ctx context.Context, request *pb.C
 	}
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer stop()
-	defer c.conn.SetDeadline(time.Time{})
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 	if err := protocol.WriteControlMessage(c.conn, request); err != nil {
 		return nil, err
 	}

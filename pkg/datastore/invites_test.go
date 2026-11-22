@@ -42,7 +42,7 @@ func TestInvitePagesAndRevocation(t *testing.T) {
 		t.Fatalf("second page: count=%d more=%v err=%v", len(second), more, err)
 	}
 	var bootstrapID int64
-	if err := f.DB.QueryRow("SELECT id FROM tokens WHERE kind = ?", tokenKindBootstrap).Scan(&bootstrapID); err != nil {
+	if err := f.DB.QueryRowContext(t.Context(), "SELECT id FROM tokens WHERE kind = ?", tokenKindBootstrap).Scan(&bootstrapID); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int64{bootstrapID, second[0].ID + 100} {
@@ -131,15 +131,15 @@ func TestInviteRevokeSerializesWithRedemption(t *testing.T) {
 	other, err := f.DB.Conn(context.Background())
 	if err != nil {
 		close(barrier.release)
-		<-done
-		t.Fatal(err)
+		provisionErr := <-done
+		t.Fatalf("setup failed: %v; joined provision: %v", err, provisionErr)
 	}
 	defer other.Close()
 	_, err = other.ExecContext(context.Background(), "PRAGMA busy_timeout=0")
 	if err != nil {
 		close(barrier.release)
-		<-done
-		t.Fatal(err)
+		provisionErr := <-done
+		t.Fatalf("setup failed: %v; joined provision: %v", err, provisionErr)
 	}
 	competing := &baseProvider{DB: other}
 	deleted, revokeErr := competing.RevokeInvite(page[0].ID)

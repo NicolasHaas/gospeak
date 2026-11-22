@@ -43,7 +43,7 @@ func TestPersonalRecoveryConcurrentIssueRedeemOrders(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer firstTx.Rollback()
+			defer func() { _ = firstTx.Rollback() }()
 			changed, err := winner(firstTx)
 			if err != nil || !changed {
 				t.Fatal("first operation failed")
@@ -61,7 +61,7 @@ func TestPersonalRecoveryConcurrentIssueRedeemOrders(t *testing.T) {
 					done <- result{false, err}
 					return
 				}
-				defer tx.Rollback()
+				defer func() { _ = tx.Rollback() }()
 				changed, err := loser(tx)
 				if err == nil {
 					err = tx.Commit()

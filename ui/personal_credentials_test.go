@@ -122,10 +122,10 @@ func TestPersonalCredentialDialogStagesBeforeWireAndSurvivesDisconnect(t *testin
 			if saveFailure {
 				path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "gospeak", "servers.yaml")
 				// Use the actual configured path, resolved by the existing store convention.
-				if _, err := os.Stat(path); err != nil {
+				if _, err := os.Stat(path); err != nil { // #nosec G703 -- Test-owned config root is set to t.TempDir; inspect only its synthetic bookmark.
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte("bookmarks: ["), 0600); err != nil {
+				if err := os.WriteFile(path, []byte("bookmarks: ["), 0600); err != nil { // #nosec G703 -- Deliberately corrupt the test-owned bookmark under t.TempDir.
 					t.Fatal(err)
 				}
 			}

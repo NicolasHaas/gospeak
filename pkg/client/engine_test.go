@@ -1080,8 +1080,8 @@ func TestConcurrentDisconnectWaitsForInProgressTeardown(t *testing.T) {
 		connectReturned <- e.Connect("127.0.0.1:1", "127.0.0.1:1", "token", "user", "")
 	}()
 	select {
-	case <-connectReturned:
-		t.Fatal("Connect passed the disconnect barrier before teardown completed")
+	case err := <-connectReturned:
+		t.Fatalf("Connect passed the disconnect barrier before teardown completed: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	e.mu.RLock()
@@ -1100,7 +1100,10 @@ func TestConcurrentDisconnectWaitsForInProgressTeardown(t *testing.T) {
 		}
 	}
 	select {
-	case <-connectReturned:
+	case err := <-connectReturned:
+		if err == nil {
+			t.Fatal("Connect unexpectedly succeeded against the closed endpoint")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Connect remained blocked after disconnect completion")
 	}

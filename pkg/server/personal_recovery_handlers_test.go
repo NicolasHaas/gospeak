@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func personalMutationActor(t *testing.T, srv *Server, st datastore.DataProviderF
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		user, err = tx.ProvisionBootstrapUser("setup-"+name, name, crypto.HashToken("personal-"+name), time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -247,7 +248,8 @@ func TestPersonalTokenRetiresScreenBindingAndQueuedSender(t *testing.T) {
 	}
 	// Actual writer drops a frame already queued with the retired sender ID.
 	viewerSessions := srv.sessions.GetAllByUserIDSnapshots(viewer.ID)
-	frame := []byte{0, 0, 0, 9, byte(targetSession.ID >> 24), byte(targetSession.ID >> 16), byte(targetSession.ID >> 8), byte(targetSession.ID), 0, 0, 0, 1, 1}
+	frame := []byte{0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 1, 1}
+	binary.BigEndian.PutUint32(frame[4:8], targetSession.ID)
 	sink := &bufferConn{}
 	if err := srv.writeLiveScreenFrame(viewerSessions[0].ID, &screenClientConn{conn: sink}, frame); err != nil {
 		t.Fatal(err)

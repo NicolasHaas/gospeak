@@ -193,7 +193,7 @@ func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
 	result := make(chan error, 1)
 	if err := c.enqueue(queuedControlMessage{message: msg, result: result}); err == nil {
 		select {
-		case <-result:
+		case <-result: //nolint:errcheck // Terminal response is best-effort; close on success or failure.
 		case <-time.After(controlWriteTimeout):
 		}
 	}

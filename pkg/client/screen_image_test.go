@@ -74,9 +74,9 @@ func TestDecodeScreenImageChecksJPEGHeaderBeforeDecode(t *testing.T) {
 }
 
 func TestDecodeScreenImageRejectsOversizedValidJPEG(t *testing.T) {
-	for _, dims := range [][2]int{{1281, 1}, {1, 1281}} {
-		data := screenTestJPEG(t, dims[0], dims[1])
-		if _, err := decodeScreenImage(&protocol.ScreenFrame{Width: int32(dims[0]), Height: int32(dims[1]), Format: "jpeg", Data: data}); err == nil || err.Error() != "invalid screen image metadata" {
+	for _, dims := range [][2]int32{{1281, 1}, {1, 1281}} {
+		data := screenTestJPEG(t, int(dims[0]), int(dims[1]))
+		if _, err := decodeScreenImage(&protocol.ScreenFrame{Width: dims[0], Height: dims[1], Format: "jpeg", Data: data}); err == nil || err.Error() != "invalid screen image metadata" {
 			t.Fatalf("valid %dx%d JPEG bypassed pre-decode geometry guard: %v", dims[0], dims[1], err)
 		}
 	}

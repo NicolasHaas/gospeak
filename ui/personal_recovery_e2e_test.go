@@ -100,12 +100,14 @@ func TestPersonalCredentialPendingRecoveryRealServer(t *testing.T) {
 	cfg.VoiceAddr = "127.0.0.1:0"
 	cfg.EnableScreenShare = false
 	// Reserve a loopback port; StartControl owns it after this listener closes.
-	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	reservation, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ControlAddr = reservation.Addr().String()
-	reservation.Close()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
 	st, err := datastore.NewProviderFactory(cfg.DBPath)
 	if err != nil {
 		t.Fatal(err)
@@ -120,11 +122,11 @@ func TestPersonalCredentialPendingRecoveryRealServer(t *testing.T) {
 	}
 	owner, err := tx.ProvisionBootstrapUser("synthetic-setup", "owner", crypto.HashToken("owner-personal"), time.Now())
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 	if _, err := tx.FinalizeBootstrapToken(owner.ID); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -144,7 +146,9 @@ func TestPersonalCredentialPendingRecoveryRealServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Close()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
 	candidate, _ := crypto.GenerateToken()
 	attempt, _ := crypto.GenerateToken()
 	p := client.PendingPersonalCredential{ControlAddr: cfg.ControlAddr, ServerIdentity: pin, Username: target.Username, AccountID: target.ID, OldToken: "old-personal", Candidate: candidate, Attempt: attempt, Version: auth.CredentialVersion}
@@ -222,7 +226,7 @@ func TestPersonalCredentialPendingRecoveryRealServer(t *testing.T) {
 	}
 	stop() // Join the service before invoking the real operator-local tool.
 	binary := filepath.Join(t.TempDir(), "recover-token")
-	build := exec.Command("go", "build", "-o", binary, "../cmd/recover-token")
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "../cmd/recover-token") // #nosec G204 -- Build the fixed local recovery command into a test-owned temporary directory.
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build local recovery: %v: %s", err, output)
 	}
@@ -257,8 +261,8 @@ func TestPersonalCredentialPendingRecoveryRealServer(t *testing.T) {
 		if _, err := st.NonTx().GetUserByID(local.ID); err == nil {
 			t.Fatal("stopped service database is still usable during operator recovery")
 		}
-		command := exec.Command(binary, "-db", cfg.DBPath, "-user-id", strconv.FormatInt(local.ID, 10), "-username", local.Username, "-expected-version", strconv.FormatInt(version, 10), "-stopped-service")
-		command.Stdin = strings.NewReader(recovered + "\n") // private pipe, never argv/environment
+		command := exec.CommandContext(t.Context(), binary, "-db", cfg.DBPath, "-user-id", strconv.FormatInt(local.ID, 10), "-username", local.Username, "-expected-version", strconv.FormatInt(version, 10), "-stopped-service") // #nosec G204 -- Execute only the local binary just built; arguments are synthetic fixture identities.
+		command.Stdin = strings.NewReader(recovered + "\n")                                                                                                                                                                       // private pipe, never argv/environment
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("local recovery: %v: %s", err, output)
 		}

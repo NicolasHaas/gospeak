@@ -110,7 +110,7 @@ func TestPKITrustHistoryDowngrade(t *testing.T) {
 		})
 	}
 	// A fresh process must recover history without any in-memory state.
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPKITrustHistoryDowngrade$", "-test.timeout=10s")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestPKITrustHistoryDowngrade$", "-test.timeout=10s") // #nosec G204 G702 -- Re-execute only this test binary to verify persisted trust in a fresh process.
 	cmd.Env = append(os.Environ(), "GOSPEAK_PKI_HISTORY_CHILD="+addr)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("restart: %v\n%s", err, output)

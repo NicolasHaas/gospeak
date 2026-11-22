@@ -364,7 +364,7 @@ func (a *App) showPersonalTokenAdminDialog() {
 					secret := widget.NewPasswordEntry()
 					secret.SetText(r.Grant)
 					secret.Disable()
-					copyGrant := widget.NewButton("Copy temporary grant", func() { a.window.Clipboard().SetContent(r.Grant) })
+					copyGrant := widget.NewButton("Copy temporary grant", func() { a.fyneApp.Clipboard().SetContent(r.Grant) })
 					dialog.NewCustom("Recovery grant issued", "Close", container.NewVBox(widget.NewLabel(fmt.Sprintf("Account #%d; expires %s. Hand this temporary grant over privately.", r.TargetID, time.Unix(r.ExpiresAt, 0).Format(time.RFC3339))), secret, copyGrant), a.window).Show()
 				}
 				status.SetText("Completed. Inspect again before another action.")

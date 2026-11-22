@@ -316,7 +316,7 @@ func TestTLSConfiguredReloadHandshakeCallback(t *testing.T) {
 			}
 			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 			secure := tls.Server(conn, config)
-			err = secure.Handshake()
+			err = secure.HandshakeContext(t.Context())
 			_ = conn.Close()
 			results <- err
 		}
@@ -379,10 +379,11 @@ func configuredReloadDial(t *testing.T, addr string, certificate tls.Certificate
 	t.Helper()
 	roots := x509.NewCertPool()
 	roots.AddCert(mustParseLeaf(t, certificate))
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", addr, &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: "localhost"})
+	transport, err := (&tls.Dialer{NetDialer: &net.Dialer{Timeout: 2 * time.Second}, Config: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: "localhost"}}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn := transport.(*tls.Conn)
 	peer := conn.ConnectionState().PeerCertificates[0]
 	_ = conn.NetConn().Close()
 	return peer

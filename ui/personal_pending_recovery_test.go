@@ -136,7 +136,7 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 				}
 			}
 			if mode == "save-failure" {
-				if err := os.WriteFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "gospeak", "servers.yaml"), []byte("bookmarks: ["), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "gospeak", "servers.yaml"), []byte("bookmarks: ["), 0600); err != nil { // #nosec G703 -- Deliberately corrupt the test-owned config under t.TempDir.
 					t.Fatal(err)
 				}
 			}
