@@ -818,6 +818,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		s.recordSessionRejection(remoteAddr, capacityErr)
 		markCredentialsValid()
 		sendError(conn, 3, "server session capacity reached")
+		if s.sessionAdmissionRefused != nil {
+			s.sessionAdmissionRefused()
+		}
 		return true
 	}
 	var userControlLimiter *controlMessageLimiter

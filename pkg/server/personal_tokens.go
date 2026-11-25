@@ -328,6 +328,9 @@ func (s *Server) finishRetiredSessions(handler *ControlHandler, st datastore.Dat
 }
 
 func (s *Server) cleanupControlSession(handler *ControlHandler, st datastore.DataProviderFactory, sessionID uint32) {
+	if s.beforeControlCleanup != nil {
+		s.beforeControlCleanup(sessionID)
+	}
 	s.credentialWorkMu.Lock()
 	s.remoteModerationMu.Lock()
 	retired := s.detachControlSession(handler, sessionID)

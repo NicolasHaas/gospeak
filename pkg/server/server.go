@@ -103,6 +103,8 @@ type Server struct {
 	voiceKey                []byte // shared key for all voice encryption
 	voiceCipher             *gospeakCrypto.VoiceCipher
 	voiceReplayHook         func()
+	beforeControlCleanup    func(uint32) // deterministic lifecycle test seam, set before serving
+	sessionAdmissionRefused func()       // observes real capacity refusal, never changes policy
 	authLimiter             *authRateLimiter
 	accountProvisionLimiter *accountProvisionLimiter
 	bootstrapMu             sync.Mutex

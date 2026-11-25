@@ -18,6 +18,13 @@ func PersonalCredentialRejected(err error) bool {
 	return errors.As(err, &rejected) && rejected.Code == 2
 }
 
+// PersonalCredentialAdmissionRefused identifies the existing wire refusal before
+// a dedicated credential request can have been sent. Code 3 alone is not enough.
+func PersonalCredentialAdmissionRefused(err error) bool {
+	var refused *AuthenticationError
+	return errors.As(err, &refused) && refused.Code == 3 && refused.Message == "server session capacity reached"
+}
+
 // PersonalTokenExchange owns a dedicated control connection: do not combine it
 // with StartReceiving. Its completion is independent of media generation cancel.
 func (c *ControlClient) PersonalTokenExchange(ctx context.Context, request *pb.ControlMessage) (*pb.ControlMessage, error) {
@@ -80,20 +87,50 @@ func OpenPersonalTokenControl(ctx context.Context, addr, pin, username, token st
 	if token == "" || username == "" {
 		return nil, nil, fmt.Errorf("current personal credential required")
 	}
-	c, err := NewControlClientContext(ctx, addr, pin)
-	if err != nil {
-		return nil, nil, err
-	}
-	auth, err := c.authenticate(token, username, true)
-	if err != nil {
+	// Local socket/engine teardown does not acknowledge server slot retirement.
+	// Retry only a definitive admission refusal, before any operation is sent.
+	// Never retry transport errors or PersonalTokenExchange (unknown outcome).
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	var admissionErr error
+	for {
+		if ctx.Err() != nil && admissionErr != nil {
+			return nil, nil, admissionErr
+		}
+		c, err := NewControlClientContext(ctx, addr, pin)
+		if err != nil {
+			if ctx.Err() != nil && admissionErr != nil {
+				return nil, nil, admissionErr
+			}
+			return nil, nil, err
+		}
+		stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+		auth, err := c.authenticate(token, username, true)
+		stop()
+		if err == nil {
+			if ctx.Err() != nil {
+				_ = c.Close()
+				return nil, nil, ctx.Err()
+			}
+			if auth.UserID <= 0 || auth.Username != username || auth.AutoToken != "" {
+				_ = c.Close()
+				return nil, nil, fmt.Errorf("current personal credential required")
+			}
+			return c, auth, nil
+		}
 		_ = c.Close()
-		return nil, nil, err
+		if !PersonalCredentialAdmissionRefused(err) {
+			return nil, nil, err
+		}
+		admissionErr = err
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, err // retain the typed, known pre-mutation refusal
+		case <-timer.C:
+		}
 	}
-	if auth.UserID <= 0 || auth.Username != username || auth.AutoToken != "" {
-		_ = c.Close()
-		return nil, nil, fmt.Errorf("current personal credential required")
-	}
-	return c, auth, nil
 }
 
 // SubmitPersonalCredential uses only a disk-authoritative staged attempt. Any
