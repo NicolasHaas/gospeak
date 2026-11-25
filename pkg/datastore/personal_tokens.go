@@ -46,8 +46,9 @@ func (s *txProvider) IssuePersonalRecovery(userID, version int64, grantHash stri
 	}
 	result, err := s.ExecContext(context.Background(), `UPDATE users
   SET personal_token_hash = '', personal_token_created_at = ?, credential_version = credential_version + 1,
-      recovery_hash = ?, recovery_expires_at = ?, recovery_issued_by = ?
-  WHERE id = ? AND credential_version = ?`, formatDBTime(now), grantHash, now.Add(PersonalRecoveryLifetime).Unix(), issuedBy, userID, version)
+      recovery_hash = ?, recovery_expires_at = ?, recovery_issued_by = ?,
+      recovery_issuer_version = (SELECT credential_version FROM users WHERE id = ?)
+  WHERE id = ? AND credential_version = ?`, formatDBTime(now), grantHash, now.Add(PersonalRecoveryLifetime).Unix(), issuedBy, issuedBy, userID, version)
 	if err != nil {
 		return false, fmt.Errorf("datastore: issue personal recovery: %w", err)
 	}
@@ -71,6 +72,7 @@ func (s *txProvider) RedeemPersonalRecovery(userID int64, grantHash, replacement
   WHERE id = ? AND recovery_hash = ? AND recovery_expires_at > ?
 		AND EXISTS (SELECT 1 FROM users AS issuer WHERE issuer.id = users.recovery_issued_by
 		  AND issuer.role = ? AND issuer.personal_token_hash <> ''
+		  AND issuer.credential_version = users.recovery_issuer_version
 		  AND NOT EXISTS (SELECT 1 FROM bans WHERE bans.user_id = issuer.id
 		    AND (bans.expires_at IS NULL OR bans.expires_at > ?)))
 		AND NOT EXISTS (SELECT 1 FROM users AS other WHERE other.id <> ? AND other.personal_token_hash = ?)`, replacementHash, formatDBTime(now), userID, grantHash, now.Unix(), model.RoleAdmin, formatDBTime(now), userID, replacementHash)

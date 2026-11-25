@@ -554,6 +554,13 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: "ALTER TABLE users ADD COLUMN recovery_issued_by INTEGER NOT NULL DEFAULT 0", table: "users", column: "recovery_issued_by"},
 			},
 		},
+		{
+			version: 16,
+			steps: []migrationStep{
+				// Existing grants have no provable issuer generation; fail closed.
+				{statement: "ALTER TABLE users ADD COLUMN recovery_issuer_version INTEGER NOT NULL DEFAULT -1", table: "users", column: "recovery_issuer_version"},
+			},
+		},
 	}
 
 	for _, m := range migrations {

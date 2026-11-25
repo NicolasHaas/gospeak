@@ -10,7 +10,7 @@ import (
 )
 
 func TestPersonalRecoveryRechecksIssuerAndGrantRevocation(t *testing.T) {
-	for _, change := range []string{"demote", "ban", "credential", "revoke-grant"} {
+	for _, change := range []string{"demote", "ban", "credential", "revoke-grant", "recovered-issuer", "rotated-issuer"} {
 		t.Run(change, func(t *testing.T) {
 			st, err := NewTestSqlConn(t)
 			if err != nil {
@@ -34,6 +34,13 @@ func TestPersonalRecoveryRechecksIssuerAndGrantRevocation(t *testing.T) {
 				err = st.NonTx().CreateUserBan(issuer, 0, time.Time{})
 			case "credential":
 				err = st.NonTx().UpdateUserPersonalToken(issuer, "", now)
+			case "recovered-issuer", "rotated-issuer":
+				if change == "recovered-issuer" {
+					if err := st.NonTx().UpdateUserPersonalToken(issuer, "", now); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = st.NonTx().UpdateUserPersonalToken(issuer, crypto.HashToken("recovered-issuer"), now)
 			case "revoke-grant":
 				if !credentialTx(t, st, func(tx datastore.DataStoreTx) (bool, error) { return tx.RevokePersonalRecovery(target.ID, 1) }) {
 					t.Fatal("grant revocation failed")
