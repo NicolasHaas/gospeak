@@ -358,8 +358,12 @@ func (a *App) confirmPendingCredentialTrust(err error, p client.PendingPersonalC
 	}
 	attempt := a.connectAttempt
 	message := fmt.Sprintf("WARNING: server identity changed. Verify the new fingerprint through a trusted channel before confirming. No credential will be sent automatically. The saved candidate and account remain bound.\n\nServer: %s\nAccount: #%d %s\nPrevious: %s\nNew: %s", p.ControlAddr, p.AccountID, p.Username, p.ServerIdentity, changed.Received)
-	dialog.NewCustomConfirm("Pending credential server trust changed", "Re-trust pending server", "Cancel", widget.NewLabel(message), func(ok bool) {
-		if !ok || attempt != a.connectAttempt || a.credentialBusy {
+	disclosure := widget.NewLabel(message)
+	disclosure.Wrapping = fyne.TextWrapBreak
+	var d dialog.Dialog
+	confirm := widget.NewButton("Re-trust pending server", func() {
+		d.Hide()
+		if attempt != a.connectAttempt || a.credentialBusy {
 			return
 		}
 		if err := a.bookmarks.RetrustPendingPersonalCredential(p, changed.Received); err != nil {
@@ -368,7 +372,12 @@ func (a *App) confirmPendingCredentialTrust(err error, p client.PendingPersonalC
 			return
 		}
 		status.SetText("Confirmed trust saved with the retained candidate. Check again or explicitly retry the saved operation.")
-	}, a.window).Show()
+	})
+	// Native vertical actions stay inside a narrow canvas; only the disclosure
+	// scrolls so explicit confirmation and cancellation remain reachable.
+	d = dialog.NewCustom("Server trust changed", "Cancel", container.NewBorder(nil, confirm, nil, nil, container.NewVScroll(disclosure)), a.window)
+	d.Resize(fyne.NewSize(580, 500))
+	d.Show()
 	return true
 }
 
@@ -435,7 +444,11 @@ func (a *App) showPersonalTokenAdminDialog() {
 			inspected = nil
 			exchange(request, func(response *pb.ControlMessage, err error) {
 				if err != nil {
-					status.SetText("Outcome not confirmed. Inspect before a new explicit action; no automatic retry.")
+					if client.PersonalCredentialAdmissionRefused(err) {
+						status.SetText("Server session capacity reached; no credential change sent. Inspect before a new explicit action.")
+					} else {
+						status.SetText("Outcome not confirmed. Inspect before a new explicit action; no automatic retry.")
+					}
 					return
 				}
 				if response.IssuePersonalRecoveryResp != nil {
