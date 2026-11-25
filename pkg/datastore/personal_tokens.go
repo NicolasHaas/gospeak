@@ -113,6 +113,14 @@ func (s *txProvider) ReplacePersonalToken(userID, version int64, expectedHash, r
 	if err != nil {
 		return false, fmt.Errorf("datastore: inspect personal token replacement: %w", err)
 	}
+	if rows == 1 && replacementHash != "" {
+		// Explicit replacement retires legacy derivation/retry material in the
+		// same writer transaction, without removing the durable owner marker.
+		if _, err := s.ExecContext(context.Background(), `UPDATE tokens SET bootstrap_key = ''
+		  WHERE created_by = ? AND kind = ? AND use_count = 1`, userID, tokenKindBootstrap); err != nil {
+			return false, fmt.Errorf("datastore: retire replaced bootstrap key: %w", err)
+		}
+	}
 	return rows == 1, nil
 }
 
