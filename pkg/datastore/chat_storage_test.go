@@ -92,6 +92,9 @@ func TestChatStorageCursorAndRetention(t *testing.T) {
 			t.Fatalf("accepted invalid message: %+v", bad)
 		}
 	}
+	if err := st.CreateChannel(&model.Channel{Name: "remaining"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.DeleteChannel(channel.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +274,16 @@ func TestChatStorageMigratesExistingMessages(t *testing.T) {
 	_, err = raw.ExecContext(context.Background(), `
 		CREATE TABLE schema_migrations (version INTEGER NOT NULL);
 		INSERT INTO schema_migrations VALUES (10);
-		CREATE TABLE tokens (id INTEGER PRIMARY KEY, created_by INTEGER NOT NULL, kind INTEGER NOT NULL);
+		CREATE TABLE tokens (
+			id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE,
+			role INTEGER NOT NULL DEFAULT 0, channel_scope INTEGER NOT NULL DEFAULT 0,
+			created_by INTEGER NOT NULL DEFAULT 0, kind INTEGER NOT NULL DEFAULT 0,
+			max_uses INTEGER NOT NULL DEFAULT 0, use_count INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, role INTEGER NOT NULL DEFAULT 0,
+			channel_scope INTEGER NOT NULL DEFAULT 0, personal_token_hash TEXT NOT NULL DEFAULT '',
+			personal_token_created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00', created_at TEXT NOT NULL DEFAULT (datetime('now')));
 		CREATE TABLE channels (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
 			sender_id INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);

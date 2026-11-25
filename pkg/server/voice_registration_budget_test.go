@@ -26,23 +26,24 @@ func TestVoiceRegistrationChargedToVoiceBudget(t *testing.T) {
 		return data
 	}
 
-	for counter := uint64(1); counter <= 100; counter++ {
-		if !sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, registration(counter)), remote, now, 5*time.Second) {
+	// Initial request and response cost two tokens; refreshes cost one.
+	for counter := uint64(1); counter <= 99; counter++ {
+		if !registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, registration(counter)), remote, now, 5*time.Second) {
 			t.Fatalf("burst registration %d rejected", counter)
 		}
 	}
-	if sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, registration(101)), remote, now, 5*time.Second) {
+	if registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, registration(101)), remote, now, 5*time.Second) {
 		t.Fatal("registration flood above burst budget accepted")
 	}
 	// 20 ms refills exactly one token: one registration is admitted, a second
 	// at the same instant is refused.
-	if !sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, registration(102)), remote, now.Add(20*time.Millisecond), 5*time.Second) {
+	if !registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, registration(102)), remote, now.Add(20*time.Millisecond), 5*time.Second) {
 		t.Fatal("registration after one-token refill rejected")
 	}
-	if sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, registration(103)), remote, now.Add(20*time.Millisecond), 5*time.Second) {
+	if registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, registration(103)), remote, now.Add(20*time.Millisecond), 5*time.Second) {
 		t.Fatal("second registration at the same instant bypassed the refill rate")
 	}
-	if !sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, registration(104)), remote, now.Add(60*time.Millisecond), 5*time.Second) {
+	if !registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, registration(104)), remote, now.Add(60*time.Millisecond), 5*time.Second) {
 		t.Fatal("registration after sustained refill rejected")
 	}
 }
@@ -60,15 +61,18 @@ func TestForgedRegistrationConsumesNoBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, data), remote, now, 5*time.Second) {
+		if registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, data), remote, now, 5*time.Second) {
 			t.Fatal("forged registration accepted")
 		}
+	}
+	if len(sm.voiceReplay) != 0 || session.VoiceRegistrationCounter != 0 {
+		t.Fatal("forged flood created budget or counter state")
 	}
 	data, err := protocol.MarshalVoiceRegistration(session.ID, 300, session.VoiceRegistrationKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sm.RegisterUDPAddr(session.ID, mustUnmarshalRegistration(t, data), remote, now, 5*time.Second) {
+	if !registerUDPForTest(t, sm, session.ID, mustUnmarshalRegistration(t, data), remote, now, 5*time.Second) {
 		t.Fatal("legitimate registration rejected after forged flood consumed budget")
 	}
 }
@@ -101,27 +105,27 @@ func TestRefusedRebindDoesNotConsumeRebindWindow(t *testing.T) {
 	}
 
 	// Initial endpoint registration; VoiceEndpointUpdatedAt starts at t0.
-	if !sm.RegisterUDPAddr(session.ID, registration(1, session.VoiceRegistrationKey), addrA, now, 5*time.Second) {
+	if !registerUDPForTest(t, sm, session.ID, registration(1, session.VoiceRegistrationKey), addrA, now, 5*time.Second) {
 		t.Fatal("initial registration rejected")
 	}
 	// Rebind interval elapses; budget refills to the burst cap.
 	now = now.Add(5*time.Second + time.Millisecond)
 	for counter := uint64(2); counter <= 101; counter++ {
-		if !sm.RegisterUDPAddr(session.ID, registration(counter, session.VoiceRegistrationKey), addrA, now, 5*time.Second) {
+		if !registerUDPForTest(t, sm, session.ID, registration(counter, session.VoiceRegistrationKey), addrA, now, 5*time.Second) {
 			t.Fatalf("drain registration %d rejected", counter)
 		}
 	}
 	// Budget is empty: the rebind is refused by the charge, not the gate.
-	if sm.RegisterUDPAddr(session.ID, registration(102, session.VoiceRegistrationKey), addrB, now, 5*time.Second) {
+	if registerUDPForTest(t, sm, session.ID, registration(102, session.VoiceRegistrationKey), addrB, now, 5*time.Second) {
 		t.Fatal("rebind accepted with an exhausted budget")
 	}
-	// One token refills 20 ms later: the rebind must now succeed without
+	// Two tokens refill 40 ms later: the rebind must now succeed without
 	// waiting another full rebind interval.
-	now = now.Add(20 * time.Millisecond)
-	if !sm.RegisterUDPAddr(session.ID, registration(103, session.VoiceRegistrationKey), addrB, now, 5*time.Second) {
+	now = now.Add(40 * time.Millisecond)
+	if !registerUDPForTest(t, sm, session.ID, registration(103, session.VoiceRegistrationKey), addrB, now, 5*time.Second) {
 		t.Fatal("refused rebind consumed NAT rebind headroom")
 	}
-	if snapshot, ok := sm.GetSnapshot(session.ID); !ok || snapshot.UDPAddr == nil || snapshot.UDPAddr.String() != addrB.String() {
+	if snapshot, ok := sm.getSnapshotAt(session.ID, now); !ok || snapshot.UDPAddr == nil || snapshot.UDPAddr.String() != addrB.String() {
 		t.Fatalf("rebound endpoint = %v, want %v", snapshot.UDPAddr, addrB)
 	}
 }

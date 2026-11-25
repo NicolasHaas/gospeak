@@ -48,7 +48,7 @@ func TestMediaCipherAuthenticationAndScreenShare(t *testing.T) {
 			session := mustCreateSession(t, srv.sessions, 2, "voice", model.RoleUser)
 			remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 40000}
 			registration, err := protocol.MarshalVoiceRegistration(session.ID, 1, session.VoiceRegistrationKey)
-			if err != nil || !srv.handleVoiceRegistration(registration, remote, time.Now()) {
+			if err != nil || !registerVoiceForTest(t, srv, registration, remote, time.Now()) {
 				t.Fatalf("voice registration: %v", err)
 			}
 			srv.channels.Join(session.ID, 7)

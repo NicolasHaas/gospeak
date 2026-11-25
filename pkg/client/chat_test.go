@@ -19,7 +19,7 @@ func TestTextChatControlsAndEventsWithoutVoice(t *testing.T) {
 	e.state = StateConnected
 	e.channelID = 0
 	e.mu.Unlock()
-	if err := e.LoadChatHistory(9, 0); err != nil {
+	if _, err := e.LoadChatHistory(9, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.SendChat(9, "hello"); err != nil {

@@ -1,6 +1,8 @@
 # GoSpeak Architecture
 
-GoSpeak is a privacy-focused voice communication server and client built in Go. It uses a split transport architecture: a TLS control plane for signalling, a UDP SFU for voice, and a TLS relay plane for encrypted screen sharing.
+GoSpeak is a privacy-focused voice communication server and client built in Go.
+It uses a split transport architecture: a TLS control plane for signalling, a
+UDP SFU for voice, and a TLS relay plane for encrypted screen sharing.
 
 ## High-Level Overview
 
@@ -79,7 +81,8 @@ graph LR
     STORE --> MODEL
 ```
 
-> **Dashed arrows** indicate dependencies on interfaces. See [Onion Architecture](#onion-architecture) below.
+> **Dashed arrows** indicate dependencies on interfaces. See
+> [Onion Architecture](#onion-architecture) below.
 
 ### Package Responsibilities
 
@@ -101,9 +104,13 @@ graph LR
 
 ## Onion Architecture
 
-GoSpeak follows an **onion (hexagonal) architecture**: core business logic depends on interfaces. This allows swapping backends without touching the server or client logic.
+GoSpeak follows an **onion (hexagonal) architecture**: core business logic
+depends on interfaces. This allows swapping backends without touching the server
+or client logic.
 
-The server receives its dependencies (notably `datastore.DataProviderFactory`) from `cmd/server` via `server.Dependencies`. This keeps `pkg/server` free of concrete implementations.
+The server receives its dependencies (notably `datastore.DataProviderFactory`)
+from `cmd/server` via `server.Dependencies`. This keeps `pkg/server` free of
+concrete implementations.
 
 ## Server Lifecycle
 
@@ -162,13 +169,16 @@ sequenceDiagram
     Srv->>Eng: AuthResponse{sessionID, role, channelScope, mediaCipher, encryptionKey, voiceRegistrationKey, screenShareEnabled?, screenAddr?, screenAuthToken?, channels, autoToken?}
     Eng->>UDP: Dial UDP to server:9601
     Eng->>Eng: Create outbound VoiceCipher from encryptionKey
-    Eng->>Srv: Authenticated voice-registration datagram
+    Eng->>Srv: GSR2 authenticated registration request
     Eng->>Eng: Create inbound VoiceCipher from encryptionKey
     opt screenShareEnabled
         Eng->>SCR: Dial TCP/TLS to screenAddr and authenticate with screenAuthToken
     end
     Eng->>UI: OnStateChange(Connected)
     Eng->>Eng: Start control and voice receivers
+    Srv->>Eng: GSR2 address-bound challenge
+    Eng->>Srv: GSR2 authenticated challenge response
+    Note over Eng,Srv: Voice destination becomes eligible only after returned proof
     opt screenShareEnabled
         Eng->>Eng: Start screen receiver
     end
@@ -191,6 +201,13 @@ sequenceDiagram
         Eng->>Eng: Decrypt → Jitter buffer → Opus decode → Playback
     end
 ```
+
+Screen state changes wait for any in-flight screen send before taking the client
+callback ordering gate. A stalled screen write therefore does not hold up the
+microphone's RMS/VAD callback enqueue or subsequent voice encoding. After that
+wait, events are rechecked against the current, uncanceled connection
+generation; accepted callbacks keep their existing FIFO/coalescing behavior.
+This does not make native audio device calls interruptible.
 
 ## Data Models
 
@@ -238,9 +255,9 @@ erDiagram
     CHANNEL |o--o{ CHANNEL : "may parent"
 ```
 
-These are optional logical application relationships. Root channels, system-created
-tokens and channels, and IP-only bans use zero-valued relationship IDs. The SQLite
-schema stores these IDs as ordinary integer columns and does not declare foreign-key
-constraints. Ban reasons are intentionally not persisted. The `ip` column is empty
-for account bans and contains one canonical exact address only for an explicit
-administrator-created IP ban.
+These are optional logical application relationships. Root channels,
+system-created tokens and channels, and IP-only bans use zero-valued
+relationship IDs. The SQLite schema stores these IDs as ordinary integer columns
+and does not declare foreign-key constraints. Ban reasons are intentionally not
+persisted. The `ip` column is empty for account bans and contains one canonical
+exact address only for an explicit administrator-created IP ban.

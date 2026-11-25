@@ -8,6 +8,41 @@ import (
 	"testing"
 )
 
+func TestSettingsVADThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  float64
+	}{
+		{"", DefaultSettings().VADThreshold},
+		{".nan", DefaultSettings().VADThreshold},
+		{".inf", DefaultSettings().VADThreshold},
+		{"-.inf", DefaultSettings().VADThreshold},
+		{"-1", DefaultSettings().VADThreshold},
+		{"0", DefaultSettings().VADThreshold},
+		{"49.99", DefaultSettings().VADThreshold},
+		{"3000.01", DefaultSettings().VADThreshold},
+		{"50", 50},
+		{"200", 200},
+		{"512.5", 512.5},
+		{"3000", 3000},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.yaml")
+			data := "mute_key: F9\n"
+			if tc.value != "" {
+				data += "vad_threshold: " + tc.value + "\n"
+			}
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := loadSettings(path, "")
+			if s.VADThreshold != tc.want || s.MuteKey != "F9" {
+				t.Fatalf("loaded threshold %v, mute key %q; want %v, F9", s.VADThreshold, s.MuteKey, tc.want)
+			}
+		})
+	}
+}
+
 func TestSettingsVolumes(t *testing.T) {
 	for _, tc := range []struct {
 		data          string
@@ -17,7 +52,6 @@ func TestSettingsVolumes(t *testing.T) {
 		{"input_volume: 0\noutput_volume: 50\n", 0, 50},
 		{"input_volume: -20\noutput_volume: 200\n", 0, 100},
 		{"input_volume: .nan\noutput_volume: .inf\n", 100, 100},
-		{"input_volume: broken\noutput_volume: 25\n", 100, 25},
 	} {
 		path := filepath.Join(t.TempDir(), "settings.yaml")
 		if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
@@ -218,17 +252,6 @@ func TestWritePrivateFileRejectsSymlinkDestination(t *testing.T) {
 		t.Fatal("writePrivateFile accepted symlink destination")
 	}
 	assertContentsAndMode(t, target, data, 0o644)
-}
-
-func assertPrivateFile(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("%s mode = %o, want 600", path, info.Mode().Perm())
-	}
 }
 
 func assertContentsAndMode(t *testing.T, path string, want []byte, mode os.FileMode) {

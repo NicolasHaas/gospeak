@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,8 +36,8 @@ type Config struct {
 	MaxSessions                 int           // maximum concurrent authenticated sessions
 	MaxSessionsPerUser          int           // maximum concurrent sessions for one account
 	MaxSessionsPerSource        int           // pending and active sessions per IPv4 address / IPv6 /64
-	ControlMessageBurst         int           // maximum control-message cost burst per session
-	ControlMessagesPerSec       int           // control-message cost replenished per second per session
+	ControlMessageBurst         int           // maximum control-message cost burst per session and account
+	ControlMessagesPerSec       int           // control-message cost replenished per second per session and account
 	ControlGlobalBurst          int           // maximum server-wide control-message cost burst
 	ControlGlobalMessagesPerSec int           // server-wide control-message cost replenished per second
 
@@ -69,7 +70,7 @@ func DefaultConfig() Config {
 		MaxSessionsPerUser:          8,
 		MaxSessionsPerSource:        64,
 		ControlMessageBurst:         60,
-		ControlMessagesPerSec:       20,
+		ControlMessagesPerSec:       10,
 		ControlGlobalBurst:          300,
 		ControlGlobalMessagesPerSec: 100,
 	}
@@ -102,10 +103,14 @@ type Server struct {
 	voiceKey                []byte // shared key for all voice encryption
 	voiceCipher             *gospeakCrypto.VoiceCipher
 	voiceReplayHook         func()
+	beforeControlCleanup    func(uint32) // deterministic lifecycle test seam, set before serving
+	sessionAdmissionRefused func()       // observes real capacity refusal, never changes policy
 	authLimiter             *authRateLimiter
 	accountProvisionLimiter *accountProvisionLimiter
 	bootstrapMu             sync.Mutex
 	remoteModerationMu      sync.Mutex
+	// ponytail: global work drain; per-account barriers if mutation latency matters.
+	credentialWorkMu        sync.RWMutex
 	sessionBanMu            sync.Mutex
 	sessionBanChecks        map[int64]int
 	sessionBanPending       map[int64]bool
@@ -123,6 +128,7 @@ type Server struct {
 	controlBudgets          map[uint32]*controlMessageLimiter
 	controlUserBudgets      *controlUserBudgetManager
 	controlGlobalBudget     *controlMessageLimiter
+	controlInteractivePool  *controlMessageLimiter
 	controlModerationBudget *controlMessageLimiter
 	tempChannels            *tempChannelLifecycle
 
@@ -161,7 +167,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		cfg.ControlMessageBurst = controlExpensiveCost
 	}
 	if cfg.ControlMessagesPerSec <= 0 {
-		cfg.ControlMessagesPerSec = 20
+		cfg.ControlMessagesPerSec = 10
 	}
 	if cfg.ControlGlobalBurst <= 0 {
 		cfg.ControlGlobalBurst = 300
@@ -176,7 +182,7 @@ func New(cfg Config, deps Dependencies) *Server {
 	controlUserBudgets := newControlUserBudgetManager(cfg.ControlMessageBurst, cfg.ControlMessagesPerSec, time.Now)
 	controlUserBudgets.maxEntries = max(controlUserBudgets.maxEntries, cfg.MaxSessions)
 	controlUserBudgets.highWater = &metrics.ControlUserBudgetHighWater
-	controlGlobalBudget := newControlMessageLimiter(cfg.ControlGlobalBurst, cfg.ControlGlobalMessagesPerSec, time.Now)
+	controlGlobalBudget, controlInteractivePool := newGlobalControlBudgets(cfg.ControlGlobalBurst, cfg.ControlGlobalMessagesPerSec, time.Now)
 	controlGlobalBudget.highWater = &metrics.ControlGlobalBudgetHighWater
 	return &Server{
 		cfg:                     cfg,
@@ -202,6 +208,7 @@ func New(cfg Config, deps Dependencies) *Server {
 		controlBudgets:          make(map[uint32]*controlMessageLimiter),
 		controlUserBudgets:      controlUserBudgets,
 		controlGlobalBudget:     controlGlobalBudget,
+		controlInteractivePool:  controlInteractivePool,
 		controlModerationBudget: newControlMessageLimiter(controlModerationBurst, controlModerationRefill, time.Now),
 		tempChannels:            newTempChannelLifecycle(cfg.AllowNoToken),
 		ctx:                     ctx,
@@ -436,12 +443,7 @@ func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) 
 	for {
 		select {
 		case frame := <-client.outbound:
-			if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
-				slog.Error("set screen write deadline", "session", sessionID)
-				s.removeScreenConn(sessionID, client)
-				return
-			}
-			if err := protocol.WriteScreenPacketFrame(client.conn, frame); err != nil {
+			if err := s.writeLiveScreenFrame(sessionID, client, frame); err != nil {
 				slog.Warn("screen write failed", "session", sessionID)
 				s.removeScreenConn(sessionID, client)
 				return
@@ -450,6 +452,24 @@ func (s *Server) writeScreenPackets(sessionID uint32, client *screenClientConn) 
 			return
 		}
 	}
+}
+
+func (s *Server) writeLiveScreenFrame(sessionID uint32, client *screenClientConn, frame []byte) error {
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	// Revalidate queued sender and recipient authority at the actual writer.
+	if len(frame) < 4+protocol.ScreenHeaderSize {
+		return nil
+	}
+	sender, senderLive := s.sessions.GetSnapshot(binary.BigEndian.Uint32(frame[4:8]))
+	_, receiverLive := s.sessions.GetSnapshot(sessionID)
+	if !receiverLive || !senderLive || !s.screenShare.IsSharer(sender.ID, sender.ChannelID) {
+		return nil
+	}
+	if err := client.conn.SetWriteDeadline(time.Now().Add(screenWriteTimeout)); err != nil {
+		return err
+	}
+	return protocol.WriteScreenPacketFrame(client.conn, frame)
 }
 
 func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
@@ -465,14 +485,19 @@ func (s *Server) removeScreenConn(sessionID uint32, client *screenClientConn) {
 // removeSessionAndScreenConn retires the control session and detaches its
 // screen socket under the same lifecycle lock used by bindScreenConn.
 func (s *Server) removeSessionAndScreenConn(sessionID uint32) {
+	client := s.detachSessionAndScreenConn(sessionID)
+	if client != nil {
+		client.close()
+	}
+}
+
+func (s *Server) detachSessionAndScreenConn(sessionID uint32) *screenClientConn {
 	s.screenMu.Lock()
 	client := s.screenConns[sessionID]
 	delete(s.screenConns, sessionID)
 	s.sessions.Remove(sessionID)
 	s.screenMu.Unlock()
-	if client != nil {
-		client.close()
-	}
+	return client
 }
 
 func (s *Server) sendScreenPacketToSession(sessionID uint32, pkt *protocol.ScreenPacket) bool {

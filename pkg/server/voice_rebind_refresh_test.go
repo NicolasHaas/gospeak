@@ -36,7 +36,7 @@ func TestVoiceRefreshPreservesAddressChangeClock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := srv.handleVoiceRegistration(data, step.addr, start.Add(step.elapsed)); got != step.want {
+		if got := registerVoiceForTest(t, srv, data, step.addr, start.Add(step.elapsed)); got != step.want {
 			t.Fatalf("%s accepted=%v want=%v", step.name, got, step.want)
 		}
 	}

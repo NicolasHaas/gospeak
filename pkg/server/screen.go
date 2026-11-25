@@ -147,6 +147,8 @@ func (s *Server) handleScreenConn(conn net.Conn) {
 }
 
 func (s *Server) handleScreenPacket(sessionID uint32, pkt *protocol.ScreenPacket) {
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
 	if pkt == nil || len(pkt.Payload) == 0 {
 		return
 	}

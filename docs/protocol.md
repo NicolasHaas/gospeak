@@ -1,16 +1,27 @@
 # GoSpeak Protocol
 
-GoSpeak uses three transport layers: a **TCP/TLS 1.3 control plane** for signalling, a **UDP voice plane** for real-time audio, and a **TCP/TLS screen plane** for low-rate screen-share media.
+GoSpeak uses three transport layers: a **TCP/TLS 1.3 control plane** for
+signalling, a **UDP voice plane** for real-time audio, and a **TCP/TLS screen
+plane** for low-rate screen-share media.
 
 ## Control Plane (TCP/TLS)
 
 - **Port**: 9600 (default)
-- **Transport**: TCP with TLS 1.3 (self-signed certificates auto-generated on first run)
-- **Framing**: Length-prefixed JSON. Each message is preceded by a 4-byte big-endian uint32 length header.
-- **Serialization**: JSON with `omitempty`. Only the populated field in `ControlMessage` is serialized.
+- **Transport**: TCP with TLS 1.3 (self-signed certificates auto-generated on
+  first run)
+- **Framing**: Length-prefixed JSON. Each message is preceded by a 4-byte
+  big-endian uint32 length header.
+- **Serialization**: JSON with `omitempty`. Only the populated field in
+  `ControlMessage` is serialized.
 
 ### Message Envelope
-Every control message is a `ControlMessage` struct with exactly one field set. Writers reject empty envelopes, envelopes with multiple populated fields, and `null` message values. Readers additionally reject repeated top-level fields (including escaped equivalents), unknown top-level fields, and malformed or trailing JSON. Unknown fields are rejected deliberately: peers using a protocol version newer than the reader's must not send message types the reader does not know.
+Every control message is a `ControlMessage` struct with exactly one field set.
+Writers reject empty envelopes, envelopes with multiple populated fields, and
+`null` message values. Readers additionally reject repeated top-level fields
+(including escaped equivalents), unknown top-level fields, and malformed or
+trailing JSON. Unknown fields are rejected deliberately: peers using a protocol
+version newer than the reader's must not send message types the reader does not
+know.
 
 - `AuthRequest`
 - `AuthResponse`
@@ -27,6 +38,8 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `DeleteChannelRequest`
 - `CreateTokenRequest`
 - `CreateTokenResponse`
+- `ListInvitesRequest` / `ListInvitesResponse`
+- `RevokeInviteRequest` / `RevokeInviteResponse`
 - `KickUserRequest`
 - `BanUserRequest`
 - `ListBansRequest`
@@ -54,9 +67,27 @@ Every control message is a `ControlMessage` struct with exactly one field set. W
 - `ErrorResponse`
 - `Ping` / `Pong`
 
+### Invite management
+
+Administrators can use Server Settings - Manage Invites to list invite metadata
+and revoke a selected numeric invite ID. `ListInvitesRequest` uses a nonnegative
+`after_id` cursor and a `limit` of 1-100 (zero defaults to 100); `has_more`
+indicates another page. Pages include expired and exhausted invites, but never
+bootstrap credentials, raw invite values or hashes. Both invite operations
+return their own response with an `error` on denial or failure. Revocation sets
+the invite's expiry to 1970-01-01 00:00:01 UTC and retains its metadata row; an
+absent or already-revoked invite returns `revoked: false`. Existing accounts and
+their personal credentials remain valid. Invite creation limits and expiry
+policy are unchanged.
+
 ### Control heartbeat
 
-Clients send `Ping` every 60 seconds, and the server echoes its timestamp in `Pong`. The server closes authenticated control connections after five minutes without a complete valid frame. Voice and screen traffic do not renew this idle deadline. After authentication, both client and server allow five seconds from the first plaintext byte of a control frame to receive the remaining length prefix and payload. Partial traffic does not extend the completion deadline.
+Clients send `Ping` every 60 seconds, and the server echoes its timestamp in
+`Pong`. The server closes authenticated control connections after five minutes
+without a complete valid frame. Voice and screen traffic do not renew this idle
+deadline. After authentication, both client and server allow five seconds from
+the first plaintext byte of a control frame to receive the remaining length
+prefix and payload. Partial traffic does not extend the completion deadline.
 
 ### Wire Format
 
@@ -98,26 +129,37 @@ sequenceDiagram
 
 The authentication response includes the initial channel snapshot and remains
 first on the connection. Channel join acknowledgements and chat, errors and
-other reliable events remain FIFO. Changed membership, user state, channels
-and roles mark the full server state dirty. One server-owned publisher checks
-that mark every 100 ms; a burst before a tick needs only one snapshot and
-fanout. A mutation during a flush marks the next tick dirty again.
+other reliable events remain FIFO. Changed membership, user state, channels and
+roles mark the full server state dirty. One server-owned publisher checks that
+mark every 100 ms; a burst before a tick needs only one snapshot and fanout. A
+mutation during a flush marks the next tick dirty again.
 
-Each client's existing 64-entry writer queue replaces its pending state with
-the latest snapshot until a reliable message is enqueued. That message seals
-the preceding state: later snapshots cannot move ahead of its acknowledgement
-or event. An in-flight write is immutable. Reliable messages are never replaced;
-a full reliable backlog still disconnects the slow client. Explicit channel
-list replies and post-authentication repairs remain immediate.
+Each client's existing 64-entry writer queue replaces its pending state with the
+latest snapshot until a reliable message is enqueued. That message seals the
+preceding state: later snapshots cannot move ahead of its acknowledgement or
+event. An in-flight write is immutable. Reliable messages are never replaced; a
+full reliable backlog still disconnects the slow client. Explicit channel list
+replies and post-authentication repairs remain immediate.
+
+A failed channel read never becomes an empty snapshot. Channel list requests
+receive an internal error; failed state refreshes retain the previous state and
+retry through the existing publisher. New accounts require a successful channel
+read before provisioning. If the refresh after provisioning fails, the
+authentication response still delivers the personal token with that known-good
+snapshot. Existing-account authentication fails if its required channel read
+fails.
 
 Join membership and its successful acknowledgement enqueue share the snapshot
 publication lock. A concurrent flush therefore cannot expose the joining
 client's new membership before that client's acknowledgement. Socket writes
 remain outside the publication lock.
 
-This bounds mutation-driven snapshot work, not the full-state fanout cost.
-Each recipient still receives a full snapshot, subject to the 512 KiB frame
-limit. Coalescing alone does not establish a 500-user capacity guarantee.
+This bounds mutation-driven snapshot work, not the full-state fanout cost. Each
+recipient still receives a full snapshot, subject to the 512 KiB frame limit.
+The shared [channel state budget](channels.md#server-wide-state-budget) reserves
+space for all supported sessions and the authentication envelope. Snapshot
+construction counts each session at most once, even during channel moves. These
+byte bounds do not establish a throughput capacity guarantee.
 
 ### Channel Operations
 
@@ -156,17 +198,108 @@ sequenceDiagram
     S->>C: ServerStateEvent{channels}
 ```
 
-Temporary sub-channels are removed five minutes after becoming empty. Occupied temporary channels remain available, while deleting a parent makes its temporary children eligible for removal. Open servers allow two temporary channels per user; invite-only servers allow five.
+Channel creation requires an existing parent, or `parentID = 0` for a root
+channel. Deletion is refused if the channel does not exist, has children, is
+referenced by an active invite or any account scope, or is the last remaining
+channel. Expired or exhausted invite rows alone no longer prevent deletion.
+Expiry follows redemption: an invite is expired strictly after its stored
+expiry; zero max uses means unlimited, not exhausted. These checks are atomic
+with the datastore write and also apply to temporary-channel cleanup. Deletion
+never cascades or broadens account scopes, and does not delete invite history,
+bootstrap markers or users.
+
+Temporary sub-channels are removed five minutes after becoming empty unless a
+deletion guard above applies. Occupied temporary channels with an existing
+parent remain available; legacy temporary rows with a missing parent are
+eligible for cleanup under the same guards. Refused cleanup schedules a retry
+after 30 seconds without logging an error for the refusal. Open servers allow
+two temporary channels per user; invite-only servers allow five.
+
+Invite scope `0` is unrestricted. A new nonzero scope must name an existing
+permanent channel; negative and temporary-channel scopes are rejected atomically
+at issuance. A scope restricts joining and chat to that exact channel, not its
+descendants. Previously issued active temporary-scoped invites remain redeemable
+and protect their channel, and existing scoped accounts continue to protect it
+even after the invite expires or is exhausted. Operators must resolve such
+durable references before the room can expire; this change neither deletes
+historic credentials/accounts nor automatically repairs or broadens their
+scopes.
 
 ### Chat
 
-When persistence is enabled, the server stores a message before broadcasting it. It takes sender identity from the authenticated session, not the request. A client may send `ChatMessage{channel_id, text}` for an existing channel without joining voice; a zero channel ID still means the current voice channel for older clients. An invite scoped to one channel cannot read or write another channel's chat. Unscoped accounts may read and write any existing channel, matching the current channel model.
+When persistence is enabled, the server stores a message before broadcasting it.
+It takes sender identity from the authenticated session, not the request. A
+client may send `ChatMessage{channel_id, text}` for an existing channel without
+joining voice; a zero channel ID still means the current voice channel for older
+clients. An invite scoped to one channel cannot read or write another channel's
+chat. Unscoped accounts may read and write any existing channel, matching the
+current channel model.
 
-`ChatHistoryRequest{channel_id, before_id, limit}` returns `ChatHistoryResponse{channel_id, messages, has_more}` in descending message-ID order. The first page uses `before_id = 0`; subsequent pages use the last message ID from the previous page. Pages default to 40 and cannot exceed 40. Requesting history also selects that channel for live chat events on the control connection, independently of voice membership. Older clients that never request history continue to receive live events for their voice channel. The server clears the text selection on disconnect. History responses are snapshots, not ordered barriers against live events: a delete event may arrive before an in-flight history response containing the deleted row. Clients must retain deleted message IDs for the active text selection and filter both later history pages and late chat events against those IDs; reset that set when selecting a different channel or reconnecting.
+`ChatHistoryRequest{channel_id, before_id, limit}` returns
+`ChatHistoryResponse{channel_id, messages, has_more}` in descending message-ID
+order. The first page uses `before_id = 0`; subsequent pages use the last
+message ID from the previous page. Pages default to 40 and cannot exceed 40.
+Requesting history also selects that channel for live chat events on the control
+connection, independently of voice membership. Older clients that never request
+history continue to receive live events for their voice channel. The server
+clears the text selection on disconnect. History responses are snapshots, not
+ordered barriers against live events: a delete event may arrive before an
+in-flight history response containing the deleted row. Clients must retain
+deleted message IDs for the active text selection and filter both later history
+pages and late chat events against those IDs; reset that set when selecting a
+different channel or reconnecting.
 
-`ChatEvent` includes a stored message ID when persistence is enabled. The server targets 500 retained messages per channel and 30 days of history by default. Operators can change `-chat-history-limit` (0 disables storage and history; 1..10000 retains messages) and `-chat-max-age` (a Go duration; `0` disables age expiry). With storage disabled, live chat still works and events have ID 0. Existing stored rows are left untouched, hidden from history, and not swept while disabled; re-enabling persistence exposes any rows still within the configured retention period. Each write prunes at most 1000 excess rows in its channel; a large imported count backlog can remain above the target until further writes. A one-minute sweep removes up to 1000 age-expired rows per pass, including idle channels. Oversized legacy messages are truncated for history responses without changing their stored contents. Live events can overlap a history page, so clients should deduplicate by nonzero message ID.
+`AuthResponse.history_request_ids = true` advertises per-attempt history
+correlation. With that flag, each client attempt (including retries of the same
+page) uses a fresh positive signed 64-bit `request_id` inside
+`ChatHistoryRequest`; the server echoes it in `ChatHistoryResponse`, including
+empty and persistence-disabled pages. Negative IDs are refused, and JSON values
+outside the signed 64-bit range are rejected by decoding. An ID grants no access
+and changes no control budget. The client tracks one active page per connection
+generation and ignores zero, unknown, duplicate, superseded or wrong-channel
+replies. The UI also matches the ID before changing its timer, rows, cursor or
+paging state, so a response already queued before A -> B -> A cannot complete
+the newer A attempt. IDs are not reused across reconnects of the same client
+engine. Timeout/reset retires the pending attempt; generic errors remain
+uncorrelated and the existing retry timeout still applies.
 
-A moderator or administrator may send `ChatDeleteRequest{channel_id, message_id}` to remove any stored message in a channel their account can access, regardless of the author's role. The server deletes only a matching channel/message pair and emits `ChatDeleteEvent{channel_id, message_id}` to text subscribers; the requester also receives it as an acknowledgement. The client should treat duplicate deletion events as harmless. Older clients receive live chat but not deletion events because they reject unknown protocol fields, so an already displayed message can remain visible until they disconnect. Deletion is unavailable while persistence is disabled; live-only messages (ID 0) cannot be deleted after delivery. The desktop client loads history on text-channel selection, pages through older messages, and offers deletion to moderators and administrators.
+Compatibility uses the existing message envelopes and optional nested fields,
+not a new protocol version. Older clients send no ID; the server retains the
+legacy response shape by omitting zero IDs. New clients connecting to servers
+without the authentication flag send no ID and retain legacy history behavior.
+That pairing cannot distinguish stale replies for repeated same-channel/page
+attempts; both peers need identity support for the matching guarantee. A capable
+connection never falls back after receiving a zero-ID reply. Unknown top-level
+message alternatives remain rejected. Request identity does not acknowledge
+successful text selection: a refused history request can still leave the UI and
+server with different text selections.
+
+`ChatEvent` includes a stored message ID when persistence is enabled. The server
+targets 500 retained messages per channel and 30 days of history by default.
+Operators can change `-chat-history-limit` (0 disables storage and history;
+1..10000 retains messages) and `-chat-max-age` (a Go duration; `0` disables age
+expiry). With storage disabled, live chat still works and events have ID 0.
+Existing stored rows are left untouched, hidden from history, and not swept
+while disabled; re-enabling persistence exposes any rows still within the
+configured retention period. Each write prunes at most 1000 excess rows in its
+channel; a large imported count backlog can remain above the target until
+further writes. A one-minute sweep removes up to 1000 age-expired rows per pass,
+including idle channels. Oversized legacy messages are truncated for history
+responses without changing their stored contents. Live events can overlap a
+history page, so clients should deduplicate by nonzero message ID.
+
+A moderator or administrator may send
+`ChatDeleteRequest{channel_id, message_id}` to remove any stored message in a
+channel their account can access, regardless of the author's role. The server
+deletes only a matching channel/message pair and emits
+`ChatDeleteEvent{channel_id, message_id}` to text subscribers; the requester
+also receives it as an acknowledgement. The client should treat duplicate
+deletion events as harmless. Older clients receive live chat but not deletion
+events because they reject unknown protocol fields, so an already displayed
+message can remain visible until they disconnect. Deletion is unavailable while
+persistence is disabled; live-only messages (ID 0) cannot be deleted after
+delivery. The desktop client loads history on text-channel selection, pages
+through older messages, and offers deletion to moderators and administrators.
 
 ### Screen Sharing Signalling
 
@@ -179,7 +312,12 @@ The control plane carries screen-share lifecycle messages only:
 - `ScreenShareUnsubscribeRequest`
 - `ScreenShareEvent`
 
-`ScreenShareEvent` is broadcast to channel members for presence updates. Active events carry `media_cipher`. A targeted copy with an `encryption_key` is sent to the active sharer, to users already in the channel when sharing starts, and to current channel members if the sharer later shares the active key with the channel again. The client disconnects if the active event's suite differs from the authenticated choice.
+`ScreenShareEvent` is broadcast to channel members for presence updates. Active
+events carry `media_cipher`. A targeted copy with an `encryption_key` is sent to
+the active sharer, to users already in the channel when sharing starts, and to
+current channel members if the sharer later shares the active key with the
+channel again. The client disconnects if the active event's suite differs from
+the authenticated choice.
 
 ### Admin Operations
 
@@ -206,20 +344,54 @@ The control plane carries screen-share lifecycle messages only:
 
 - **Port**: 9601 (default)
 - **Transport**: Raw UDP
-- **Encryption**: AES-128-GCM (default), AES-256-GCM, or ChaCha20-Poly1305 (shared key and explicit suite distributed in `AuthResponse` over TLS)
+- **Encryption**: AES-128-GCM (default), AES-256-GCM, or ChaCha20-Poly1305
+  (shared key and explicit suite distributed in `AuthResponse` over TLS)
 - **Codec**: Opus at 48 kHz mono, 20ms frames (960 samples)
 
 ### Authenticated Endpoint Registration
 
-A voice endpoint is not learned from an ordinary voice packet. During control authentication, the server creates a random 32-byte `voice_registration_key` for that session and returns it inside the TLS-protected `AuthResponse`. The client immediately sends this registration datagram and refreshes it every five seconds:
+A voice endpoint is never learned from an ordinary voice packet. Control
+authentication returns a random 32-byte per-session `voice_registration_key`
+over TLS. The client immediately sends a GSR2 request and refreshes it every
+five seconds, including while silent or muted. All three registration messages
+have the same 65-byte format; integers are big-endian:
 
 ```
-[Magic "GSR1":4B][SessionID:4B][Counter:8B][HMAC-SHA-256:32B]
+[Magic "GSR2":4B][SessionID:4B][Counter:8B][Kind:1B][Challenge:16B][HMAC-SHA-256:32B]
 ```
 
-The HMAC covers the first 16 bytes. The server accepts only a valid proof for the named active session with a counter greater than every previously accepted counter. Once a registration is accepted, the same datagram cannot be replayed. A source-address change requires a fresh proof and is accepted at most once per five seconds; this permits controlled NAT rebinding without STUN or TURN. Voice packets from unregistered or mismatched endpoints are dropped.
+The HMAC covers the first 33 bytes, including kind and challenge. Kind `0` is a
+request with an all-zero challenge. Its positive 64-bit counter must exceed the
+last accepted request counter. A live endpoint at the same address refreshes
+immediately. For a new, changed or expired endpoint, the server instead returns
+kind `1` with a fresh random 128-bit challenge. The client verifies the server
+HMAC, session and outstanding counter, then returns kind `2` with the same
+challenge and counter, signed again. The server commits the destination only if
+that response matches the pending session, source IP/port/zone, counter and
+challenge within three seconds. A server challenge cannot be reflected as a
+client response. Requests supersede older pending challenges; responses are
+accepted once. Counters never wrap: exhaustion requires reconnecting.
 
-This field is required: clients and servers from before authenticated UDP registration are not voice-compatible with this protocol revision and fail closed rather than falling back to first-packet binding.
+A session HMAC proves key possession, so it cannot by itself authorize a spoofed
+UDP source. The server retains at most one pending challenge per active session
+and sends at most one equal-sized challenge per accepted request. Malformed
+packets and unknown sessions receive no reply; bad HMACs create no pending or
+budget state. Accepted requests and matching responses each consume one token
+from the existing voice packet/byte budget, charged at the maximum voice packet
+size. Source changes remain limited to one per five seconds; same-address
+refreshes do not postpone that rebind clock.
+
+Destinations expire after 30 seconds without an accepted registration refresh,
+returned proof or authenticated, replay-accepted, authorized and budget-admitted
+voice packet from that endpoint. Invalid, replayed, muted or over-budget voice
+does not renew activity. Forwarding eligibility checks expiry directly, without
+a janitor. Ordinary voice cannot revive an expired endpoint; a fresh challenge
+exchange can. Expiry and rebinding preserve media replay state and registration
+counters until the control session ends.
+
+**Compatibility:** GSR2 requires coordinated client and server upgrades. GSR1
+HMAC-only peers are not voice-compatible. There is no legacy registration or
+first-packet binding fallback, and no STUN, TURN or cloud service.
 
 ### Packet Format
 
@@ -238,8 +410,8 @@ This field is required: clients and servers from before authenticated UDP regist
 ```
 
 The 64-bit unsigned channel field carries positive SQLite channel IDs without
-truncation. The 20-byte header is authenticated as AEAD additional data.
-Clients and servers using the former 14-byte voice header are not wire-compatible.
+truncation. The 20-byte header is authenticated as AEAD additional data. Clients
+and servers using the former 14-byte voice header are not wire-compatible.
 
 ### Voice Pipeline
 
@@ -275,31 +447,61 @@ graph LR
 The server does **not** decode Opus audio. It:
 
 1. Receives a UDP packet from a client
-2. Parses the 20-byte plaintext header and verifies the registered source endpoint and current channel
-3. Opens the selected AEAD payload transiently to authenticate the ciphertext and complete header; it does not decode, log, or retain the Opus plaintext
+2. Parses the 20-byte plaintext header and verifies the registered source
+   endpoint and current channel
+3. Opens the selected AEAD payload transiently to authenticate the ciphertext
+   and complete header; it does not decode, log, or retain the Opus plaintext
 4. Applies a per-session 64-packet replay window after authentication
-5. Forwards the original ciphertext **as-is** to all other members of that channel
-6. Skips the sender (no echo) and any deafened users
+5. Forwards the original ciphertext **as-is** to all other members of that
+   channel
+6. Skips the sender (no echo), deafened users and destinations without an
+   unexpired return-routability proof
+
+### Incoming voice admission
+
+Clients admit voice only for the active connection generation, current channel
+and a known non-self channel member, after AEAD authentication and a per-session
+64-packet replay check. Rejected packets do not allocate decoder/jitter state or
+refresh speaker activity. The shared media key does not prove a known speaker's
+authorship: a key holder able to bypass the client's server-source filtering, or
+a malicious server, remains outside this protection.
+
+`AuthResponse` and `ServerStateEvent` carry `live_session_ids`, a complete list
+of at most 1024 distinct nonzero session IDs, including connected sessions
+outside all channels. Channel members must occur in that list exactly once
+across channels. Replay history survives channel leave/rejoin and idle decoder
+cleanup; an authoritative disconnect retires replay and speaker state. Missing
+or null lifecycle data disables incoming voice without erasing replay history.
+An empty list is authoritative only when no channel members remain. Older
+clients ignore the added nested JSON field and retain their previous receive
+behavior; clients requiring lifecycle data cannot receive voice from servers
+that omit it. The 512 KiB control-frame ceiling is unchanged; channel-state
+admission reserves space for the roster.
 
 ### Nonce Construction
 
-The selected AEAD nonce (12 bytes) is deterministic and never reused while a voice key is active:
+The selected AEAD nonce (12 bytes) is deterministic and never reused while a
+voice key is active:
 
 ```
 Nonce = [SessionID (4B)] [SeqNum (4B)] [0x00 0x00 0x00 0x00 (4B)]
 ```
 
-- `SessionID` is allocated from a random starting point and is never issued again during the server lifecycle, even after its session disconnects
-- the shared voice key is generated for that same server lifecycle, so historical sessions cannot repeat a nonce under the same key
-- `SeqNum` starts at one and increases monotonically per sender; the client refuses to send after `uint32` exhaustion and requires a reconnect instead of wrapping to zero
+- `SessionID` is allocated from a random starting point and is never issued
+  again during the server lifecycle, even after its session disconnects
+- the shared voice key is generated for that same server lifecycle, so
+  historical sessions cannot repeat a nonce under the same key
+- `SeqNum` starts at one and increases monotonically per sender; the client
+  refuses to send after `uint32` exhaustion and requires a reconnect instead of
+  wrapping to zero
 
 Nonce uniqueness and replay rejection are separate properties. After AEAD
 authentication, the server accepts each positive sequence number once within a
-64-packet sliding window. An unseen authenticated packet up to 63 positions behind
-the high-water mark is accepted once to tolerate UDP reordering. Duplicates,
-sequence zero, wrapped sequences, and packets at least 64 positions behind the
-high-water mark are rejected. Replay state lives until the control session ends,
-so jitter-buffer cleanup does not reopen the window.
+64-packet sliding window. An unseen authenticated packet up to 63 positions
+behind the high-water mark is accepted once to tolerate UDP reordering.
+Duplicates, sequence zero, wrapped sequences, and packets at least 64 positions
+behind the high-water mark are rejected. Replay state lives until the control
+session ends, so jitter-buffer cleanup does not reopen the window.
 
 ---
 
@@ -314,10 +516,22 @@ so jitter-buffer cleanup does not reopen the window.
 ### Connection Flow
 
 1. Client authenticates on the control plane.
-2. When screen sharing is enabled, the server sets `screen_share_enabled` and returns `screen_addr` plus a session-scoped `screen_auth_token`. These optional fields are omitted when the feature is disabled.
-3. The client opens the screen-plane TLS connection only when `screen_share_enabled` is true, then authenticates with the token.
+2. When screen sharing is enabled, the server sets `screen_share_enabled` and
+   returns `screen_addr` plus a session-scoped `screen_auth_token`. These
+   optional fields are omitted when the feature is disabled.
+3. The client opens the screen-plane TLS connection only when
+   `screen_share_enabled` is true, then authenticates with the token.
 4. Screen-share start/stop/subscribe still happen on the control plane.
 5. Actual encrypted frame packets flow over the screen plane.
+
+If the optional screen TCP dial is refused, times out, or reports an unreachable
+host/network, the client keeps voice and chat connected and shows one warning.
+Screen sharing stays unavailable for that connection, including after
+server-state updates; reconnect manually to try again. DNS errors, invalid
+advertised addresses or credentials, TLS/certificate/identity failures, and
+screen authentication write failures abort the connection attempt. Cancellation
+also aborts the attempt. The client does not retry the screen connection
+automatically.
 
 ### Relay Logic
 
@@ -336,14 +550,14 @@ Each screen packet is length-prefixed on the TCP stream:
 [Length:4B][SessionID:4B][SeqNum:4B][Ciphertext+AuthTag]
 ```
 
-The selected AEAD authenticates the 8-byte packet header `[SessionID|SeqNum]` as additional data.
-The encrypted payload contains timestamp, frame dimensions, frame format, and
-frame bytes. The relay checks active-sharer authorization and pacing from the
-fixed header before allocating the bounded frame body, then authenticates the AEAD tag
-before committing a strictly increasing sequence. Replays and out-of-order
-screen packets are rejected because this plane uses an ordered TCP stream.
-`SeqNum` starts at one and continues across screen-share key changes within the
-same authenticated control connection. A new key creates fresh replay state on
-the server and viewers without resetting the sender's counter. The counter resets
-only for a new control-connection generation, and the sender stops sharing before
-it can wrap.
+The selected AEAD authenticates the 8-byte packet header `[SessionID|SeqNum]` as
+additional data. The encrypted payload contains timestamp, frame dimensions,
+frame format, and frame bytes. The relay checks active-sharer authorization and
+pacing from the fixed header before allocating the bounded frame body, then
+authenticates the AEAD tag before committing a strictly increasing sequence.
+Replays and out-of-order screen packets are rejected because this plane uses an
+ordered TCP stream. `SeqNum` starts at one and continues across screen-share key
+changes within the same authenticated control connection. A new key creates
+fresh replay state on the server and viewers without resetting the sender's
+counter. The counter resets only for a new control-connection generation, and
+the sender stops sharing before it can wrap.

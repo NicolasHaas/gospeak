@@ -17,6 +17,7 @@ type Session struct {
 	VoiceRegistrationKey     []byte
 	VoiceRegistrationCounter uint64
 	VoiceEndpointUpdatedAt   time.Time
+	VoiceEndpointLastSeen    time.Time
 	UDPAddr                  *net.UDPAddr
 	Muted                    bool
 	Deafened                 bool

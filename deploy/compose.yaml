@@ -1,8 +1,8 @@
 # GoSpeak Server example Docker Compose
-# Usage: docker compose up -d
+# Usage (repository root): docker compose -f deploy/compose.yaml up -d gospeak
 #
 # On first run, read the admin bootstrap credential from the data volume:
-#   docker compose cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
+#   docker compose -f deploy/compose.yaml cp gospeak:/data/bootstrap-admin.token ./bootstrap-admin.token
 
 services:
   gospeak:

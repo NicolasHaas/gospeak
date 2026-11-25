@@ -136,13 +136,18 @@ type queuedControlMessage struct {
 
 type controlClient struct {
 	net.Conn
-	sessionID   uint32
-	peerIP      string
-	sendQueue   chan *queuedControlMessage
-	done        chan struct{}
-	mu          sync.Mutex
-	closed      bool
-	authPending bool // registered for bans, but ordinary publication is not ready
+	sessionID             uint32
+	peerIP                string
+	sendQueue             chan *queuedControlMessage
+	done                  chan struct{}
+	mu                    sync.Mutex
+	closed                bool
+	terminal              bool // detached response transport, never command/event authority
+	writeMu               sync.Mutex
+	beforeCredentialDrain func() // test scheduling seam, set before workers start
+	afterQueueReceive     func() // test scheduling seam, set before workers start
+	credentialHash        string // credential verified at activation, immutable afterwards
+	authPending           bool   // registered for bans, but ordinary publication is not ready
 
 	statePending bool                  // a suppressed state broadcast needs a post-auth snapshot
 	pendingState *queuedControlMessage // replaceable suffix, protected by mu
@@ -188,7 +193,7 @@ func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
 	result := make(chan error, 1)
 	if err := c.enqueue(queuedControlMessage{message: msg, result: result}); err == nil {
 		select {
-		case <-result:
+		case <-result: //nolint:errcheck // Terminal response is best-effort; close on success or failure.
 		case <-time.After(controlWriteTimeout):
 		}
 	}
@@ -197,7 +202,7 @@ func (c *controlClient) sendAndClose(msg *pb.ControlMessage) {
 
 func (c *controlClient) enqueue(item queuedControlMessage) error {
 	c.mu.Lock()
-	if c.closed {
+	if c.closed || c.terminal {
 		c.mu.Unlock()
 		return errControlClientClosed
 	}
@@ -241,8 +246,11 @@ func (c *controlClient) writeLoop() {
 		case <-c.done:
 			return
 		case queued := <-c.sendQueue:
+			if c.afterQueueReceive != nil {
+				c.afterQueueReceive()
+			}
 			c.mu.Lock()
-			if c.closed {
+			if c.closed || c.terminal {
 				c.mu.Unlock()
 				return
 			}
@@ -251,11 +259,20 @@ func (c *controlClient) writeLoop() {
 				c.pendingState = nil
 			}
 			c.mu.Unlock()
+			c.writeMu.Lock()
+			c.mu.Lock()
+			retired := c.closed || c.terminal
+			c.mu.Unlock()
+			if retired {
+				c.writeMu.Unlock()
+				return
+			}
 			err := c.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
 			if err == nil {
 				err = protocol.WriteControlMessage(c.Conn, item.message)
 			}
 			_ = c.SetWriteDeadline(time.Time{})
+			c.writeMu.Unlock()
 			if item.result != nil {
 				item.result <- err
 			}
@@ -649,6 +666,16 @@ func (ch *ControlHandler) broadcastToChannel(channelID int64, msg *pb.ControlMes
 
 // StartControl starts the TCP/TLS control listener.
 func (s *Server) StartControl(st datastore.DataProviderFactory) error {
+	if err := s.validateStateConfig(); err != nil {
+		return err
+	}
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		return fmt.Errorf("server: read initial channel state: %w", err)
+	}
+	if err := validateChannelState(channels); err != nil {
+		return err
+	}
 	if !s.beginTask() {
 		return fmt.Errorf("server: start control: %w", s.ctx.Err())
 	}
@@ -791,6 +818,9 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		s.recordSessionRejection(remoteAddr, capacityErr)
 		markCredentialsValid()
 		sendError(conn, 3, "server session capacity reached")
+		if s.sessionAdmissionRefused != nil {
+			s.sessionAdmissionRefused()
+		}
 		return true
 	}
 	var userControlLimiter *controlMessageLimiter
@@ -814,7 +844,8 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}()
 
-	// First message must be AuthRequest.
+	// Authentication or a one-use recovery redemption; neither grants authority
+	// until its own persisted checks succeed.
 	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.PreAuthTimeout))
 	msg, err := protocol.ReadControlMessage(conn)
 	if err != nil {
@@ -822,6 +853,12 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear deadline
+	if msg.RedeemPersonalRecoveryReq != nil {
+		if s.redeemPersonalRecovery(handler, st, conn, msg.RedeemPersonalRecoveryReq) {
+			markCredentialsValid()
+		}
+		return
+	}
 
 	if msg.AuthRequest == nil {
 		sendError(conn, 1, "first message must be auth_request")
@@ -872,6 +909,20 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		}
 	}
 
+	if authReq.PersonalOnly && (user == nil || user.Username != authReq.Username) {
+		sendError(conn, 2, "authentication failed")
+		return
+	}
+	// Keep required state before creating credentials that must reach the client.
+	var initialChannels []model.Channel
+	if user == nil {
+		initialChannels, err = st.NonTx().ListChannels()
+		if err != nil {
+			slog.Error("read authentication channels failed")
+			sendError(conn, 3, "internal error")
+			return
+		}
+	}
 	var channelScope int64
 	var sessionReservation *SessionReservation
 	var preparedSession *model.Session
@@ -1133,9 +1184,29 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			return
 		}
 	}
+	// Serialize the final credential check and registration with credential
+	// mutation + retirement. The initial lookup predates ban coordination.
+	credentialHash := tokenHash
+	if autoToken != "" {
+		credentialHash = crypto.HashToken(autoToken)
+	}
+	s.remoteModerationMu.Lock()
+	credentialUser, credentialErr := st.NonTx().GetUserByPersonalTokenHash(credentialHash)
+	if credentialErr != nil {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 3, "internal error")
+		return
+	}
+	if credentialUser == nil || credentialUser.ID != user.ID {
+		s.remoteModerationMu.Unlock()
+		sendError(conn, 2, "authentication failed")
+		return
+	}
 	session, banned := s.activateAfterBanChecks(user.ID, peerIP, sessionReservation, persistedBan, persistedIPBan, bypassIPBan, func(session *model.Session) {
 		conn = handler.registerConn(session.ID, conn, true)
+		conn.(*controlClient).credentialHash = credentialHash
 	})
+	s.remoteModerationMu.Unlock()
 	banCheckUserID = 0
 	peerIP = ""
 	if banned {
@@ -1149,45 +1220,22 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	}
 	sessionID := session.ID
 
-	defer func() {
-		stopEvent, stopped := s.screenShare.StopBySession(sessionID)
-		// Cleanup on disconnect
-		chID := s.channels.Leave(sessionID)
-		if stopped && stopEvent != nil {
-			s.metrics.ScreenSharesStopped.Add(1)
-			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
-			slog.Info("screen share stopped", "user", user.Username, "session", sessionID, "channel", stopEvent.ChannelID, "reason", "disconnect")
-			handler.broadcastToChannel(stopEvent.ChannelID, &pb.ControlMessage{ScreenShareEvent: stopEvent}, sessionID)
-		} else {
-			s.metrics.ScreenShareSubscribers.Store(s.screenShare.SubscriberCount())
-		}
-		handler.removeConn(sessionID)
-		s.removeSessionAndScreenConn(sessionID)
-		s.removeVoiceStat(sessionID)
-		s.metrics.TotalDisconnects.Add(1)
-		slog.Debug("client disconnected", "user", user.Username, "session", sessionID)
-
-		if chID > 0 {
-			handler.broadcastToChannel(chID, &pb.ControlMessage{
-				ChannelLeftEvent: &pb.ChannelLeftEvent{
-					ChannelID: chID,
-					UserID:    user.ID,
-					Username:  user.Username,
-				},
-			}, sessionID)
-
-			// Auto-delete temp channels when empty
-			s.cleanupTempChannel(chID, st)
-		}
-
-		if chID > 0 {
-			s.broadcastServerState(st, handler)
-		}
-	}()
+	defer s.cleanupControlSession(handler, st, sessionID)
 
 	// Build channel list
-	channels, _ := st.NonTx().ListChannels()
-	channelInfos := s.buildChannelInfos(channels)
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		slog.Error("read authentication channels failed")
+		if autoToken == "" {
+			conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 3, Message: "internal error"}})
+			return
+		}
+		// Provisioning already committed. Deliver the token with the last good
+		// snapshot and let the existing bounded publisher repair it.
+		channels = initialChannels
+		s.broadcastServerState(st, handler)
+	}
+	channelInfos, liveSessionIDs := s.buildVoiceState(channels)
 	screenAddr := ""
 	screenAuthToken := ""
 	if s.cfg.EnableScreenShare {
@@ -1210,23 +1258,35 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			ScreenAuthToken:      screenAuthToken,
 			ScreenShareEnabled:   s.cfg.EnableScreenShare,
 			AutoToken:            autoToken,
+			HistoryRequestIDs:    true,
+			LiveSessionIDs:       liveSessionIDs,
 		},
 	}
 	// Refresh authority and publish the first frame in one policy epoch. Enqueue
 	// is bounded and nonblocking; no network operation runs under this lock.
 	s.remoteModerationMu.Lock()
 	currentUser, roleErr := st.NonTx().GetUserByID(user.ID)
-	if roleErr == nil && currentUser != nil {
+	_, sessionLive := s.sessions.GetSnapshot(sessionID)
+	credentialCurrent := roleErr == nil && currentUser != nil && currentUser.PersonalTokenHash == credentialHash && sessionLive
+	if credentialCurrent {
+		authResp.AuthResponse.UserID = currentUser.ID
+		authResp.AuthResponse.CredentialVersion, roleErr = st.NonTx().PersonalTokenVersion(currentUser.ID)
 		if sessionRole != currentUser.Role {
 			sessionRole = currentUser.Role
 			s.sessions.UpdateRoleByUserID(user.ID, sessionRole)
 		}
 		authResp.AuthResponse.Role = sessionRole.String()
-		err = conn.(*controlClient).enqueue(queuedControlMessage{message: authResp})
+		if roleErr == nil {
+			err = conn.(*controlClient).enqueue(queuedControlMessage{message: authResp})
+		}
 	}
 	s.remoteModerationMu.Unlock()
 	if roleErr != nil || currentUser == nil {
 		conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 3, Message: "internal error"}})
+		return
+	}
+	if !credentialCurrent {
+		conn.(*controlClient).sendAndClose(&pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 2, Message: "authentication failed"}})
 		return
 	}
 	if err != nil {
@@ -1234,6 +1294,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 		return
 	}
 	s.finishPreAuth(preAuthConn)
+	s.broadcastServerState(st, handler)
 	// Readiness is open and moderation is unlocked. Serialize the repair with
 	// other state snapshots so an older in-flight broadcast cannot overtake it.
 	client := conn.(*controlClient)
@@ -1241,7 +1302,7 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 	statePending := client.statePending
 	client.mu.Unlock()
 	if statePending {
-		s.sendServerState(st, conn)
+		s.sendServerState(st, handler, conn)
 	}
 
 	slog.Debug("client authenticated", "user", user.Username, "role", sessionRole, "session", sessionID)
@@ -1313,7 +1374,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 			// A shared shortage is not evidence that this sender abused its budget.
 			// Heartbeats need no response: the client does not wait for Pong.
 			if msg.Ping == nil {
-				if err := writeControlMessage(conn, &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}); err != nil {
+				response := &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 8, Message: "server control capacity reached"}}
+				if msg.ListInvitesReq != nil {
+					response = &pb.ControlMessage{ListInvitesResp: &pb.ListInvitesResponse{Error: "server control capacity reached"}}
+				}
+				if msg.RevokeInviteReq != nil {
+					response = &pb.ControlMessage{RevokeInviteResp: &pb.RevokeInviteResponse{Error: "server control capacity reached"}}
+				}
+				if isPersonalTokenRequest(msg) {
+					response = personalTokenResponse(msg, "server control capacity reached")
+				}
+				if err := writeControlMessage(conn, response); err != nil {
 					return
 				}
 			}
@@ -1326,6 +1397,17 @@ func (s *Server) handleControlConn(handler *ControlHandler, conn net.Conn, st da
 
 // handleMessage dispatches a control message to the appropriate handler.
 func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *pb.ControlMessage, st datastore.DataProviderFactory, conn net.Conn) {
+	if isPersonalTokenRequest(msg) {
+		s.handlePersonalToken(handler, sessionID, msg, st, conn)
+		return
+	}
+	// Drain already accepted work before credential mutation completion. This
+	// lock is not a DB/policy lock and may span bounded outbound work.
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	if _, live := s.sessions.GetSnapshot(sessionID); !live && msg.ListInvitesReq == nil && msg.RevokeInviteReq == nil {
+		return
+	}
 	switch {
 	case msg.JoinChannelRequest != nil:
 		s.handleJoinChannel(handler, sessionID, msg.JoinChannelRequest, st, conn)
@@ -1347,6 +1429,8 @@ func (s *Server) handleMessage(handler *ControlHandler, sessionID uint32, msg *p
 
 	case msg.CreateTokenReq != nil:
 		s.handleCreateToken(sessionID, msg.CreateTokenReq, st, conn)
+	case msg.ListInvitesReq != nil || msg.RevokeInviteReq != nil:
+		s.handleInvites(sessionID, msg, st, conn)
 
 	case msg.KickUserReq != nil:
 		s.handleKickUser(handler, sessionID, msg.KickUserReq, st, conn)
@@ -1542,7 +1626,12 @@ func (s *Server) handleLeaveChannel(handler *ControlHandler, sessionID uint32, s
 }
 
 func (s *Server) handleChannelList(st datastore.DataProviderFactory, conn net.Conn) {
-	channels, _ := st.NonTx().ListChannels()
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		slog.Error("read channel list failed")
+		sendError(conn, 3, "internal error")
+		return
+	}
 	infos := s.buildChannelInfos(channels)
 	_ = writeControlMessage(conn, &pb.ControlMessage{
 		ChannelListResponse: &pb.ChannelListResponse{Channels: infos},
@@ -1980,26 +2069,6 @@ func (s *Server) handleUnban(sessionID uint32, req *pb.UnbanRequest, st datastor
 	}
 }
 
-// channelUsers returns UserInfo for all sessions in a channel.
-func (s *Server) channelUsers(channelID int64) []pb.UserInfo {
-	members := s.channels.Members(channelID)
-	users := make([]pb.UserInfo, 0, len(members))
-	for _, sid := range members {
-		sess, ok := s.sessions.GetSnapshot(sid)
-		if ok {
-			users = append(users, pb.UserInfo{
-				SessionID: sess.ID,
-				ID:        sess.UserID,
-				Username:  sess.Username,
-				Role:      sess.Role.String(),
-				Muted:     sess.Muted,
-				Deafened:  sess.Deafened,
-			})
-		}
-	}
-	return users
-}
-
 func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, req *pb.SetUserRoleRequest, st datastore.DataProviderFactory, conn net.Conn) {
 	session, ok := s.sessions.GetSnapshot(sessionID)
 	if !ok {
@@ -2081,16 +2150,21 @@ func (s *Server) handleSetUserRole(handler *ControlHandler, sessionID uint32, re
 }
 
 // sendServerState sends the full server state to a single connection.
-func (s *Server) sendServerState(st datastore.DataProviderFactory, conn net.Conn) {
+func (s *Server) sendServerState(st datastore.DataProviderFactory, handler *ControlHandler, conn net.Conn) {
 	s.statePublicationMu.Lock()
 	if s.ctx.Err() != nil {
 		s.statePublicationMu.Unlock()
 		return
 	}
-	channels, _ := st.NonTx().ListChannels()
-	infos := s.buildChannelInfos(channels)
+	channels, err := st.NonTx().ListChannels()
+	if err != nil {
+		s.statePublicationMu.Unlock()
+		s.broadcastServerState(st, handler)
+		return
+	}
+	infos, liveSessionIDs := s.buildVoiceState(channels)
 	msg := &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare, LiveSessionIDs: liveSessionIDs},
 	}
 	if client, ok := conn.(*controlClient); ok {
 		err := client.enqueue(queuedControlMessage{message: msg})
@@ -2144,9 +2218,9 @@ func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *Con
 		s.statePublicationMu.Unlock()
 		return
 	}
-	infos := s.buildChannelInfos(channels)
+	infos, liveSessionIDs := s.buildVoiceState(channels)
 	msg := &pb.ControlMessage{
-		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare},
+		ServerStateEvent: &pb.ServerStateEvent{Channels: infos, ScreenShareEnabled: s.cfg.EnableScreenShare, LiveSessionIDs: liveSessionIDs},
 	}
 	handler.mu.RLock()
 	clients := make([]*controlClient, 0, len(handler.connMap))
@@ -2168,8 +2242,15 @@ func (s *Server) flushServerState(st datastore.DataProviderFactory, handler *Con
 
 // buildChannelInfos converts model channels to protocol channel infos.
 func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
+	infos, _ := s.buildVoiceState(channels)
+	return infos
+}
+
+func (s *Server) buildVoiceState(channels []model.Channel) ([]pb.ChannelInfo, []uint32) {
 	infos := make([]pb.ChannelInfo, len(channels))
+	indices := make(map[int64]int, len(channels))
 	for i, ch := range channels {
+		indices[ch.ID] = i
 		infos[i] = pb.ChannelInfo{
 			ID:               ch.ID,
 			Name:             ch.Name,
@@ -2178,10 +2259,26 @@ func (s *Server) buildChannelInfos(channels []model.Channel) []pb.ChannelInfo {
 			ParentID:         ch.ParentID,
 			IsTemp:           ch.IsTemp,
 			AllowSubChannels: ch.AllowSubChannels,
-			Users:            s.channelUsers(ch.ID),
+			Users:            []pb.UserInfo{},
 		}
 	}
-	return infos
+	// Snapshot sessions once: per-channel reads could count a moving session
+	// repeatedly and invalidate the reserved wire budget.
+	s.sessions.mu.RLock()
+	defer s.sessions.mu.RUnlock()
+	s.channels.mu.RLock()
+	defer s.channels.mu.RUnlock()
+	ids := make([]uint32, 0, len(s.sessions.sessions))
+	for _, sess := range s.sessions.sessions {
+		ids = append(ids, sess.ID)
+		if i, ok := indices[s.channels.sessionToChannel[sess.ID]]; ok {
+			infos[i].Users = append(infos[i].Users, pb.UserInfo{
+				SessionID: sess.ID, ID: sess.UserID, Username: sess.Username,
+				Role: sess.Role.String(), Muted: sess.Muted, Deafened: sess.Deafened,
+			})
+		}
+	}
+	return infos, ids
 }
 
 // cleanupTempChannel records when a temporary channel becomes empty. One

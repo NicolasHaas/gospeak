@@ -75,9 +75,9 @@ func (d *Decoder) Decode(opusData []byte) ([]int16, error) {
 // DecodePLC performs Packet Loss Concealment (generates audio to fill a gap).
 func (d *Decoder) DecodePLC() ([]int16, error) {
 	pcm := make([]int16, opusFrameSize)
-	n, err := d.dec.Decode(nil, pcm)
+	err := d.dec.DecodePLC(pcm)
 	if err != nil {
 		return nil, fmt.Errorf("audio: decode plc: %w", err)
 	}
-	return pcm[:n], nil
+	return pcm, nil
 }

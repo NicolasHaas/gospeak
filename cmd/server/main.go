@@ -60,12 +60,20 @@ func main() {
 }
 
 func run(cfg server.Config) (err error) {
+	if !cfg.ExportUsers && !cfg.ExportChannels && (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return fmt.Errorf("TLS certificate and key must be configured together")
+	}
 	if !cfg.ExportUsers && !cfg.ExportChannels && cfg.ChannelsFile != "" {
 		if err := server.ValidateChannelsFile(cfg.ChannelsFile); err != nil {
 			return fmt.Errorf("validate channels config: %w", err)
 		}
 	}
 
+	if cfg.ExportUsers || cfg.ExportChannels {
+		if err := datastore.ValidateExportSource(cfg.DBPath); err != nil {
+			return fmt.Errorf("export database source: %w", err)
+		}
+	}
 	st, err := datastore.NewProviderFactory(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

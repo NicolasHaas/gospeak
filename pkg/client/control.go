@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,13 @@ const connectTimeout = 3 * time.Second
 // EventHandler is a callback for incoming control events.
 type EventHandler func(msg *pb.ControlMessage)
 
+type AuthenticationError struct {
+	Code    int32
+	Message string
+}
+
+func (e *AuthenticationError) Error() string { return "auth failed: " + e.Message }
+
 // ControlClient manages the TCP/TLS control plane connection.
 type ControlClient struct {
 	conn        net.Conn
@@ -38,7 +46,11 @@ func NewControlClient(addr, expectedPin string) (*ControlClient, error) {
 }
 
 func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*ControlClient, error) {
-	tlsCfg, err := tlsConfig(addr, expectedPin)
+	return newControlClientContext(ctx, addr, expectedPin, nil)
+}
+
+func newControlClientContext(ctx context.Context, addr, expectedPin string, roots *x509.CertPool) (*ControlClient, error) {
+	tlsCfg, err := newTLSConfig(addr, expectedPin, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +66,12 @@ func NewControlClientContext(ctx context.Context, addr, expectedPin string) (*Co
 	if !ok || len(tlsConn.ConnectionState().PeerCertificates) == 0 {
 		_ = conn.Close()
 		return nil, fmt.Errorf("client: control connection has no TLS peer identity")
+	}
+	if expectedPin == "" {
+		if _, err := pkiHistory(addr, true); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 
 	return &ControlClient{
@@ -88,6 +106,10 @@ func (c *ControlClient) Send(msg *pb.ControlMessage) error {
 
 // Authenticate sends an auth request and returns the auth response.
 func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthResponse, err error) {
+	return c.authenticate(token, username, false)
+}
+
+func (c *ControlClient) authenticate(token, username string, personalOnly bool) (response *pb.AuthResponse, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -103,6 +125,7 @@ func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthR
 
 	if err := protocol.WriteControlMessage(c.conn, &pb.ControlMessage{
 		AuthRequest: &pb.AuthRequest{
+			PersonalOnly: personalOnly,
 			Token:        token,
 			Username:     username,
 			MediaCiphers: []string{"aes128", "aes256", "chacha20"},
@@ -117,7 +140,7 @@ func (c *ControlClient) Authenticate(token, username string) (response *pb.AuthR
 	}
 
 	if msg.ErrorResponse != nil {
-		return nil, fmt.Errorf("auth failed: %s", msg.ErrorResponse.Message)
+		return nil, &AuthenticationError{Code: msg.ErrorResponse.Code, Message: msg.ErrorResponse.Message}
 	}
 
 	if msg.AuthResponse == nil {

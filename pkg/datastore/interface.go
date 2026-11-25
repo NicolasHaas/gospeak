@@ -9,6 +9,7 @@ import (
 )
 
 const MaxBanPageSize = 100
+const MaxInvitePageSize = 100
 
 type DataProviderFactory interface {
 	NonTx() DataStore
@@ -50,6 +51,8 @@ type DataStore interface {
 // duplicate username constraint.
 var ErrUsernameTaken = errors.New("datastore: username already taken")
 var ErrChannelNameTaken = errors.New("datastore: channel name already exists under parent")
+var ErrChannelReference = errors.New("datastore: channel reference must be zero or an existing channel")
+var ErrChannelDeleteRefused = errors.New("datastore: channel missing, referenced, or last remaining channel")
 var ErrBootstrapAlreadyProvisioned = errors.New("datastore: bootstrap credential already provisioned another user")
 
 type BootstrapTokenState uint8
@@ -73,6 +76,7 @@ type UserReadProvider interface {
 	ListUsers() ([]model.User, error)
 	IsBootstrapUser(userID int64) (bool, error)
 	BootstrapUserID() (int64, bool, error)
+	PersonalTokenVersion(userID int64) (int64, error)
 }
 
 type UserWriteProvider interface {
@@ -94,20 +98,30 @@ type ChannelWriteProvider interface {
 }
 
 type TokenReadProvider interface {
+	ListInvites(afterID int64, limit int) ([]model.Token, bool, error)
 	HasTokens() (bool, error)
 	BootstrapTokenState() (BootstrapTokenState, error)
+	HasLegacyBootstrapOwner() (bool, error)
 }
 
 type TokenWriteProvider interface {
+	RevokeInvite(id int64) (bool, error)
 	CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error
 	CreateBootstrapToken(hash string) error
 	FinalizeBootstrapToken(userID int64) (bool, error)
 }
 
 type TokenTransactionProvider interface {
+	BootstrapPersonalTokenKey(hash string) (string, error)
 	ValidateToken(hash string) (*model.Token, error)
 	ProvisionUser(hash, username, personalTokenHash string, createdAt time.Time, allowTokenless bool) (*model.User, error)
 	ProvisionBootstrapUser(hash, username, personalTokenHash string, createdAt time.Time) (*model.User, error)
+	// ReplacePersonalToken is a versioned CAS. Callers check live/persisted
+	// authority in this same writer transaction before changing credentials.
+	ReplacePersonalToken(userID, version int64, expectedHash, replacementHash string, createdAt time.Time) (bool, error)
+	IssuePersonalRecovery(userID, version int64, grantHash string, now time.Time, issuedBy int64) (bool, error)
+	RevokePersonalRecovery(userID, version int64) (bool, error)
+	RedeemPersonalRecovery(userID int64, grantHash, replacementHash string, now time.Time) (bool, error)
 }
 
 type BanReadProvider interface {

@@ -39,8 +39,14 @@ func TestScreenPacketRejectsImageMismatchAndContinues(t *testing.T) {
 	if len(e.callbackQueue) != 0 || e.screenReceiveSeq != 1 {
 		t.Fatal("invalid authenticated image published or replay sequence not consumed")
 	}
-	send(2, 2)
-	if len(e.callbackQueue) != 1 || e.screenReceiveSeq != 2 {
+	data = screenTestJPEG(t, 1281, 2)
+	send(2, 1281)
+	if len(e.callbackQueue) != 0 || e.screenReceiveSeq != 2 {
+		t.Fatal("oversized authenticated image published or replay sequence not consumed")
+	}
+	data = screenTestJPEG(t, 2, 2)
+	send(3, 2)
+	if len(e.callbackQueue) != 1 || e.screenReceiveSeq != 3 {
 		t.Fatal("valid image following rejection did not reach callback queue")
 	}
 	e.callbackQueue[0]()

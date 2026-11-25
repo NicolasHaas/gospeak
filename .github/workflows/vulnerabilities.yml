@@ -1,0 +1,177 @@
+name: Friday vulnerabilities
+
+on:
+  schedule:
+    - cron: "0 7 * * 5" # Friday 08:00 Zurich winter / 09:00 summer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go dependency inventory and standard library
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: v1
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install pinned scanner
+        run: timeout 180s go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+      - name: Scan Go standard library
+        # No patterns submits root + actual toolchain stdlib, NOT dependency modules.
+        run: timeout 300s govulncheck -scan=module -show=version
+      - name: Prepare conservative dependency inventory
+        run: |
+          go list -m -f '{{if not .Main}}{{.Path}} {{.Version}}{{end}}' all > "$RUNNER_TEMP/go-selected.txt"
+          mkdir "$RUNNER_TEMP/go-inventory"
+          cp go.mod go.sum "$RUNNER_TEMP/go-inventory/"
+          timeout 180s go mod download -modfile="$RUNNER_TEMP/go-inventory/go.mod" all
+          # ponytail: temporary 1.16 metadata selects Trivy's documented go.sum merge.
+          # Actual compiler/stdlib stays unchanged; verify every selected version below.
+          go mod edit -modfile="$RUNNER_TEMP/go-inventory/go.mod" -go=1.16
+      - name: Scan complete Go dependency inventory
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          scan-type: fs
+          scan-ref: ${{ runner.temp }}/go-inventory
+          scanners: vuln
+          vuln-type: library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          format: json
+          list-all-pkgs: true
+          output: ${{ runner.temp }}/go-trivy.json
+          timeout: 5m
+          cache: false
+      - name: Verify submitted dependency coverage
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          selected = {tuple(line.split()) for line in (root / 'go-selected.txt').read_text().splitlines() if line.strip()}
+          results = json.loads((root / 'go-trivy.json').read_text())['Results']
+          scanned = {(p['Name'], p.get('Version', '')) for r in results for p in r.get('Packages', [])}
+          missing = selected - scanned
+          print('Selected dependencies:', len(selected), 'scanned records:', len(scanned), 'missing:', sorted(missing))
+          for result in results:
+              for vuln in result.get('Vulnerabilities', []):
+                  print(vuln['PkgName'], vuln['VulnerabilityID'], vuln['Severity'])
+          if not selected or missing:
+              raise SystemExit('Incomplete dependency inventory')
+          PY
+      - name: Summary
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          echo "### Go module inventory: $RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo "v1 commit: $(git rev-parse HEAD). Trivy scans conservative go.sum dependency inventory with selected-version coverage verification; govulncheck scans actual toolchain stdlib. All severities fail. Neither is called-symbol analysis. Findings/DB details are in the logs." >> "$GITHUB_STEP_SUMMARY"
+
+  linux-native:
+    name: Linux client dependency packages (fresh Debian rebuild)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: v1
+          persist-credentials: false
+      - name: Rebuild client dependency stage only
+        run: |
+          timeout 600s docker build --pull --no-cache --target builder-base -t gospeak-native-audit -f Containerfile .
+          timeout 30s docker run --rm --entrypoint dpkg-query gospeak-native-audit -W portaudio19-dev libportaudio2 libopus-dev libopus0
+      - name: Scan Debian packages including PortAudio and Opus
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          image-ref: gospeak-native-audit
+          scanners: vuln
+          vuln-type: os
+          severity: HIGH,CRITICAL,UNKNOWN
+          ignore-unfixed: false
+          exit-code: "1"
+          format: table
+          timeout: 5m
+          cache: false
+      - name: Summary
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          echo "### Debian native packages: $RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo "v1 commit: $(git rev-parse HEAD). Fresh builder-base packages, not installed clients. HIGH/CRITICAL/UNKNOWN matches (including unfixed) and tool errors fail. Package versions and database details are in the logs." >> "$GITHUB_STEP_SUMMARY"
+
+  windows-native:
+    name: Windows pinned native source commits (partial OSV coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: v1
+          persist-credentials: false
+      - name: Query pinned upstream commits
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          import urllib.request
+
+          recipe = pathlib.Path('Containerfile').read_text()
+          found = False
+          for library in ('PORTAUDIO', 'OPUS'):
+              pins = re.findall(r'^ARG ' + library + r'_COMMIT=([0-9a-f]{40})$', recipe, re.M)
+              if len(pins) != 1:
+                  raise ValueError('expected one exact upstream commit for ' + library)
+              query = {'commit': pins[0]}
+              seen = set()
+              count = 0
+              for page in range(50):
+                  request = urllib.request.Request(
+                      'https://api.osv.dev/v1/query',
+                      data=json.dumps(query).encode(),
+                      headers={'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      data = json.load(response)
+                  if not isinstance(data, dict) or 'error' in data:
+                      raise ValueError('invalid OSV response')
+                  vulns = data.get('vulns', [])
+                  if not isinstance(vulns, list):
+                      raise ValueError('invalid OSV vulnerabilities')
+                  for vuln in vulns:
+                      print(library, pins[0], vuln['id'], vuln.get('summary', ''))
+                      count += 1
+                  token = data.get('next_page_token')
+                  if token is None or token == '':
+                      break
+                  if not isinstance(token, str) or token in seen:
+                      raise ValueError('invalid/repeated OSV page token')
+                  seen.add(token)
+                  query['page_token'] = token
+              else:
+                  raise ValueError('OSV pagination limit exceeded')
+              found = found or count > 0
+              print(library, pins[0], 'OSV matches:', count)
+              print('::warning::' + library + ' OSV indexing coverage is UNKNOWN; empty is not proof of safety.')
+          raise SystemExit(1 if found else 0)
+          PY
+      - name: Summary
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          echo "### Windows native commit queries: $RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo "v1 commit: $(git rev-parse HEAD). All OSV matches fail, even unscored ones. Indexing completeness is UNKNOWN. macOS Homebrew/installed dylibs are NOT covered by this monitor. No findings does not mean no vulnerabilities." >> "$GITHUB_STEP_SUMMARY"

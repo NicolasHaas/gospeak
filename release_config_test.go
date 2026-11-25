@@ -27,6 +27,22 @@ func TestCIUsesImmutableToolingAndSupportsManualRuns(t *testing.T) {
 	assertImmutableActionRefs(t, workflow)
 }
 
+func TestLinuxClientRecipesIncludeWaylandDependencies(t *testing.T) {
+	for path, count := range map[string]int{
+		".github/workflows/ci.yml": 3,
+		"Containerfile":            1,
+		"CONTRIBUTING.md":          1,
+		"docs/building.md":         1,
+	} {
+		contents := readProjectFile(t, path)
+		for _, dependency := range []string{"libwayland-dev", "libxkbcommon-dev", "libegl-dev"} {
+			if got := strings.Count(contents, dependency); got != count {
+				t.Errorf("%s has %d %s prerequisites, want %d", path, got, dependency, count)
+			}
+		}
+	}
+}
+
 func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 	workflow := readProjectFile(t, ".github/workflows/release.yml")
 	assertImmutableActionRefs(t, workflow)
@@ -53,7 +69,7 @@ func TestReleaseScansBeforePublishingVersionedArtifacts(t *testing.T) {
 
 func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 	containerfile := readProjectFile(t, "Containerfile")
-	if !strings.Contains(containerfile, "FROM golang:1.26.8-bookworm@sha256:") {
+	if !strings.Contains(containerfile, "FROM golang:1.27.4-bookworm@sha256:") {
 		t.Error("container build does not use the release Go toolchain version")
 	}
 	digest := regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
@@ -69,7 +85,7 @@ func TestContainerBuildAndDeploymentAreHardened(t *testing.T) {
 			t.Errorf("container base is not pinned by digest: %s", line)
 		}
 	}
-	for _, required := range []string{"EXPOSE 9600/tcp 9601/udp 9603/tcp", "PORTAUDIO_COMMIT=", "OPUS_COMMIT="} {
+	for _, required := range []string{"EXPOSE 9600/tcp 9601/udp 9603/tcp", "PORTAUDIO_COMMIT=", "OPUS_COMMIT=", "USER 10001:10001", "mkdir -m 0700 -p /out/data", "COPY --from=server-builder --chown=10001:10001 --chmod=0700 /out/data /data"} {
 		if !strings.Contains(containerfile, required) {
 			t.Errorf("Containerfile missing %q", required)
 		}
@@ -128,6 +144,77 @@ func TestWindowsPortAudioDisablesSharedLibrary(t *testing.T) {
 	containerfile := readProjectFile(t, "Containerfile")
 	if !strings.Contains(containerfile, "-DPA_BUILD_SHARED=OFF") || strings.Contains(containerfile, "-DPA_BUILD_SHARED_LIBS=") {
 		t.Error("PortAudio must use its actual shared-library option to produce a standalone Windows client")
+	}
+}
+
+func TestContainerTargetsBuildOnlyTheirArtifacts(t *testing.T) {
+	containerfile := readProjectFile(t, "Containerfile")
+	stages := make(map[string]string)
+	dependencies := make(map[string][]string)
+	stage := ""
+	for _, line := range strings.Split(containerfile, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 4 && fields[0] == "FROM" && fields[2] == "AS" {
+			stage = fields[3]
+			if _, exists := stages[stage]; exists {
+				t.Fatalf("duplicate container stage %s", stage)
+			}
+			stages[stage] = ""
+			dependencies[stage] = append(dependencies[stage], fields[1])
+		}
+		if stage != "" && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			stages[stage] += line + "\n"
+			if len(fields) > 1 && fields[0] == "COPY" && strings.HasPrefix(fields[1], "--from=") {
+				dependencies[stage] = append(dependencies[stage], strings.TrimPrefix(fields[1], "--from="))
+			}
+		}
+	}
+	// Follow both inheritance and COPY edges: export-only stages can still build everything.
+	reachable := func(target string) string {
+		if _, ok := stages[target]; !ok {
+			t.Fatalf("missing container target %s", target)
+		}
+		seen := make(map[string]bool)
+		var visit func(string) string
+		visit = func(name string) string {
+			if seen[name] {
+				return ""
+			}
+			seen[name] = true
+			body := stages[name]
+			for _, dependency := range dependencies[name] {
+				body += visit(dependency)
+			}
+			return body
+		}
+		return visit(target)
+	}
+	for target, forbidden := range map[string][]string{
+		"server":      {"apt-get", "cmake", "mingw", "./cmd/client/", "GOOS=windows"},
+		"builder-lin": {"mingw", "GOOS=windows", "/out/gospeak-client-win.exe"},
+		"builder-win": {"portaudio19-dev", "/out/gospeak-client-lin", "/out/gospeak-server "},
+		"development": {"mingw", "go build -o /out/"},
+	} {
+		for _, unwanted := range forbidden {
+			if strings.Contains(reachable(target), unwanted) {
+				t.Errorf("%s transitively includes %q", target, unwanted)
+			}
+		}
+	}
+	for _, artifact := range []string{"gospeak-server", "gospeak-server-win.exe", "gospeak-client-lin", "gospeak-client-win.exe"} {
+		if !strings.Contains(reachable("builder"), "-o /out/"+artifact) {
+			t.Errorf("builder does not build %s", artifact)
+		}
+	}
+	compose := readProjectFile(t, "compose.yaml")
+	for _, service := range []string{"lint", "test"} {
+		match := regexp.MustCompile(`(?m)^  ` + service + `:\n(?:[ ]+[^\n]*\n)*?      target: ([^\n]+)`).FindStringSubmatch(compose)
+		if len(match) != 2 {
+			t.Fatalf("missing %s Compose build target", service)
+		}
+		if strings.Contains(reachable(match[1]), "go build -o /out/") {
+			t.Errorf("%s compiles release binaries before running", service)
+		}
 	}
 }
 

@@ -20,11 +20,12 @@ type Bookmark struct {
 
 // BookmarkStore manages server bookmarks stored in the user config directory.
 type BookmarkStore struct {
-	path              string
-	legacyPath        string
-	loadErr           error
-	Bookmarks         []Bookmark        `yaml:"bookmarks"`
-	TrustedServerPins map[string]string `yaml:"trusted_server_pins,omitempty"`
+	path               string
+	legacyPath         string
+	loadErr            error
+	Bookmarks          []Bookmark                  `yaml:"bookmarks"`
+	TrustedServerPins  map[string]string           `yaml:"trusted_server_pins,omitempty"`
+	PendingCredentials []PendingPersonalCredential `yaml:"pending_credentials,omitempty"`
 }
 
 // NewBookmarkStore creates a bookmark store in the user config directory.
@@ -55,6 +56,7 @@ func (bs *BookmarkStore) Load() (err error) {
 	loaded := BookmarkStore{path: bs.path, legacyPath: bs.legacyPath}
 	bs.Bookmarks = nil
 	bs.TrustedServerPins = nil
+	bs.PendingCredentials = nil
 	data, err := readPrivateFile(bs.path, bs.path != bs.legacyPath)
 	if os.IsNotExist(err) && bs.legacyPath != "" && bs.legacyPath != bs.path {
 		data, err = readPrivateFile(bs.legacyPath, false)

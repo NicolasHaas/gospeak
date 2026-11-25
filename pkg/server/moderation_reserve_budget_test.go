@@ -12,6 +12,8 @@ func TestModerationReserveTrustedRolesAndBoundaries(t *testing.T) {
 	srv := New(DefaultConfig(), Dependencies{})
 	now := time.Unix(1700000000, 0)
 	srv.controlGlobalBudget = newControlMessageLimiter(controlExpensiveCost, 0, time.Now)
+	// Isolate moderation qualification from the separate interactive class.
+	srv.controlInteractivePool = newControlMessageLimiter(0, 0, nil)
 	srv.controlModerationBudget.now = func() time.Time { return now }
 	srv.controlModerationBudget.updated = now
 	admin := mustCreateSession(t, srv.sessions, 1, "reserve-admin", model.RoleAdmin)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/NicolasHaas/gospeak/pkg/model"
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
@@ -38,6 +39,12 @@ const (
 )
 
 var controlMessageFields = map[string]struct{}{
+	"personal_token_status_request": {}, "personal_token_status_response": {},
+	"rotate_personal_token_request": {}, "rotate_personal_token_response": {},
+	"revoke_personal_token_request": {}, "revoke_personal_token_response": {},
+	"issue_personal_recovery_request": {}, "issue_personal_recovery_response": {},
+	"revoke_personal_recovery_request": {}, "revoke_personal_recovery_response": {},
+	"redeem_personal_recovery_request": {}, "redeem_personal_recovery_response": {},
 	"auth_request": {}, "auth_response": {},
 	"channel_list_request": {}, "channel_list_response": {},
 	"join_channel_request": {}, "channel_join_response": {},
@@ -45,6 +52,8 @@ var controlMessageFields = map[string]struct{}{
 	"user_state_update": {}, "server_state_event": {},
 	"create_channel_request": {}, "delete_channel_request": {},
 	"create_token_request": {}, "create_token_response": {},
+	"list_invites_request": {}, "list_invites_response": {},
+	"revoke_invite_request": {}, "revoke_invite_response": {},
 	"kick_user_request": {}, "ban_user_request": {},
 	"list_bans_request": {}, "list_bans_response": {},
 	"unban_request": {}, "unban_response": {},
@@ -106,6 +115,9 @@ func UnmarshalVoicePacket(data []byte) (*VoicePacket, error) {
 // WriteControlMessage writes a length-prefixed JSON control message to a writer.
 // Format: [4-byte big-endian length][JSON payload]
 func WriteControlMessage(w io.Writer, msg *pb.ControlMessage) error {
+	if err := validateLiveSessions(msg); err != nil {
+		return err
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("protocol: marshal: %w", err)
@@ -192,7 +204,52 @@ func ReadControlMessageWithSize(r io.Reader) (*pb.ControlMessage, int, error) {
 	if err := json.Unmarshal(data, msg); err != nil {
 		return nil, int(length), fmt.Errorf("protocol: unmarshal: %w", err)
 	}
+	if err := validateLiveSessions(msg); err != nil {
+		return nil, int(length), err
+	}
 	return msg, int(length), nil
+}
+
+// ValidateLiveSessions checks a complete ID-only snapshot. Nil is unsupported,
+// never authority to retire replay history or admit incoming voice.
+func ValidateLiveSessions(ids []uint32, channels []pb.ChannelInfo) error {
+	if ids == nil {
+		return errors.New("protocol: missing live session roster")
+	}
+	if len(ids) > model.MaxServerSessions {
+		return errors.New("protocol: live session roster too large")
+	}
+	live := make(map[uint32]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || id == VoiceRegistrationMagic || live[id] {
+			return errors.New("protocol: invalid live session ID")
+		}
+		live[id] = true
+	}
+	seen := make(map[uint32]bool)
+	for _, channel := range channels {
+		for _, user := range channel.Users {
+			if !live[user.SessionID] || seen[user.SessionID] {
+				return errors.New("protocol: inconsistent live session membership")
+			}
+			seen[user.SessionID] = true
+		}
+	}
+	return nil
+}
+
+func validateLiveSessions(msg *pb.ControlMessage) error {
+	if msg == nil {
+		return errors.New("protocol: invalid control envelope: expected JSON object")
+	}
+	// Nested fields of existing allowlisted envelopes, not new message types.
+	if msg.AuthResponse != nil && msg.AuthResponse.LiveSessionIDs != nil {
+		return ValidateLiveSessions(msg.AuthResponse.LiveSessionIDs, msg.AuthResponse.Channels)
+	}
+	if msg.ServerStateEvent != nil && msg.ServerStateEvent.LiveSessionIDs != nil {
+		return ValidateLiveSessions(msg.ServerStateEvent.LiveSessionIDs, msg.ServerStateEvent.Channels)
+	}
+	return nil
 }
 
 func validateControlEnvelope(data []byte) error {

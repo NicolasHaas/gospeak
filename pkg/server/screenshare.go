@@ -180,6 +180,7 @@ func (m *ScreenShareManager) stopBySessionLocked(sessionID uint32) (*pb.ScreenSh
 	delete(m.subscribersByShare, sessionID)
 
 	stopped := cloneScreenShareEvent(active)
+	stopped.EncryptionKey = nil
 	stopped.Active = false
 	stopped.Viewers = 0
 	return stopped, true

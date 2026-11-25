@@ -192,6 +192,9 @@ func initializeChannels(cfg *ChannelsConfig, st datastore.DataProviderFactory) e
 	if err != nil {
 		return fmt.Errorf("list channels: %w", err)
 	}
+	if err := validateChannelState(channels); err != nil {
+		return err
+	}
 	createdLobby := false
 	if len(channels) == 0 {
 		if err := tx.CreateChannel(model.NewChannel()); err != nil {

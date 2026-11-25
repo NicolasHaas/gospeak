@@ -140,7 +140,16 @@ func TestSQLiteMemoryURIDoesNotCreateFilesystemArtifacts(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{":memory:", namedPath, memdbPath, plainMemdbPath} {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == ":memory:" {
+			t.Fatal("memory URI created :memory:")
+		}
+	}
+	for _, path := range []string{namedPath, memdbPath, plainMemdbPath} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("memory URI created %s (stat error %v)", path, err)
 		}

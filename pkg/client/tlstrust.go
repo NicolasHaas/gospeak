@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -22,7 +23,7 @@ func (e *UntrustedServerError) Error() string {
 }
 
 // ServerIdentityChangedError reports that a server no longer presents its
-// saved TOFU identity. Callers must require an explicit re-trust action.
+// saved trust. Callers must require an explicit re-trust action.
 type ServerIdentityChangedError struct {
 	Addr     string
 	Expected string
@@ -67,7 +68,24 @@ func SPKIFingerprint(cert *x509.Certificate) string {
 }
 
 func newTLSConfig(addr, expectedPin string, roots *x509.CertPool) (*tls.Config, error) {
-	return newTLSConfigWithTrust(addr, tlsTrustPolicyForPin(expectedPin), roots)
+	cfg, err := newTLSConfigWithTrust(addr, tlsTrustPolicyForPin(expectedPin), roots)
+	if err != nil || expectedPin != "" {
+		return cfg, err
+	}
+	known, err := pkiHistory(addr, false)
+	if err != nil {
+		return nil, err
+	}
+	verify := cfg.VerifyConnection
+	cfg.VerifyConnection = func(state tls.ConnectionState) error {
+		err := verify(state)
+		var untrusted *UntrustedServerError
+		if known && errors.As(err, &untrusted) {
+			return &ServerIdentityChangedError{Addr: addr, Expected: "system PKI", Received: untrusted.Fingerprint}
+		}
+		return err
+	}
+	return cfg, nil
 }
 
 func newTLSConfigWithTrust(addr string, trust tlsTrustPolicy, roots *x509.CertPool) (*tls.Config, error) {
@@ -122,8 +140,4 @@ func newTLSConfigWithTrust(addr string, trust tlsTrustPolicy, roots *x509.CertPo
 		return &UntrustedServerError{Addr: addr, Fingerprint: fingerprint}
 	}
 	return cfg, nil
-}
-
-func tlsConfig(addr, expectedPin string) (*tls.Config, error) {
-	return newTLSConfig(addr, expectedPin, nil)
 }

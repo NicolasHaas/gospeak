@@ -205,12 +205,9 @@ func TestEnsureAdminTokenRetiresStaleCredentialForExistingStore(t *testing.T) {
 
 func TestEnsureAdminTokenRecoversPublishedCredential(t *testing.T) {
 	srv, st, credentialPath := newBootstrapTestServer(t)
-	rawToken, err := crypto.GenerateToken()
+	rawToken, err := loadOrCreateBootstrapCredential(credentialPath)
 	if err != nil {
-		t.Fatalf("GenerateToken() error = %v", err)
-	}
-	if err := os.WriteFile(credentialPath, []byte(rawToken+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
+		t.Fatalf("loadOrCreateBootstrapCredential() error = %v", err)
 	}
 
 	if err := srv.ensureAdminToken(st); err != nil {
@@ -552,8 +549,9 @@ func TestBootstrapProvisioningRetrySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap retry after restart error = %v", err)
 	}
-	if response.AutoToken != deriveBootstrapPersonalToken(rawToken, "bootstrap-admin") {
-		t.Fatal("bootstrap retry after restart returned a different personal token")
+	retry, err := authenticateBootstrap(t, restarted, reopened, "bootstrap-admin", rawToken)
+	if err != nil || retry.AutoToken != response.AutoToken {
+		t.Fatalf("bootstrap retry after restart changed personal token: %v", err)
 	}
 }
 

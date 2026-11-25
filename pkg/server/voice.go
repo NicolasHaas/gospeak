@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
@@ -50,10 +54,10 @@ func (s *Server) StartVoice() error {
 
 	// Increase UDP buffer size for better performance
 	if err := conn.SetReadBuffer(1024 * 1024); err != nil {
-		slog.Warn("failed to set UDP read buffer", "err", err)
+		s.logVoiceError(slog.LevelWarn, "failed to set UDP read buffer", err)
 	}
 	if err := conn.SetWriteBuffer(1024 * 1024); err != nil {
-		slog.Warn("failed to set UDP write buffer", "err", err)
+		s.logVoiceError(slog.LevelWarn, "failed to set UDP write buffer", err)
 	}
 
 	slog.Info("voice plane listening", "addr", s.cfg.VoiceAddr)
@@ -79,19 +83,29 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+				return
+			}
 			select {
 			case <-s.ctx.Done():
 				return
 			default:
-				slog.Error("voice read error")
+				s.logVoiceError(slog.LevelError, "voice read error", err)
 				continue
 			}
 		}
 
 		if protocol.IsVoiceRegistration(buf[:n]) {
-			if !s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now()) {
+			s.credentialWorkMu.RLock()
+			reply, ok := s.handleVoiceRegistration(buf[:n], remoteAddr, time.Now())
+			if !ok {
 				s.metrics.VoicePacketsDropped.Add(1)
 			}
+			if reply != nil {
+				_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+				_, _ = conn.WriteToUDP(reply, remoteAddr)
+			}
+			s.credentialWorkMu.RUnlock()
 			continue
 		}
 
@@ -109,50 +123,75 @@ func (s *Server) voiceLoop(conn *net.UDPConn) {
 			continue
 		}
 
-		actualChannel, ok := s.acceptVoicePacket(pkt, remoteAddr)
-		if !ok {
-			s.metrics.VoicePacketsDropped.Add(1)
+		s.relayVoicePacket(conn, pkt, remoteAddr, buf[:n])
+	}
+}
+
+func (s *Server) relayVoicePacket(conn *net.UDPConn, pkt *protocol.VoicePacket, remoteAddr *net.UDPAddr, rawPacket []byte) {
+	s.credentialWorkMu.RLock()
+	defer s.credentialWorkMu.RUnlock()
+	actualChannel, ok := s.acceptVoicePacket(pkt, remoteAddr)
+	if !ok {
+		s.metrics.VoicePacketsDropped.Add(1)
+		return
+	}
+
+	// Track per-session voice debug stats
+	var stat *perSessionVoiceStat
+	if s.voiceDebugEnabled {
+		stat = s.getOrCreateStat(pkt.SessionID)
+		stat.packetsReceived.Add(1)
+		stat.lastActivity.Store(time.Now().UnixNano())
+	}
+
+	channelID := actualChannel
+	members := s.channels.Members(channelID)
+
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+
+	for _, memberSID := range members {
+		if memberSID == pkt.SessionID {
+			continue // don't echo back to sender
+		}
+
+		memberSession, ok := s.sessions.GetSnapshot(memberSID)
+		if !ok || memberSession.UDPAddr == nil {
 			continue
 		}
-
-		// Track per-session voice debug stats
-		var stat *perSessionVoiceStat
-		if s.voiceDebugEnabled {
-			stat = s.getOrCreateStat(pkt.SessionID)
-			stat.packetsReceived.Add(1)
-			stat.lastActivity.Store(time.Now().UnixNano())
+		if memberSession.Deafened {
+			continue // don't send to deafened users
 		}
 
-		channelID := actualChannel
-		members := s.channels.Members(channelID)
-
-		rawPacket := buf[:n] // forward the original authenticated ciphertext unchanged
-
-		for _, memberSID := range members {
-			if memberSID == pkt.SessionID {
-				continue // don't echo back to sender
-			}
-
-			memberSession, ok := s.sessions.GetSnapshot(memberSID)
-			if !ok || memberSession.UDPAddr == nil {
-				continue
-			}
-			if memberSession.Deafened {
-				continue // don't send to deafened users
-			}
-
-			_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
-			if err != nil {
-				slog.Debug("voice forward error", "target", memberSID)
-			} else {
-				s.metrics.VoicePacketsOut.Add(1)
-				s.metrics.VoiceBytesOut.Add(int64(n))
-				if stat != nil {
-					stat.packetsForwarded.Add(1)
-				}
+		_, err := conn.WriteToUDP(rawPacket, memberSession.UDPAddr)
+		if err != nil {
+			s.logVoiceError(slog.LevelDebug, "voice forward error", err)
+		} else {
+			s.metrics.VoicePacketsOut.Add(1)
+			s.metrics.VoiceBytesOut.Add(int64(len(rawPacket)))
+			if stat != nil {
+				stat.packetsForwarded.Add(1)
 			}
 		}
 	}
+}
+
+func (s *Server) logVoiceError(level slog.Level, message string, err error) {
+	if s.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return
+	}
+	reason := "io_error"
+	var timeout net.Error
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &timeout) && timeout.Timeout(), errors.Is(err, context.DeadlineExceeded):
+		reason = "timeout"
+	case errors.Is(err, io.ErrShortWrite):
+		reason = "short_write"
+	case errors.As(err, &errno):
+		// Only the OS cause is safe: net.OpError and outer wrappers contain addresses.
+		reason = errno.Error()
+	}
+	slog.Log(s.ctx, level, message, "reason", reason)
 }
 
 // acceptVoicePacket verifies endpoint ownership and packet authenticity before
@@ -166,7 +205,7 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if pkt == nil || s.voiceCipher == nil {
 		return 0, false
 	}
-	session, ok := s.sessions.GetSnapshot(pkt.SessionID)
+	session, ok := s.sessions.getSnapshotAt(pkt.SessionID, now)
 	if !ok || session.Muted || session.ChannelID <= 0 || !udpAddrEqual(session.UDPAddr, remoteAddr) {
 		return 0, false
 	}
@@ -180,7 +219,7 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if hook := s.voiceReplayHook; hook != nil {
 		hook()
 	}
-	acceptedSession, ok := s.sessions.AcceptVoiceSequence(pkt.SessionID, remoteAddr, pkt.SeqNum)
+	acceptedSession, ok := s.sessions.AcceptVoiceSequence(pkt.SessionID, remoteAddr, pkt.SeqNum, now)
 	if !ok {
 		return 0, false
 	}
@@ -193,16 +232,16 @@ func (s *Server) acceptVoicePacketAt(pkt *protocol.VoicePacket, remoteAddr *net.
 	if packetChannel != pkt.ChannelID {
 		return 0, false
 	}
-	if !s.sessions.allowVoicePacket(pkt.SessionID, remoteAddr, protocol.VoiceHeaderSize+len(pkt.Payload), now) {
+	if !s.sessions.allowVoicePacket(pkt.SessionID, remoteAddr, actualChannel, protocol.VoiceHeaderSize+len(pkt.Payload), now) {
 		return 0, false
 	}
 	return actualChannel, true
 }
 
-func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) bool {
+func (s *Server) handleVoiceRegistration(data []byte, remoteAddr *net.UDPAddr, now time.Time) ([]byte, bool) {
 	registration, err := protocol.UnmarshalVoiceRegistration(data)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	return s.sessions.RegisterUDPAddr(registration.SessionID, registration, remoteAddr, now, voiceRebindInterval)
 }

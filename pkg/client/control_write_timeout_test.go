@@ -56,8 +56,8 @@ func TestControlSendBoundsStalledWrite(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		_ = conn.Close()
-		<-done
-		t.Fatal("Send remained blocked without a write deadline")
+		err := <-done
+		t.Fatalf("Send remained blocked without a write deadline: %v", err)
 	}
 }
 

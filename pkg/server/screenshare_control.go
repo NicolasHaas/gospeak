@@ -54,8 +54,9 @@ func (s *Server) handleScreenShareStart(handler *ControlHandler, sessionID uint3
 	slog.Info("screen share started", "user", session.Username, "session", sessionID, "channel", session.ChannelID, "width", req.Width, "height", req.Height)
 
 	handler.sendToSession(sessionID, &pb.ControlMessage{ScreenShareEvent: event})
-	publicEvent, _ := s.screenShare.PublicEvent(session.ChannelID)
-	handler.broadcastToChannel(session.ChannelID, &pb.ControlMessage{ScreenShareEvent: publicEvent}, 0)
+	if publicEvent, ok := s.screenShare.PublicEvent(session.ChannelID); ok {
+		handler.broadcastToChannel(session.ChannelID, &pb.ControlMessage{ScreenShareEvent: publicEvent}, 0)
+	}
 }
 
 func (s *Server) handleScreenShareShare(handler *ControlHandler, sessionID uint32, conn net.Conn) {
@@ -123,8 +124,9 @@ func (s *Server) handleScreenShareSubscribe(handler *ControlHandler, sessionID u
 	slog.Info("screen share subscribed", "viewer_session", sessionID, "sharer_session", event.SessionID, "channel", req.ChannelID)
 
 	handler.sendToSession(sessionID, &pb.ControlMessage{ScreenShareEvent: event})
-	publicEvent, _ := s.screenShare.PublicEvent(req.ChannelID)
-	handler.broadcastToChannel(req.ChannelID, &pb.ControlMessage{ScreenShareEvent: publicEvent}, 0)
+	if publicEvent, ok := s.screenShare.PublicEvent(req.ChannelID); ok {
+		handler.broadcastToChannel(req.ChannelID, &pb.ControlMessage{ScreenShareEvent: publicEvent}, 0)
+	}
 }
 
 func (s *Server) handleScreenShareUnsubscribe(sessionID uint32) {

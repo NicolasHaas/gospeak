@@ -24,6 +24,9 @@ func (s *Server) Run() error {
 	if s.cfg.ChatHistoryLimit < 0 || s.cfg.ChatHistoryLimit > 10000 || s.cfg.ChatMaxAge < 0 || s.cfg.ChatMaxAge%time.Second != 0 {
 		return fmt.Errorf("server: invalid chat retention")
 	}
+	if err := s.validateStateConfig(); err != nil {
+		return err
+	}
 	defer s.Shutdown()
 	st := s.store
 
@@ -141,6 +144,7 @@ func (s *Server) Shutdown() {
 		s.workerMu.Lock()
 		s.stopping = true
 		s.cancel()
+		s.sessions.closeVoiceEndpoints()
 		s.workerMu.Unlock()
 		s.statePublicationMu.Unlock()
 

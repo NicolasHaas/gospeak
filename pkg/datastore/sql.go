@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -92,6 +93,17 @@ func (sf ProviderFactory) Tx(ctx context.Context) (DataStoreTx, error) {
 	}, nil
 }
 
+// ValidateExportSource checks file-backed sources before the factory can create
+// files or run migrations. It does not pin the file against concurrent replacement.
+func ValidateExportSource(dbPath string) error {
+	path, hasFile, _, err := sqliteFilesystemPath(dbPath)
+	if err != nil || !hasFile {
+		return err
+	}
+	_, err = os.Stat(path)
+	return err
+}
+
 // New opens (or creates) a SQLite database and runs migrations.
 func NewProviderFactory(dbPath string) (*ProviderFactory, error) {
 	dsn, err := sqliteConnectionDSN(dbPath)
@@ -146,6 +158,8 @@ func sqliteConnectionDSN(dbPath string) (string, error) {
 	// pragma avoids SQLite syntax variants changing these required values
 	// after the driver sorts and executes repeated _pragma parameters.
 	query.Del("_pragma")
+	query.Del("_foreign_keys")
+	query.Del("_fk")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
 	// Transactions may read before writing: acquire the WAL writer before
@@ -514,6 +528,39 @@ func migrateSchema(ctx context.Context, db DB, schema string) error {
 				{statement: "CREATE INDEX IF NOT EXISTS idx_tokens_created_by_kind ON tokens(created_by, kind)"},
 			},
 		},
+		{
+			version: 13,
+			steps: []migrationStep{
+				{statement: "ALTER TABLE tokens ADD COLUMN bootstrap_key TEXT", table: "tokens", column: "bootstrap_key"},
+			},
+		},
+		{
+			version: 14,
+			steps: []migrationStep{
+				// The pre-kind first-run admin invite was logged and had no
+				// creator, scope, use limit or expiry. Retain its lifecycle row
+				// so startup cannot mistake this database for a fresh install.
+				{statement: `UPDATE tokens SET expires_at = '1970-01-01 00:00:01'
+					WHERE kind = 0 AND role = 2 AND created_by = 0 AND channel_scope = 0
+					AND max_uses = 0 AND expires_at IS NULL AND bootstrap_key IS NULL`},
+			},
+		},
+		{
+			version: 15,
+			steps: []migrationStep{
+				{statement: "ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0", table: "users", column: "credential_version"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_hash TEXT NOT NULL DEFAULT ''", table: "users", column: "recovery_hash"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_expires_at INTEGER NOT NULL DEFAULT 0", table: "users", column: "recovery_expires_at"},
+				{statement: "ALTER TABLE users ADD COLUMN recovery_issued_by INTEGER NOT NULL DEFAULT 0", table: "users", column: "recovery_issued_by"},
+			},
+		},
+		{
+			version: 16,
+			steps: []migrationStep{
+				// Existing grants have no provable issuer generation; fail closed.
+				{statement: "ALTER TABLE users ADD COLUMN recovery_issuer_version INTEGER NOT NULL DEFAULT -1", table: "users", column: "recovery_issuer_version"},
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -637,18 +684,25 @@ func (s *baseProvider) CreateUserWithChannelScope(username string, role model.Ro
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO users (username, role, channel_scope, personal_token_hash, personal_token_created_at) VALUES (?, ?, ?, ?, ?)",
+		`INSERT INTO users (username, role, channel_scope, personal_token_hash, personal_token_created_at)
+		 SELECT ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))`,
 		username,
 		int(role),
 		channelScope,
 		"",
 		formatDBTime(time.Now().UTC()),
+		channelScope, channelScope, channelScope,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
 			return nil, fmt.Errorf("datastore: create user: %w", ErrUsernameTaken)
 		}
 		return nil, fmt.Errorf("datastore: create user: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("datastore: create user rows affected: %w", err)
+	} else if n == 0 {
+		return nil, ErrChannelReference
 	}
 	id, _ := res.LastInsertId()
 	return &model.User{
@@ -772,7 +826,7 @@ func (s *baseProvider) UpdateUserPersonalToken(userID int64, hash string, create
 	createdAtStr := formatDBTime(createdAt)
 	_, err := s.ExecContext(
 		context.Background(),
-		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ? WHERE id = ?",
+		"UPDATE users SET personal_token_hash = ?, personal_token_created_at = ?, credential_version = credential_version + 1, recovery_hash = '', recovery_expires_at = 0, recovery_issued_by = 0 WHERE id = ?",
 		hash,
 		createdAtStr,
 		userID,
@@ -847,7 +901,7 @@ func (s *baseProvider) BootstrapUserID() (int64, bool, error) {
 
 // ---- Channels ----
 
-// CreateChannelFull creates a new channel with all options.
+// CreateChannel creates a channel, checking its parent atomically with insertion.
 func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	if err := channel.Validate(); err != nil {
 		return err
@@ -863,7 +917,10 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	}
 	res, err := s.ExecContext(
 		context.Background(),
-		"INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		`INSERT INTO channels (name, description, max_users, parent_id, is_temp, allow_sub_channels, created_by)
+		 SELECT ?, ?, ?, ?, ?, ?, ?
+		 WHERE (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ?))
+		 AND (SELECT COALESCE(SUM(? + ? * (length(name) + length(description))), 0) FROM channels) + ? <= ?`,
 		channel.Name,
 		channel.Description,
 		channel.MaxUsers,
@@ -871,12 +928,19 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 		isTempInt,
 		allowSubInt,
 		channel.CreatedBy,
+		channel.ParentID, channel.ParentID,
+		model.StateChannelFixedBytes, model.StateJSONRuneBytes, model.ChannelStateBytes(*channel), model.MaxChannelStateBytes,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: channels.parent_id, channels.name") {
 			return fmt.Errorf("datastore: create channel: %w", ErrChannelNameTaken)
 		}
 		return fmt.Errorf("datastore: create channel: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: create channel rows affected: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("datastore: channel parent missing or serialized channel state budget exceeded: %w", ErrChannelReference)
 	}
 	channel.ID, err = res.LastInsertId()
 	if err != nil {
@@ -887,11 +951,27 @@ func (s *baseProvider) CreateChannel(channel *model.Channel) error {
 	return nil
 }
 
-// DeleteChannel deletes a channel by ID.
+// DeleteChannel ignores expired/exhausted invite references, but preserves their
+// rows and all account scopes. The guards share the DELETE's writer lock.
 func (s *baseProvider) DeleteChannel(id int64) error {
-	_, err := s.ExecContext(context.Background(), "DELETE FROM channels WHERE id = ?", id)
+	// Trim fractional zeros so exact expiry is still valid, matching time.After
+	// in ValidateToken, without rounding away the first nanosecond after expiry.
+	now := time.Now().UTC().Format(dbTimeLayout + ".999999999")
+	res, err := s.ExecContext(context.Background(), `DELETE FROM channels WHERE id = ?
+		AND EXISTS(SELECT 1 FROM channels WHERE id != ?)
+		AND NOT EXISTS(SELECT 1 FROM channels WHERE parent_id = ?)
+		AND NOT EXISTS(SELECT 1 FROM users WHERE channel_scope = ?)
+		AND NOT EXISTS(SELECT 1 FROM tokens WHERE channel_scope = ? AND
+			(kind != ? OR max_uses < 0 OR
+			 ((expires_at IS NULL OR expires_at >= ? OR datetime(expires_at) IS NULL)
+			  AND (max_uses = 0 OR use_count < max_uses))))`, id, id, id, id, id, tokenKindInvite, now)
 	if err != nil {
 		return fmt.Errorf("datastore: delete channel: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: delete channel rows affected: %w", err)
+	} else if n == 0 {
+		return ErrChannelDeleteRefused
 	}
 	return nil
 }
@@ -1017,7 +1097,8 @@ func (s *baseProvider) BootstrapTokenState() (BootstrapTokenState, error) {
 	return state, nil
 }
 
-// CreateToken stores a new token (hash only).
+// CreateToken stores a new invite (hash only). New scopes must be permanent;
+// existing temporary-scoped invites and accounts are not changed.
 func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope int64, createdBy int64, maxUses int, expiresAt time.Time) error {
 	if maxUses < 0 {
 		return fmt.Errorf("datastore: create token: max uses must not be negative")
@@ -1027,13 +1108,58 @@ func (s *baseProvider) CreateToken(hash string, role model.Role, channelScope in
 		value := formatDBTime(expiresAt)
 		expStr = &value
 	}
-	_, err := s.ExecContext(context.Background(),
-		"INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr)
+	res, err := s.ExecContext(context.Background(),
+		`INSERT INTO tokens (hash, role, channel_scope, created_by, kind, max_uses, expires_at)
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? >= 0 AND (? = 0 OR EXISTS(SELECT 1 FROM channels WHERE id = ? AND is_temp = 0))`,
+		hash, int(role), channelScope, createdBy, tokenKindInvite, maxUses, expStr, channelScope, channelScope, channelScope)
 	if err != nil {
 		return fmt.Errorf("datastore: create token: %w", err)
 	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("datastore: create token rows affected: %w", err)
+	} else if n == 0 {
+		return ErrChannelReference
+	}
 	return nil
+}
+
+// HasLegacyBootstrapOwner identifies preserved owners whose credential was
+// issued before independent server randomness. NULL is never silently upgraded.
+func (s *baseProvider) HasLegacyBootstrapOwner() (bool, error) {
+	var legacy bool
+	err := s.QueryRowContext(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM tokens WHERE kind = ? AND created_by > 0 AND bootstrap_key IS NULL)", tokenKindBootstrap,
+	).Scan(&legacy)
+	if err != nil {
+		return false, fmt.Errorf("datastore: inspect legacy bootstrap owner: %w", err)
+	}
+	return legacy, nil
+}
+
+// BootstrapPersonalTokenKey prepares retry material inside the provisioning
+// transaction. Already-bound legacy owners retain their original credential.
+func (s *txProvider) BootstrapPersonalTokenKey(hash string) (string, error) {
+	var key sql.NullString
+	var useCount int
+	if err := s.QueryRowContext(context.Background(),
+		"SELECT bootstrap_key, use_count FROM tokens WHERE hash = ? AND kind = ? AND max_uses = -1",
+		hash, tokenKindBootstrap,
+	).Scan(&key, &useCount); err != nil {
+		return "", fmt.Errorf("datastore: read bootstrap key: %w", err)
+	}
+	if key.Valid && key.String == "" {
+		return "", fmt.Errorf("datastore: missing pending bootstrap key")
+	}
+	if !key.Valid && useCount == 0 {
+		key.String = rand.Text()
+		if _, err := s.ExecContext(context.Background(),
+			"UPDATE tokens SET bootstrap_key = ? WHERE hash = ? AND kind = ? AND use_count = 0 AND bootstrap_key IS NULL",
+			key.String, hash, tokenKindBootstrap,
+		); err != nil {
+			return "", fmt.Errorf("datastore: prepare bootstrap key: %w", err)
+		}
+	}
+	return key.String, nil
 }
 
 func (s *baseProvider) CreateBootstrapToken(hash string) error {
@@ -1061,7 +1187,7 @@ func (s *baseProvider) FinalizeBootstrapToken(userID int64) (bool, error) {
 		return false, nil
 	}
 	if _, err := s.ExecContext(ctx,
-		"UPDATE tokens SET max_uses = 1 WHERE created_by = ? AND kind = ? AND max_uses = -1 AND use_count = 1",
+		"UPDATE tokens SET max_uses = 1, bootstrap_key = CASE WHEN bootstrap_key IS NULL THEN NULL ELSE '' END WHERE created_by = ? AND kind = ? AND max_uses = -1 AND use_count = 1",
 		userID, tokenKindBootstrap,
 	); err != nil {
 		return false, fmt.Errorf("datastore: finalize bootstrap token: %w", err)

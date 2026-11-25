@@ -12,12 +12,12 @@ import (
 
 func TestCreateChannelRejectsDuplicateSiblingName(t *testing.T) {
 	st := newChannelUniquenessStore(t)
-	first := &model.Channel{Name: "duplicate", ParentID: 7}
+	first := &model.Channel{Name: "duplicate"}
 	if err := st.NonTx().CreateChannel(first); err != nil {
 		t.Fatalf("create first channel: %v", err)
 	}
 
-	second := &model.Channel{Name: "duplicate", ParentID: 7}
+	second := &model.Channel{Name: "duplicate"}
 	if err := st.NonTx().CreateChannel(second); !errors.Is(err, ErrChannelNameTaken) {
 		t.Fatalf("create duplicate error = %v, want %v", err, ErrChannelNameTaken)
 	}
@@ -25,10 +25,14 @@ func TestCreateChannelRejectsDuplicateSiblingName(t *testing.T) {
 
 func TestCreateChannelAllowsSameNameUnderDifferentParents(t *testing.T) {
 	st := newChannelUniquenessStore(t)
-	for _, parentID := range []int64{1, 2} {
-		channel := &model.Channel{Name: "shared", ParentID: parentID}
+	for _, name := range []string{"parent1", "parent2"} {
+		parent := &model.Channel{Name: name}
+		if err := st.NonTx().CreateChannel(parent); err != nil {
+			t.Fatal(err)
+		}
+		channel := &model.Channel{Name: "shared", ParentID: parent.ID}
 		if err := st.NonTx().CreateChannel(channel); err != nil {
-			t.Fatalf("create channel under parent %d: %v", parentID, err)
+			t.Fatalf("create channel under parent %d: %v", parent.ID, err)
 		}
 	}
 }

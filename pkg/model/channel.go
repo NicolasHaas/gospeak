@@ -19,6 +19,15 @@ const (
 	MaxChannelNameLength = 64
 	MaxChannelDescLength = 256
 	MaxChannelUsers      = 256
+
+	// Reserve one maximum-size user per supported session and the auth envelope.
+	// Channel costs include JSON keys, widest IDs, punctuation and worst-case escaping.
+	MaxServerSessions      = 1024
+	StateUserBytes         = 4*MaxUsernameLength + 128 + 11 // includes widest live-session ID and comma
+	StateEnvelopeBytes     = 4096
+	StateChannelFixedBytes = 192
+	StateJSONRuneBytes     = 6
+	MaxChannelStateBytes   = 512*1024 - StateEnvelopeBytes - MaxServerSessions*StateUserBytes
 )
 
 var ErrChannelNameEmpty = errors.New("channel name must not be empty")
@@ -97,4 +106,9 @@ func containsControlCharacter(value string) bool {
 	return strings.IndexFunc(value, func(r rune) bool {
 		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 	}) >= 0
+}
+
+// ChannelStateBytes is a conservative JSON wire cost, excluding channel users.
+func ChannelStateBytes(ch Channel) int {
+	return StateChannelFixedBytes + StateJSONRuneBytes*(utf8.RuneCountInString(ch.Name)+utf8.RuneCountInString(ch.Description))
 }

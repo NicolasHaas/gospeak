@@ -82,12 +82,14 @@ type App struct {
 	channels           []pb.ChannelInfo
 	selectedChannelID  int64
 	chatChannelID      int64
+	chatDrafts         map[int64]string
 	chatRows           []pb.ChatMessage
 	chatDeleted        map[int64]bool
 	chatHasMore        bool
 	chatLoading        bool
 	chatRetry          bool
 	chatAttempt        uint64
+	chatRequestID      int64
 	chatTimer          *time.Timer
 	chatBeforeID       int64
 	activeScreenShare  *pb.ScreenShareEvent
@@ -104,6 +106,7 @@ type App struct {
 	connectAttempt  uint64 // UI-owned credential callback epoch
 	connectPending  bool
 	bookmarkLoadErr error
+	credentialBusy  bool // UI-owned lifecycle operation, independent of media generation
 
 	// errorDialog is the single reused modal for server errors; consecutive
 	// errors update its text instead of stacking dialogs.
@@ -432,7 +435,13 @@ func (a *App) buildUI() {
 	chatHeaderBar := container.NewBorder(nil, nil, nil, container.NewHBox(a.watchBtn, a.backBtn), a.chatHeader)
 	chatBottom := widget.NewButtonWithIcon("Scroll to bottom", theme.MoveDownIcon(), a.chatScroll.ScrollToBottom)
 	chatBottom.Importance = widget.LowImportance
-	a.chatPane = container.NewBorder(a.chatMore, chatBottom, nil, nil, a.chatScroll)
+	chatBottom.Hide()
+	// Overlay the action so its visibility cannot change the scrollable height.
+	a.chatPane = container.NewBorder(a.chatMore, nil, nil, nil,
+		container.NewStack(a.chatScroll, container.NewBorder(nil, chatBottom, nil, nil)))
+	chatLayout := &chatPaneLayout{box: a.chatPane.Layout, scroll: a.chatScroll, bottom: chatBottom}
+	a.chatPane.Layout = chatLayout
+	a.chatScroll.OnScrolled = func(fyne.Position) { chatLayout.updateBottom() }
 	a.chatStack = container.NewStack(a.chatPane, a.screenBox)
 	chatPanel := container.NewBorder(chatHeaderBar, container.NewBorder(nil, nil, nil, a.chatSend, a.chatEntry), nil, nil, a.chatStack)
 
@@ -483,6 +492,7 @@ func (a *App) bindEvents() {
 				a.channels = nil
 				a.selectedChannelID = 0
 				a.resetChat()
+				clear(a.chatDrafts)
 				a.activeScreenShare = nil
 				a.watchingScreenFeed = false
 				a.updateJoinChannelButton()
@@ -513,8 +523,10 @@ func (a *App) bindEvents() {
 				a.syncSelectedChannel()
 				a.selectChatChannel(a.selectedChannelID)
 				role := a.engine.GetRole()
-				if role == "admin" || role == "moderator" {
+				if role == "admin" {
 					a.serverBtn.Show()
+				} else {
+					a.serverBtn.Hide()
 				}
 			}
 		})
@@ -615,7 +627,7 @@ func (a *App) bindEvents() {
 			a.activeScreenShare = event
 			a.updateShareButton()
 			a.updateWatchButton()
-			if event != nil && !event.Active && a.watchingScreenFeed {
+			if (event == nil || !event.Active) && a.watchingScreenFeed {
 				a.watchingScreenFeed = false
 				a.showChatPanel()
 			}
@@ -657,7 +669,7 @@ func (a *App) bindEvents() {
 				dialog.ShowInformation("Role Updated", message, a.window)
 				// Update server button visibility based on new role
 				role := a.engine.GetRole()
-				if role == "admin" || role == "moderator" {
+				if role == "admin" {
 					a.serverBtn.Show()
 				} else {
 					a.serverBtn.Hide()
@@ -853,6 +865,9 @@ func (a *App) syncSelectedChannel() {
 	}
 
 	selectedChannelID := a.engine.GetChannelID()
+	if scope := a.engine.GetChannelScope(); selectedChannelID == 0 && scope != 0 {
+		selectedChannelID = scope
+	}
 	if selectedChannelID == 0 {
 		for _, item := range a.flattenChannels() {
 			if item.isChannel {
@@ -1150,7 +1165,7 @@ func (a *App) showConnectDialog() {
 			if !ok {
 				return
 			}
-			if a.connectPending || a.engine.GetState() != client.StateDisconnected {
+			if a.connectPending || a.credentialBusy || a.engine.GetState() != client.StateDisconnected {
 				return
 			}
 			controlAddr, controlHost, err := normalizeAddr(serverEntry.Text, defaultControlPort)
@@ -1175,6 +1190,18 @@ func (a *App) showConnectDialog() {
 				voiceAddr = net.JoinHostPort(controlHost, defaultVoicePort)
 			}
 
+			attempts, pendingErr := a.bookmarks.PersonalCredentialAttempts()
+			if pendingErr != nil {
+				dialog.ShowError(pendingErr, a.window)
+				return
+			}
+			for _, pending := range attempts {
+				if pending.ControlAddr == controlAddr && pending.Username == username {
+					dialog.ShowInformation("Credential change pending", "Check the saved candidate in Settings - Personal Credential before reconnecting. No old credential was tried.", a.window)
+					a.showPersonalCredentialDialog()
+					return
+				}
+			}
 			token := bookmarkTokenFor(selectedBookmark, controlAddr, username, tokenEntry.Text)
 			a.connectAttempt++
 			attempt := a.connectAttempt
@@ -1200,14 +1227,7 @@ func (a *App) showConnectDialog() {
 							return
 						}
 						if err != nil {
-							var untrusted *client.UntrustedServerError
-							var changed *client.ServerIdentityChangedError
-							if errors.As(err, &untrusted) {
-								a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
-								return
-							}
-							if errors.As(err, &changed) {
-								a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
+							if a.handleServerTrustError(err, controlAddr, connect) {
 								return
 							}
 							slog.Error("connect failed", "err", err)
@@ -1236,15 +1256,34 @@ func (a *App) showConnectDialog() {
 	d.Show()
 }
 
+func (a *App) handleServerTrustError(err error, controlAddr string, connect func(string)) bool {
+	// Check the plane before unwrapping shared trust errors, even for the same address.
+	var screenTLS *client.ScreenTLSError
+	if errors.As(err, &screenTLS) {
+		return false
+	}
+	var untrusted *client.UntrustedServerError
+	var changed *client.ServerIdentityChangedError
+	if errors.As(err, &untrusted) {
+		a.confirmServerTrust(controlAddr, untrusted.Fingerprint, "", connect)
+		return true
+	}
+	if errors.As(err, &changed) {
+		a.confirmServerTrust(controlAddr, changed.Received, changed.Expected, connect)
+		return true
+	}
+	return false
+}
+
 func (a *App) confirmServerTrust(controlAddr, received, expected string, connect func(string)) {
 	attempt := a.connectAttempt
 	title := "Trust New Server Identity"
 	confirm := "Trust and Connect"
 	message := fmt.Sprintf("Verify this server fingerprint through a trusted channel before continuing:\n\n%s\n\nServer: %s", received, controlAddr)
 	if expected != "" {
-		title = "Server Identity Changed"
+		title = "Server Trust Changed"
 		confirm = "Re-trust and Connect"
-		message = fmt.Sprintf("WARNING: the saved server identity changed. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nSaved: %s\nNew:   %s\n\nServer: %s", expected, received, controlAddr)
+		message = fmt.Sprintf("WARNING: the server no longer matches its saved trust. This can indicate a man-in-the-middle attack. Re-trust only after verifying the new fingerprint through a trusted channel.\n\nPrevious trust: %s\nNew fingerprint: %s\n\nServer: %s", expected, received, controlAddr)
 	}
 	dialog.NewCustomConfirm(title, confirm, "Cancel", widget.NewLabel(message), func(ok bool) {
 		if !ok || attempt != a.connectAttempt {
@@ -1277,8 +1316,8 @@ func (a *App) showServerSettings() {
 	role := a.engine.GetRole()
 	var sections []fyne.CanvasObject
 
-	// --- Create Invite Token (admin/mod) ---
-	if role == "admin" || role == "moderator" {
+	// --- Create Invite Token (admin) ---
+	if role == "admin" {
 		roleSelect := widget.NewSelect([]string{"user", "moderator", "admin"}, nil)
 		roleSelect.SetSelected("user")
 		maxUsesEntry := widget.NewEntry()
@@ -1303,12 +1342,14 @@ func (a *App) showServerSettings() {
 			container.NewHBox(widget.NewLabel("Uses (0 = unlimited):"), maxUsesEntry),
 			container.NewHBox(widget.NewLabel("Expires (days, 0 = never):"), expiresEntry),
 			createTokenBtn,
+			widget.NewButton("Manage Invites", a.showInviteListDialog),
+			widget.NewButton("Manage Personal Credentials", a.showPersonalTokenAdminDialog),
 			widget.NewSeparator(),
 		)
 	}
 
-	// --- Create Channel (admin/mod) ---
-	if role == "admin" || role == "moderator" {
+	// --- Create Channel (admin) ---
+	if role == "admin" {
 		chNameEntry := widget.NewEntry()
 		chNameEntry.SetPlaceHolder("Channel name")
 		chDescEntry := widget.NewEntry()
@@ -1492,6 +1533,7 @@ func (a *App) showSettingsDialog() {
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Audio", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewButton("Personal Credential", a.showPersonalCredentialDialog),
 		widget.NewSeparator(),
 		widget.NewLabel("Input Device:"),
 		inputSelect,
@@ -1530,6 +1572,7 @@ func (a *App) showSettingsDialog() {
 			a.settings.DeafenKey = deafenKeySelect.Selected
 			if err := a.settings.Save(); err != nil {
 				slog.Error("save settings", "err", err)
+				a.showError(err)
 			}
 			inputName, outputName := inputSelect.Selected, outputSelect.Selected
 			if inputName == "(Default)" {
@@ -1548,6 +1591,7 @@ func (a *App) showSettingsDialog() {
 						a.settings.AudioInput, a.settings.AudioOutput = inputName, outputName
 						if saveErr := a.settings.Save(); saveErr != nil {
 							slog.Error("save settings", "err", saveErr)
+							a.showError(saveErr)
 						}
 					} else {
 						dialog.ShowError(err, a.window)
@@ -1658,7 +1702,7 @@ func (a *App) updateChannelListItem(id widget.ListItemID, obj fyne.CanvasObject)
 		// Show gear icon when user has channel actions available
 		role := a.engine.GetRole()
 		showGear := a.engine.GetState() == client.StateConnected &&
-			(item.channel.AllowSubChannels || role == "admin" || role == "moderator")
+			(item.channel.AllowSubChannels || role == "admin")
 		if showGear {
 			ch := item.channel
 			gearBtn.OnTapped = func() {
@@ -1919,7 +1963,7 @@ func (a *App) showChannelSettingsDialog(channel pb.ChannelInfo) {
 	}
 
 	// Admin: delete channel (not Lobby)
-	if (role == "admin" || role == "moderator") && channel.Name != "Lobby" {
+	if role == "admin" && channel.Name != "Lobby" {
 		items = append(items, widget.NewSeparator())
 		delBtn := widget.NewButton("Delete Channel", func() {
 			dialog.ShowConfirm("Delete Channel",
@@ -1957,7 +2001,7 @@ func (a *App) showHelpDialog() {
 		"  [M]              — Muted\n" +
 		"  [D]              — Deafened\n\n" +
 		"TOOLBAR\n" +
-		"  Server Settings  — Tokens, channels, import/export (admin/mod)\n" +
+		"  Server Settings  - Tokens, channels, import/export (admin)\n" +
 		fmt.Sprintf("  Gear icon        - %s\n", settingsHelp) +
 		"  Info icon        — This help dialog\n\n" +
 		"CHAT\n" +

@@ -22,6 +22,18 @@ func TestVoiceRegistrationRoundTripAndAuthentication(t *testing.T) {
 	if !registration.Verify(key) {
 		t.Fatal("valid registration proof was rejected")
 	}
+	for _, mutate := range []func(*VoiceRegistration){
+		func(r *VoiceRegistration) { r.SessionID++ },
+		func(r *VoiceRegistration) { r.Counter++ },
+		func(r *VoiceRegistration) { r.Kind = VoiceRegistrationResponse },
+		func(r *VoiceRegistration) { r.Challenge[0]++ },
+	} {
+		changed := *registration
+		mutate(&changed)
+		if changed.Verify(key) {
+			t.Fatal("mutated registration fields retained authentication")
+		}
+	}
 
 	data[len(data)-1] ^= 0xff
 	tampered, err := UnmarshalVoiceRegistration(data)
@@ -63,5 +75,17 @@ func TestVoiceRegistrationRejectsWrongKeyAndMalformedPackets(t *testing.T) {
 	}
 	if _, err := MarshalVoiceRegistration(99, 1, key[:len(key)-1]); err == nil {
 		t.Fatal("invalid registration key length was accepted")
+	}
+	legacy := append([]byte(nil), data...)
+	legacy[3] = '1'
+	if _, err := UnmarshalVoiceRegistration(legacy); err == nil {
+		t.Fatal("GSR1 compatibility fallback accepted")
+	}
+	for _, offset := range []int{16, 17} {
+		malformed := append([]byte(nil), data...)
+		malformed[offset] = 3 // unknown kind, or nonzero request challenge
+		if _, err := UnmarshalVoiceRegistration(malformed); err == nil {
+			t.Fatal("malformed GSR2 fields accepted")
+		}
 	}
 }

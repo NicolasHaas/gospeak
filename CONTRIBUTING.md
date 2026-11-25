@@ -1,6 +1,7 @@
 # Contributing to GoSpeak
 
-Thank you for your interest in contributing to GoSpeak! This document provides guidelines for contributing to the project.
+Thank you for your interest in contributing to GoSpeak! This document provides
+guidelines for contributing to the project.
 
 ## Getting Started
 
@@ -14,7 +15,7 @@ Thank you for your interest in contributing to GoSpeak! This document provides g
 
 ### Prerequisites
 
-- Go 1.26.8 or later
+- Go 1.27.4 or later
 - Podman or Docker (for container builds)
 - System dependencies for local builds (see below)
 
@@ -24,7 +25,8 @@ Thank you for your interest in contributing to GoSpeak! This document provides g
 # Install system dependencies
 sudo apt-get install -y portaudio19-dev libopus-dev pkg-config \
   libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev \
-  libxinerama-dev libxi-dev libxxf86vm-dev
+  libxinerama-dev libxi-dev libxxf86vm-dev \
+  libwayland-dev libxkbcommon-dev libegl-dev
 
 # Build
 go build -tags nolibopusfile ./cmd/server/
@@ -45,9 +47,15 @@ docker compose --profile build run builder
 
 ### Go Style
 
-- Follow standard Go conventions ([Effective Go](https://go.dev/doc/effective_go))
+- Follow standard Go conventions
+  ([Effective Go](https://go.dev/doc/effective_go))
 - Run `gofmt` and `goimports` before committing
 - All code must pass `golangci-lint` (see [.golangci.yml](.golangci.yml))
+
+Wrap Markdown prose at 80 columns with hanging list indentation; preserve code,
+tables, link targets, inline code, and intentional hard breaks when they need
+longer lines. Keep detailed guidance in the existing topical guides and link to
+it rather than duplicating it.
 
 ### Commit Messages
 
@@ -63,9 +71,10 @@ Prefix with: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`, `chore:`
 
 ### Pull Requests
 
-- Keep PRs focused — one feature or fix per PR
+- Keep PRs focused - one feature or fix per PR
 - Include a clear description of what changed and why
-- Ensure CI passes (lint + build + security scan)
+- Ensure CI passes (lint, race-enabled tests and builds). Container
+  vulnerability scanning runs in the release workflow, not regular CI.
 - Update documentation if you change behavior
 
 ## Project Structure
@@ -90,30 +99,34 @@ docs/              Documentation with Mermaid diagrams
 
 ## Architecture Notes
 
-GoSpeak follows an **onion architecture**, the server and client depend on interfaces, not concrete implementations:
-
-e.g. **`datastore.DataProviderFactory`**, the server uses this interface for all persistence. The default implementation is SQLite, but alternative backends (PostgreSQL) can be added by implementing the interface. See [`pkg/datastore/interface.go`](pkg/datastore/interface.go).
-
-When contributing new features, prefer depending on interfaces rather than concrete types.
+When contributing features, depend on interfaces rather than concrete types. See
+[Onion Architecture](docs/architecture.md#onion-architecture) for dependency
+injection and the datastore contract, and
+[`pkg/datastore/interface.go`](pkg/datastore/interface.go) for the persistence
+interface.
 
 ## Testing Architecture
 
-- Server tests use `datastore.NewProviderFactory(cfg.DBPath)` and `server.Dependencies{Store: st}` (see `pkg/server/server_test.go`).
+- Server tests use `datastore.NewProviderFactory(cfg.DBPath)` and
+  `server.Dependencies{Store: st}` (see `pkg/server/server_test.go`).
 - Model tests use direct struct construction in `pkg/model/` (no DB needed).
-- Use `t.TempDir()` for isolated test databases in package-level tests (see `sql_test.go`).
+- Use `t.TempDir()` for isolated test databases in package-level tests (see
+  `sql_test.go`).
 
 ## Areas for Contribution
 
-- **Testing** — unit tests and integration tests
-- **Documentation** — improve docs, add examples
-- **Platform support** — macOS, Linux ARM builds
-- **Performance** — profiling and optimization
-- **Accessibility** — GUI improvements
+- **Testing** - unit tests and integration tests
+- **Documentation** - improve docs, add examples
+- **Platform support** - macOS, Linux ARM builds
+- **Performance** - profiling and optimization
+- **Accessibility** - GUI improvements
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [AGPL-3.0 License](LICENSE).
+By contributing, you agree that your contributions will be licensed under the
+[AGPL-3.0 License](LICENSE).
 
 ## Questions?
 
-Open a [GitHub Issue](https://github.com/NicolasHaas/gospeak/issues) for questions or discussion.
+Open a [GitHub Issue](https://github.com/NicolasHaas/gospeak/issues) for
+questions or discussion.

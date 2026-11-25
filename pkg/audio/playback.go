@@ -124,7 +124,7 @@ func MixFrames(frames [][]int16, frameSize int) []int16 {
 	if len(frames) == 0 {
 		return make([]int16, frameSize)
 	}
-	if len(frames) == 1 {
+	if len(frames) == 1 && len(frames[0]) == frameSize {
 		return frames[0]
 	}
 

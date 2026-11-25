@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"time"
@@ -16,6 +17,33 @@ import (
 
 // maxChatTombstones bounds deletion markers retained for the selected channel.
 const maxChatTombstones = 1000
+
+// chatPaneLayout updates the bottom action after content changes and resizes,
+// which do not necessarily move the offset or emit OnScrolled.
+type chatPaneLayout struct {
+	box    fyne.Layout
+	scroll *container.Scroll
+	bottom *widget.Button
+}
+
+func (l *chatPaneLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	l.box.Layout(objects, size)
+	l.scroll.Refresh()
+	l.updateBottom()
+}
+
+func (l *chatPaneLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	return l.box.MinSize(objects)
+}
+
+func (l *chatPaneLayout) updateBottom() {
+	remaining := l.scroll.Content.MinSize().Height - l.scroll.Size().Height
+	if remaining > 0 && l.scroll.Offset.Y < remaining {
+		l.bottom.Show()
+	} else {
+		l.bottom.Hide()
+	}
+}
 
 func (a *App) startChatLoading() {
 	if a.chatTimer != nil {
@@ -36,12 +64,22 @@ func (a *App) expireChatHistory(attempt uint64) {
 	if attempt != a.chatAttempt || !a.chatLoading {
 		return
 	}
+	a.engine.CancelChatHistory(a.chatRequestID)
 	a.chatLoading = false
 	a.chatRetry = a.chatBeforeID == 0
 	a.renderChat()
 }
 
 func (a *App) resetChat() {
+	a.engine.CancelChatHistory(a.chatRequestID)
+	a.chatRequestID = 0
+	if a.chatChannelID != 0 {
+		if a.chatDrafts == nil {
+			a.chatDrafts = make(map[int64]string)
+		}
+		a.chatDrafts[a.chatChannelID] = a.chatEntry.Text
+	}
+	a.chatEntry.SetText("")
 	if a.chatTimer != nil {
 		a.chatTimer.Stop()
 		a.chatTimer = nil
@@ -55,8 +93,8 @@ func (a *App) resetChat() {
 	a.chatLoading = false
 	a.chatBeforeID = 0
 	a.chatBox.Objects = nil
-	a.chatBox.Refresh()
 	a.chatMore.Hide()
+	a.chatPane.Refresh()
 	a.updateChatContext()
 }
 
@@ -69,15 +107,18 @@ func (a *App) selectChatChannel(channelID int64) {
 		return
 	}
 	// The history request selects this text channel on the server before reading it.
-	if err := a.engine.LoadChatHistory(channelID, 0); err != nil {
+	requestID, err := a.engine.LoadChatHistory(channelID, 0)
+	if err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
 	if channelID != a.chatChannelID {
 		a.resetChat()
 		a.chatChannelID = channelID
+		a.chatEntry.SetText(a.chatDrafts[channelID])
 		a.chatDeleted = make(map[int64]bool)
 	}
+	a.chatRequestID = requestID
 	a.startChatLoading()
 	a.updateChatContext()
 	a.renderChat()
@@ -91,10 +132,12 @@ func (a *App) loadEarlierChat() {
 	if a.chatLoading || !a.chatHasMore || a.chatBeforeID == 0 {
 		return
 	}
-	if err := a.engine.LoadChatHistory(a.chatChannelID, a.chatBeforeID); err != nil {
+	requestID, err := a.engine.LoadChatHistory(a.chatChannelID, a.chatBeforeID)
+	if err != nil {
 		dialog.ShowError(err, a.window)
 		return
 	}
+	a.chatRequestID = requestID
 	a.startChatLoading()
 	a.chatMore.Disable()
 }
@@ -129,7 +172,7 @@ func (a *App) addChatMessage(message pb.ChatMessage) {
 }
 
 func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
-	if response.ChannelID != a.chatChannelID || !a.chatLoading {
+	if response.ChannelID != a.chatChannelID || response.RequestID != a.chatRequestID || !a.chatLoading {
 		return
 	}
 	if a.chatTimer != nil {
@@ -160,6 +203,15 @@ func (a *App) addChatHistory(response pb.ChatHistoryResponse) {
 		seen[message.ID] = true
 	}
 	a.chatRows = append(older, a.chatRows...)
+	slices.SortStableFunc(a.chatRows, func(left, right pb.ChatMessage) int {
+		if left.ID == 0 && right.ID != 0 {
+			return 1
+		}
+		if right.ID == 0 && left.ID != 0 {
+			return -1
+		}
+		return cmp.Compare(left.ID, right.ID)
+	})
 	if len(a.chatRows) > 500 {
 		a.chatRows = a.chatRows[len(a.chatRows)-500:]
 		a.chatHasMore = false
@@ -233,7 +285,6 @@ func (a *App) renderChat() {
 		rows = append(rows, container.NewBorder(nil, nil, nil, button, label))
 	}
 	a.chatBox.Objects = rows
-	a.chatBox.Refresh()
 	if a.chatRetry {
 		a.chatMore.SetText("Retry messages")
 		a.chatMore.Show()
@@ -249,4 +300,5 @@ func (a *App) renderChat() {
 	} else {
 		a.chatMore.Hide()
 	}
+	a.chatPane.Refresh()
 }

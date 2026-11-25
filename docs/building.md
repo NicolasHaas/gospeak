@@ -10,9 +10,13 @@ reproducible.
 ## Prerequisites
 
 - **Podman** (or Docker) is used for container builds.
-- **Go 1.26.8 or newer** is only needed for local development without containers.
+- **Go 1.27.4 or newer** is only needed for local development without
+  containers.
 
 ## Quick Build
+
+Before starting the server, prepare its data mount using the
+[rootful or rootless instructions](#server-container).
 
 ### Using Docker Compose
 
@@ -48,73 +52,120 @@ docker compose --profile dev run --build lint
 Release CI inspects Linux dependencies with `ldd`, Windows imports with
 `objdump`, and macOS dependencies with `otool -L`. The Windows PortAudio and
 Opus libraries are linked statically. Linux users need the runtime PortAudio,
-Opus, OpenGL, and X11 libraries supplied by their distribution. On Debian or
-Ubuntu, install `libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2
-libxinerama1 libxi6 libxxf86vm1`. macOS users need `portaudio` and `opus` from
-Homebrew until GoSpeak ships an application bundle.
+Opus, OpenGL, X11, and Wayland libraries supplied by their distribution. On
+Debian or Ubuntu, install
+`libportaudio2 libopus0 libgl1 libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 libegl1`.
+macOS users need `portaudio` and `opus` from Homebrew until GoSpeak ships an
+application bundle.
 
 Release tags must use SemVer without build metadata. Push one release tag at a
 time and wait for its workflow to finish: GitHub Actions keeps only one pending
 run in a concurrency group. Stable releases also update the `latest` container
-tag; prereleases publish only their versioned tag.
+tag; prereleases publish only their versioned tag. The GitHub release is created
+only after the scanned container image has been published.
+
+## Friday vulnerability monitoring
+
+`Friday vulnerabilities` runs Fridays at 07:00 UTC (08:00 Zurich in winter,
+09:00 in summer), or manually from Actions. GitHub may delay scheduled runs.
+The workflow must be present on the default branch **main** to activate the
+schedule; it explicitly checks out **v1**, the active release branch. Preparing
+it on v1 alone does not activate it. Change that ref when v1 is retired.
+
+Enable GitHub Settings > Notifications > Actions email/web notifications,
+optionally failed workflows only. Scheduled notifications go to the workflow
+creator (or the last cron editor/re-enabler); Nicolas should own that actor.
+After adoption, run it manually and verify a failed run actually notifies the
+intended account. Neither activation nor delivery is verified by local tests.
+
+- Go: pinned Trivy scans a conservative dependency inventory, including upstream
+  test/tool requirements. Native Go commands download all selected modules into
+  a temporary manifest's sums; only that copy is marked Go 1.16 to enable Trivy's
+  documented go.sum merge. Every selected `go list -m all` dependency/version
+  must appear in the actual scanner report or the job fails. Extra sum entries
+  may produce conservative alerts. Pinned govulncheck separately scans the real
+  toolchain standard library, not the dependency graph. All advisory severities
+  fail; neither check is called-symbol analysis or a C-library scan.
+- Linux: rebuilds only `builder-base`, then Trivy scans Debian OS packages,
+  including PortAudio/Opus. HIGH, CRITICAL and UNKNOWN severity matches fail,
+  including unfixed findings. This covers fresh build inputs, not already
+  installed clients or every Linux distribution. No weekly advisory DB cache.
+- Windows: OSV queries the exact PortAudio/Opus source commits in Containerfile,
+  following pagination. All matches fail, including unscored ones. Empty results
+  do **not** establish upstream indexing completeness; coverage stays UNKNOWN.
+- macOS: floating Homebrew libraries and installed/bundled dylibs are **not
+  covered**. Debian results and Windows commits do not establish Mac coverage.
+
+Tool/network errors fail the relevant job, too. Read the job summary and logs
+for scope, source commit, scanner/database identity, findings and errors. A green
+run means no selected database matches, not proof that no vulnerability exists.
 
 ## Container Build Stages
 
 ```mermaid
 graph TB
-    subgraph "Stage 1: builder-base"
-        S1[golang:1.26.8-bookworm]
-        S1 --> DEPS[Install system deps:<br/>PortAudio, Opus, OpenGL,<br/>MinGW cross-compiler]
-    end
-
-    subgraph "Stage 2: win-deps"
-        DEPS --> CMAKE[Cross-compile Windows libs:<br/>PortAudio + Opus via CMake<br/>with MinGW toolchain]
-    end
-
-    subgraph "Stage 3: builder"
-        CMAKE --> GOMOD[go mod download<br/>cached layer]
-        GOMOD --> COPY[Copy source]
-        COPY --> SRV_LIN[Build gospeak-server<br/>Linux, CGO=0]
-        COPY --> SRV_WIN[Build gospeak-server-win.exe<br/>Windows, CGO=0]
-        COPY --> CLI_LIN[Build gospeak-client-lin<br/>Linux, CGO=1]
-        COPY --> CLI_WIN[Build gospeak-client-win.exe<br/>Windows, MinGW cross-compile]
-    end
-
-    subgraph "Stage 3b: builder-win"
-        SRV_WIN --> RT_WIN[Windows binaries export]
-        CLI_WIN --> RT_WIN
-    end
-
-    subgraph "Stage 3c: builder-lin"
-        SRV_LIN --> RT_LIN[Linux binaries export]
-        CLI_LIN --> RT_LIN
-    end
-
-    subgraph "Stage 4: server"
-        SRV_LIN --> RT1[scratch runtime image]
-    end
-
-    subgraph "Stage 5: trivy-scan"
-        RT1 --> TRIVY[Trivy CVE scanner]
-    end
+    GO[go-base: pinned Go image] --> SRC[go-source: modules, source, version flags]
+    GO --> LIN[builder-base: Linux client dependencies]
+    GO --> WIN[win-deps: MinGW, static PortAudio and Opus]
+    SRC --> SRV[server-builder: pure-Go native server]
+    SRV --> RUNTIME[server: scratch runtime]
+    RUNTIME --> SCAN[trivy-scan]
+    SRC --> DEV[development: Linux dependencies and source]
+    LIN --> DEV
+    DEV --> CHECKS[Compose lint and test]
+    DEV --> BL[builder-lin: Linux client and server]
+    SRV --> BL
+    SRC --> BW[builder-win: Windows client and server]
+    WIN --> BW
+    LIN --> TOOLS[release-base: Windows objdump plus Linux inspection libraries]
+    TOOLS --> ALL[builder: all four binaries]
+    BL --> ALL
+    BW --> ALL
 ```
+
+The `server` target never installs system packages or builds clients. The
+`builder-lin` and `builder-win` targets compile only their platform's binaries;
+only `builder` joins both paths. Compose lint/test use `development` without
+compiling release binaries first. Linux outputs use the container platform's
+architecture; Windows outputs remain `amd64`.
 
 ### Layer Caching Strategy
 
-The Containerfile is optimized for caching:
-
-1. **System deps** (Stage 1) stay cached until the apt packages change.
-2. **Windows libs** (Stage 2) stay cached until the CMake config changes.
-3. **Go modules** (the first step in Stage 3) stay cached until `go.mod` or `go.sum` changes.
-4. **Source compilation** (the last step in Stage 3) is the only stage rerun for code changes.
+1. **System dependencies** are installed before source copies and release
+   metadata.
+2. **Windows native libraries** depend on their pinned source refs and CMake
+   config, not Go source or version metadata.
+3. **Go modules** stay cached until `go.mod` or `go.sum` changes.
+4. **Go source and version flags** feed only the requested build paths. Source
+   changes rerun compilation, not apt or CMake.
 
 ## Server Container
 
-The supplied Compose files drop all Linux capabilities and set
-`no-new-privileges`. The image still runs as root so existing named volumes,
-bind mounts, and cloud-init auto-updates remain compatible. Moving to a fixed
-unprivileged UID requires a tested ownership migration for existing database,
-certificate, and bootstrap files rather than silently stranding those files.
+The server runs as UID:GID `10001:10001`; `/data` is owned by that account with
+mode `0700`. Fresh named volumes inherit this directory. The supplied Compose
+files drop all Linux capabilities and set `no-new-privileges`.
+
+For a fresh development Compose bind mount with a rootful engine without
+user-namespace remapping, run `sudo install -d -m 0700 -o 10001 -g 10001 ./data`
+before starting. For rootless Podman, run
+`podman unshare install -d -m 0700 -o 10001 -g 10001 ./data` as the invoking
+user on a fresh path instead; do not first assign host UID 10001. Other engines,
+including rootless Docker, require their own user-namespace/mapping procedure:
+container UID 10001 is not necessarily host UID 10001.
+
+For existing bind mounts or named volumes, stop the server and restart/update
+automation, take a private backup, and migrate only the dedicated GoSpeak data
+path without following symlinks. The directory and its database, sidecars,
+certificates and bootstrap file must belong to container UID:GID `10001:10001`;
+retain `0700` directories and `0600` private files. Rootless namespace ownership
+changes work only on accessible data owned by or mapped to that rootless user.
+Data owned by host root or an external host UID (including host UID 10001)
+requires a privileged, explicitly scoped migration to the engine's actual mapped
+host owner first; an unprivileged namespace chown cannot repair it. Verify
+ownership and modes in the engine's namespace before starting or enabling
+auto-updates; wrong ownership fails closed. The image does not repair
+permissions or start as root.
+
 The runtime image contains only the statically linked server. It has no shell,
 package manager, C runtime, or CA bundle because the server accepts inbound TLS
 connections but does not make outbound TLS requests.
@@ -130,28 +181,12 @@ docker run -p 9600:9600 -p 9601:9601/udp \
 
 ### Server Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-control` | `:9600` | TCP/TLS control plane bind address |
-| `-voice` | `:9601` | UDP voice bind address |
-| `-db` | `gospeak.db` | SQLite database path |
-| `-data` | `.` | Directory for automatic TLS and bootstrap credential files; `-db` controls the database separately |
-| `-cert` | *(empty)* | Custom TLS certificate, including self-signed; requires `-key` |
-| `-key` | *(empty)* | Matching private key; requires `-cert`. Empty pair enables automatic self-signed mode in `-data`; the first new TLS connection within 30 days of expiry renews the certificate without rotating the key |
-| `-open` | `false` | Allow first-time connections without an invite token (personal token still required on reconnect) |
-| `-screen` | `:9603` | TCP/TLS screen-share relay bind address |
-| `-screen-share` | `false` | Enable per-channel screen sharing |
-| `-channels-file` | *(none)* | YAML file defining channels to create on startup |
-| `-metrics` | *(empty)* | HTTP bind address for Prometheus `/metrics` and `/healthz`; disabled by default |
-| `-max-sessions` | `1024` | Maximum concurrent authenticated sessions; non-positive values use the default |
-| `-max-sessions-per-user` | `8` | Maximum concurrent sessions for one account; non-positive values use the default |
-| `-max-sessions-per-source` | `64` | Active plus pending sessions per IPv4 address or IPv6 /64; non-positive values use the default |
-| `-control-message-burst` | `60` | Per-session and aggregate per-user control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
-| `-control-messages-per-second` | `20` | Per-session and aggregate per-user control-message cost replenished each second; non-positive values use the default |
-| `-control-global-burst` | `300` | Server-wide control-message cost burst; non-positive values use the default and values below 5 are raised to 5 |
-| `-control-global-messages-per-second` | `100` | Server-wide control-message cost replenished each second; non-positive values use the default |
-| `-export-users` | `false` | Export all users as YAML and exit |
-| `-export-channels` | `false` | Export all channels as YAML and exit |
+The [server options reference](../deploy/README.md#server-options) lists all
+flags, defaults, and supported limits.
+
+File-backed exports require an existing `-db` source. A missing source fails
+before database creation or migration. Normal server startup still creates a
+missing database.
 
 ## Local Development (Without Containers)
 
@@ -163,7 +198,8 @@ For local development, you need the native dependencies installed:
 sudo apt install build-essential pkg-config \
   portaudio19-dev libopus-dev libgl1-mesa-dev \
   libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-  libxi-dev libxxf86vm-dev
+  libxi-dev libxxf86vm-dev \
+  libwayland-dev libxkbcommon-dev libegl-dev
 
 go build -tags nolibopusfile ./cmd/server/
 go build -tags nolibopusfile ./cmd/client/
@@ -187,8 +223,8 @@ go build -tags nolibopusfile ./cmd/client/
 
 ### macOS
 
-Go 1.26 builds require macOS 12 Monterey or newer.
-Install the Xcode Command Line Tools first so a C compiler is available, then:
+Go 1.27 builds require macOS 13 Ventura or newer. Install the Xcode Command Line
+Tools first so a C compiler is available, then:
 
 ```bash
 brew install pkg-config portaudio opus

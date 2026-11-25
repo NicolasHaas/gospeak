@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gospeakCrypto "github.com/NicolasHaas/gospeak/pkg/crypto"
+	"github.com/NicolasHaas/gospeak/pkg/model"
 	"github.com/NicolasHaas/gospeak/pkg/protocol"
 )
 
@@ -425,21 +426,28 @@ func TestScreenShareManager_ReassigningViewerRemovesOldAuthorization(t *testing.
 
 func TestScreenRelay_SlowViewerDoesNotBlockOtherViewer(t *testing.T) {
 	s := New(DefaultConfig(), Dependencies{})
+	sender := mustCreateSession(t, s.sessions, 9, "sender", model.RoleUser)
+	viewerSlow := mustCreateSession(t, s.sessions, 1, "slow", model.RoleUser)
+	viewerFast := mustCreateSession(t, s.sessions, 2, "fast", model.RoleUser)
+	s.sessions.SetChannel(sender.ID, 1)
+	if _, err := s.screenShare.Start(1, sender.ID, 9, "sender", 100, 100); err != nil {
+		t.Fatal(err)
+	}
 	slow := &blockingScreenConn{started: make(chan struct{}), release: make(chan struct{})}
 	fast := &signalingScreenConn{wrote: make(chan struct{})}
-	s.setScreenConn(1, slow)
-	s.setScreenConn(2, fast)
+	s.setScreenConn(viewerSlow.ID, slow)
+	s.setScreenConn(viewerFast.ID, fast)
 	t.Cleanup(func() {
 		close(slow.release)
 		s.closeScreenConns()
 	})
 
-	pkt := &protocol.ScreenPacket{SessionID: 9, SeqNum: 1, Payload: []byte("frame")}
+	pkt := &protocol.ScreenPacket{SessionID: sender.ID, SeqNum: 1, Payload: []byte("frame")}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.sendScreenPacketToSession(1, pkt)
-		s.sendScreenPacketToSession(2, pkt)
+		s.sendScreenPacketToSession(viewerSlow.ID, pkt)
+		s.sendScreenPacketToSession(viewerFast.ID, pkt)
 	}()
 
 	select {

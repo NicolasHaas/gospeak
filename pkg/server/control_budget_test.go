@@ -128,6 +128,9 @@ func TestControlMessageBudgetDisconnectsFloodingSession(t *testing.T) {
 	if got := srv.metrics.ControlSessionMutationRejections.Load(); got != 1 {
 		t.Fatalf("control mutation rejections = %d, want 1", got)
 	}
+	if srv.controlInteractivePool.usage() != 0 {
+		t.Fatal("terminal session refusal consumed interactive reserve")
+	}
 	if got := srv.metrics.ControlSessionBudgetHighWater.Load(); got != 2 {
 		t.Fatalf("control budget high-water = %d, want 2", got)
 	}
@@ -168,6 +171,8 @@ func TestControlMessageCostCoversEveryInboundRequest(t *testing.T) {
 		{"create channel", &pb.ControlMessage{CreateChannelReq: &pb.CreateChannelRequest{}}, "expensive", 5},
 		{"delete channel", &pb.ControlMessage{DeleteChannelReq: &pb.DeleteChannelRequest{}}, "expensive", 5},
 		{"create token", &pb.ControlMessage{CreateTokenReq: &pb.CreateTokenRequest{}}, "expensive", 5},
+		{"list invites", &pb.ControlMessage{ListInvitesReq: &pb.ListInvitesRequest{}}, "expensive", 5},
+		{"revoke invite", &pb.ControlMessage{RevokeInviteReq: &pb.RevokeInviteRequest{}}, "expensive", 5},
 		{"kick", &pb.ControlMessage{KickUserReq: &pb.KickUserRequest{}}, "expensive", 5},
 		{"ban", &pb.ControlMessage{BanUserReq: &pb.BanUserRequest{}}, "expensive", 5},
 		{"list bans", &pb.ControlMessage{ListBansReq: &pb.ListBansRequest{}}, "expensive", 5},
@@ -236,6 +241,8 @@ func TestGlobalControlBudgetRefusesWithoutDisconnecting(t *testing.T) {
 	srv, st, _ := newTestServer(t)
 	srv.cfg.AllowNoToken = true
 	srv.controlGlobalBudget = newControlMessageLimiter(1, 1, func() time.Time { return time.Unix(1_700_000_000, 0) })
+	// Exercise exhaustion of all ordinary capacity, not interactive fallback.
+	srv.controlInteractivePool = newControlMessageLimiter(0, 0, nil)
 	srv.controlGlobalBudget.highWater = &srv.metrics.ControlGlobalBudgetHighWater
 
 	connect := func(username string) (net.Conn, <-chan struct{}) {
@@ -498,6 +505,9 @@ func TestControlUserBudgetCannotBeResetByReauthentication(t *testing.T) {
 	if got := srv.metrics.ControlUserMutationRejections.Load(); got != 1 {
 		t.Fatalf("user-scope mutation rejections = %d, want 1", got)
 	}
+	if srv.controlInteractivePool.usage() != 0 {
+		t.Fatal("terminal account refusal/reconnect consumed interactive reserve")
+	}
 }
 
 func TestControlCapacityMetricsAreExported(t *testing.T) {
@@ -518,8 +528,10 @@ func TestControlCapacityMetricsAreExported(t *testing.T) {
 	for _, want := range []string{
 		"gospeak_control_budget_limit 9",
 		"gospeak_control_budget_refill_per_second 3",
-		"gospeak_control_budget_global_limit 15",
-		"gospeak_control_budget_global_refill_per_second 4",
+		"gospeak_control_budget_global_limit 10",
+		"gospeak_control_budget_global_refill_per_second 3",
+		"gospeak_control_budget_interactive_limit 5",
+		"gospeak_control_budget_interactive_refill_per_second 1",
 		`gospeak_control_budget_rejections_total{scope="user",reason="chat"} 2`,
 		`gospeak_control_budget_rejections_total{scope="user",reason="bytes"} 1`,
 		`gospeak_control_budget_rejections_total{scope="global",reason="expensive"} 4`,

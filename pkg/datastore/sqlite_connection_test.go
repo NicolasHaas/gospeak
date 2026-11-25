@@ -10,7 +10,9 @@ import (
 
 func TestSQLiteConnectionPragmasApplyToEveryPoolConnection(t *testing.T) {
 	tests := map[string]string{
-		"plain path": filepath.Join(t.TempDir(), "plain.db"),
+		"plain path":                filepath.Join(t.TempDir(), "plain.db"),
+		"URI foreign-key shorthand": "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "shorthand.db")) + "?_foreign_keys=off",
+		"URI foreign-key alias":     "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "alias.db")) + "?_fk=off",
 		"URI pragma overrides": "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "uri.db")) +
 			"?mode=rwc&_pragma=foreign_keys(OFF)&_pragma=busy_timeout(1)" +
 			"&_pragma=foreign_keys/**/(OFF)&_pragma=main.foreign_keys(OFF)" +

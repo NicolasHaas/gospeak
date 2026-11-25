@@ -88,7 +88,10 @@ func TestChatHistoryRetrySendsSameChannelAndCursor(t *testing.T) {
 	refused := func() {
 		t.Helper()
 		select {
-		case <-errors:
+		case err := <-errors:
+			if err == nil {
+				t.Fatal("refusal callback returned no error")
+			}
 		case <-time.After(time.Second):
 			t.Fatal("refusal callback not received")
 		}

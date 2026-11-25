@@ -256,6 +256,10 @@ func TestIncomingVoiceAuthenticatesBeforeAllocatingSpeakerState(t *testing.T) {
 		t.Fatalf("NewVoiceCipher: %v", err)
 	}
 	g.cipher = cipher
+	t.Cleanup(g.cancel)
+	e.generation, e.state, e.sessionID, e.channelID = g, StateConnected, 1, 1
+	e.channels = []pb.ChannelInfo{{ID: 1, Users: []pb.UserInfo{{SessionID: 7}}}}
+	g.updateLiveSessions([]uint32{1, 7}, e.channels)
 	factory := &countingDecoderFactory{}
 	e.decoderFactory = factory
 
@@ -279,6 +283,139 @@ func TestIncomingVoiceAuthenticatesBeforeAllocatingSpeakerState(t *testing.T) {
 		t.Fatalf("authenticated packet did not allocate expected state: decoders=%d jitter=%d last_seen=%d factory=%d",
 			len(e.decoders), len(e.jitterBufs), len(e.speakerLastSeen), factory.created)
 	}
+}
+
+// Regression packets model the existing trust boundary after UDP source filtering:
+// the sender knows the shared media key; arbitrary Internet packets cannot do this.
+func TestIncomingVoiceAdmissionAndReplay(t *testing.T) {
+	setup := func(t *testing.T) (*Engine, *connectionGeneration, *countingDecoderFactory) {
+		t.Helper()
+		e := NewEngine()
+		g := setTestGeneration(e)
+		t.Cleanup(g.cancel)
+		var err error
+		g.cipher, err = gospeakCrypto.NewVoiceCipher(bytes.Repeat([]byte{0x42}, 16))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.sessionID, e.channelID = 1, 10
+		e.channels = []pb.ChannelInfo{
+			{ID: 10, Users: []pb.UserInfo{{SessionID: 1}, {SessionID: 7}}},
+			{ID: 20, Users: []pb.UserInfo{{SessionID: 8}}},
+		}
+		g.updateLiveSessions([]uint32{1, 7, 8}, e.channels)
+		factory := &countingDecoderFactory{}
+		e.decoderFactory = factory
+		return e, g, factory
+	}
+	packet := func(g *connectionGeneration, sessionID, seq uint32, channel uint64) *protocol.VoicePacket {
+		pkt := &protocol.VoicePacket{SessionID: sessionID, SeqNum: seq, ChannelID: channel}
+		pkt.Payload = g.cipher.Encrypt(sessionID, seq, pkt.MarshalHeader(), []byte("opus"))
+		return pkt
+	}
+	for _, name := range []string{"no channel", "wrong channel", "self", "other channel member", "unknown IDs", "stale generation", "canceled generation", "zero sequence"} {
+		t.Run(name, func(t *testing.T) {
+			e, g, factory := setup(t)
+			pkt := packet(g, 7, 1, 10)
+			switch name {
+			case "no channel":
+				e.channelID = 0
+			case "wrong channel":
+				pkt = packet(g, 7, 1, 20)
+			case "self":
+				pkt = packet(g, 1, 1, 10)
+			case "other channel member":
+				pkt = packet(g, 8, 1, 10)
+			case "unknown IDs":
+				for sid := uint32(100); sid < 164; sid++ {
+					e.processIncomingVoice(g, packet(g, sid, 1, 10))
+				}
+				pkt = nil
+			case "stale generation":
+				e.generation = newConnectionGeneration()
+				t.Cleanup(e.generation.cancel)
+			case "canceled generation":
+				g.cancel()
+			case "zero sequence":
+				pkt = packet(g, 7, 0, 10)
+			}
+			e.processIncomingVoice(g, pkt)
+			if factory.created != 0 || len(e.decoders) != 0 || len(e.jitterBufs) != 0 || len(e.speakerLastSeen) != 0 {
+				t.Fatalf("rejected packet allocated speaker state: factory=%d decoders=%d jitter=%d last_seen=%d",
+					factory.created, len(e.decoders), len(e.jitterBufs), len(e.speakerLastSeen))
+			}
+		})
+	}
+	t.Run("replay survives idle cleanup and leave rejoin", func(t *testing.T) {
+		e, g, factory := setup(t)
+		now := time.Unix(100, 0)
+		e.now = func() time.Time { return now }
+		valid := packet(g, 7, 100, 10)
+		e.processIncomingVoice(g, valid)
+		if factory.created != 1 || e.jitterBufs[7].buffered() != 1 {
+			t.Fatal("valid packet not queued")
+		}
+		now = now.Add(time.Second)
+		for _, pkt := range []*protocol.VoicePacket{valid, packet(g, 7, 36, 10)} {
+			e.processIncomingVoice(g, pkt)
+		}
+		if e.speakerLastSeen[7] != time.Unix(100, 0) {
+			t.Error("duplicate/too-old packet refreshed speaker activity")
+		}
+		// The same session can leave all channels and later rejoin without
+		// resetting its outgoing sequence or changing the server media key.
+		e.handleEventGeneration(g, &pb.ControlMessage{ServerStateEvent: &pb.ServerStateEvent{LiveSessionIDs: []uint32{1, 7, 8}, Channels: []pb.ChannelInfo{{ID: 10}}}})
+		now = now.Add(speakerStateTTL)
+		e.playJitterFrames(&recordingPlayer{})
+		e.handleEventGeneration(g, &pb.ControlMessage{ServerStateEvent: &pb.ServerStateEvent{LiveSessionIDs: []uint32{1, 7, 8}, Channels: []pb.ChannelInfo{{ID: 10, Users: []pb.UserInfo{{SessionID: 7}}}}}})
+		e.processIncomingVoice(g, valid)
+		if factory.created != 1 || len(e.decoders) != 0 || len(e.jitterBufs) != 0 || len(e.speakerLastSeen) != 0 {
+			t.Fatal("replay reallocated speaker state after idle cleanup and leave/rejoin")
+		}
+	})
+	t.Run("authority missing and disconnect", func(t *testing.T) {
+		e, g, factory := setup(t)
+		pkt := packet(g, 7, 10, 10)
+		e.processIncomingVoice(g, pkt)
+		if factory.created != 1 {
+			t.Fatal("valid packet not admitted")
+		}
+		for _, ids := range [][]uint32{nil, {1, 7, 7}} {
+			e.handleEventGeneration(g, &pb.ControlMessage{ServerStateEvent: &pb.ServerStateEvent{Channels: e.channels, LiveSessionIDs: ids}})
+			e.processIncomingVoice(g, packet(g, 7, 11, 10))
+			if e.jitterBufs[7].buffered() != 1 || len(g.voiceReplay) != 1 {
+				t.Fatal("invalid authority admitted voice or erased replay history")
+			}
+		}
+		e.handleEventGeneration(g, &pb.ControlMessage{ServerStateEvent: &pb.ServerStateEvent{Channels: e.channels, LiveSessionIDs: []uint32{1, 7, 8}}})
+		e.processIncomingVoice(g, pkt)
+		if e.jitterBufs[7].buffered() != 1 {
+			t.Fatal("recovered authority lost replay history")
+		}
+		e.handleEventGeneration(g, &pb.ControlMessage{ServerStateEvent: &pb.ServerStateEvent{Channels: []pb.ChannelInfo{{ID: 10}}, LiveSessionIDs: []uint32{1, 8}}})
+		if len(g.voiceReplay) != 0 || len(e.decoders) != 0 || len(e.jitterBufs) != 0 || len(e.speakerLastSeen) != 0 {
+			t.Fatal("disconnect retained speaker state")
+		}
+		e.processIncomingVoice(g, pkt)
+		if factory.created != 1 || len(g.voiceReplay) != 0 {
+			t.Fatal("late disconnected packet allocated state")
+		}
+	})
+	t.Run("authentication precedes replay and valid reorder", func(t *testing.T) {
+		e, g, factory := setup(t)
+		forged := packet(g, 7, 1000, 10)
+		forged.Payload[0] ^= 1
+		e.processIncomingVoice(g, forged)
+		if factory.created != 0 {
+			t.Fatal("forged packet allocated decoder")
+		}
+		for _, seq := range []uint32{2, 1, 3} {
+			e.processIncomingVoice(g, packet(g, 7, seq, 10))
+		}
+		if factory.created != 1 || e.jitterBufs[7].buffered() != 3 {
+			t.Fatal("forged high sequence poisoned valid reordered traffic")
+		}
+	})
 }
 
 func TestPlayoutRemovesInactiveSpeakerState(t *testing.T) {
@@ -943,8 +1080,8 @@ func TestConcurrentDisconnectWaitsForInProgressTeardown(t *testing.T) {
 		connectReturned <- e.Connect("127.0.0.1:1", "127.0.0.1:1", "token", "user", "")
 	}()
 	select {
-	case <-connectReturned:
-		t.Fatal("Connect passed the disconnect barrier before teardown completed")
+	case err := <-connectReturned:
+		t.Fatalf("Connect passed the disconnect barrier before teardown completed: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	e.mu.RLock()
@@ -963,7 +1100,10 @@ func TestConcurrentDisconnectWaitsForInProgressTeardown(t *testing.T) {
 		}
 	}
 	select {
-	case <-connectReturned:
+	case err := <-connectReturned:
+		if err == nil {
+			t.Fatal("Connect unexpectedly succeeded against the closed endpoint")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Connect remained blocked after disconnect completion")
 	}
