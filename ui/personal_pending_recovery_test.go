@@ -17,7 +17,7 @@ import (
 )
 
 func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
-	for _, mode := range []string{"fresh-grant", "already-committed", "wrong-grant", "save-failure", "stale-completion", "unknown-auth", "unknown-network", "wrong-server", "wrong-account", "local-owner", "local-admin", "local-wrong-account", "local-stale"} {
+	for _, mode := range []string{"fresh-grant", "already-committed", "wrong-grant", "save-failure", "stale-completion", "unknown-auth", "unknown-network", "wrong-server", "wrong-account", "local-owner", "local-admin", "local-wrong-account", "local-stale", "retrust-check", "retrust-grant", "retrust-local"} {
 		t.Run(mode, func(t *testing.T) {
 			isolateAudioSettingsConfig(t)
 			f := test.NewApp()
@@ -33,7 +33,7 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 			}
 			addr, pin := ln.Addr().String(), client.SPKIFingerprint(cert.Certificate())
 			p := client.PendingPersonalCredential{ControlAddr: addr, ServerIdentity: pin, Username: "person", AccountID: 7, OldToken: "revoked-old", Candidate: strings.Repeat("b", 64), Attempt: strings.Repeat("a", 64), Version: 3}
-			if mode == "wrong-server" {
+			if mode == "wrong-server" || strings.HasPrefix(mode, "retrust-") {
 				p.ServerIdentity = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 			}
 			bs := client.NewBookmarkStore()
@@ -45,11 +45,12 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 			}
 			mutated := make(chan bool, 1)
 			stopped := make(chan struct{})
+			initial := p // immutable fixture state owned by the endpoint worker
 			go func() {
 				defer close(stopped)
 				current := "neither-old-nor-candidate"
-				if mode == "already-committed" {
-					current = p.Candidate
+				if mode == "already-committed" || mode == "retrust-check" {
+					current = initial.Candidate
 				}
 				for {
 					conn, err := ln.Accept()
@@ -71,7 +72,7 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 								_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 4, Message: "temporary failure"}})
 								return
 							}
-							local := strings.HasPrefix(mode, "local-") && m.AuthRequest.Token == "operator-recovered"
+							local := (strings.HasPrefix(mode, "local-") || mode == "retrust-local") && m.AuthRequest.Token == "operator-recovered"
 							if m.AuthRequest.Token != current && !local {
 								_ = protocol.WriteControlMessage(conn, &pb.ControlMessage{ErrorResponse: &pb.ErrorResponse{Code: 2, Message: "authentication failed"}})
 								return
@@ -91,7 +92,7 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 							disk := client.NewBookmarkStore()
 							err := disk.Load()
 							r := m.RedeemPersonalRecoveryReq
-							staged := err == nil && len(disk.PendingCredentials) == 1 && disk.PendingCredentials[0].Candidate == p.Candidate && disk.PendingCredentials[0].Attempt != p.Attempt && disk.PendingCredentials[0].RecoveryGrant == r.Grant && r.Replacement == p.Candidate && r.TargetID == 7
+							staged := err == nil && len(disk.PendingCredentials) == 1 && disk.PendingCredentials[0].Candidate == initial.Candidate && disk.PendingCredentials[0].Attempt != initial.Attempt && disk.PendingCredentials[0].RecoveryGrant == r.Grant && r.Replacement == initial.Candidate && r.TargetID == 7
 							mutated <- staged
 							current = r.Replacement
 							// Lost ACK: production UI authenticates the retained candidate afterwards.
@@ -112,9 +113,12 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 			if mode == "wrong-account" {
 				entries[3].SetText("8")
 			}
-			if strings.HasPrefix(mode, "local-") {
+			if strings.HasPrefix(mode, "local-") || mode == "retrust-local" {
 				entries[2].SetText("operator-recovered")
 				button = "Verify operator-recovered credential"
+			}
+			if mode == "retrust-check" {
+				button = "Check saved candidate"
 			}
 			test.Tap(buttons[button])
 			if mode == "wrong-account" {
@@ -148,6 +152,32 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 				p = q
 			}
 			complete() // preflight/local verification; recovery stage happens on UI owner
+			if strings.HasPrefix(mode, "retrust-") {
+				trustButtons, _ := credentialDialogControls(a.window)
+				confirm := trustButtons["Re-trust pending server"]
+				if confirm == nil {
+					t.Fatal("TLS key change has no explicit pending-credential fingerprint confirmation")
+				}
+				test.Tap(confirm)
+				q, found, err := bs.PendingPersonalCredential(p.ControlAddr, p.Username, p.AccountID)
+				if err != nil || !found || q.Candidate != p.Candidate || q.AccountID != p.AccountID || q.ServerIdentity != pin || q.Attempt == p.Attempt {
+					t.Fatal("confirmed trust did not privately preserve/rebind pending attempt")
+				}
+				p = q
+				test.Tap(buttons[button])
+				complete()
+				if mode == "retrust-grant" {
+					select {
+					case ok := <-mutated:
+						if !ok {
+							t.Fatal("retrusted recovery preceded private stage")
+						}
+					case <-time.After(4 * time.Second):
+						t.Fatal("retrusted grant not redeemed")
+					}
+					complete()
+				}
+			}
 			if mode == "wrong-grant" {
 				p = bs.PendingCredentials[0]
 				if p.Candidate != strings.Repeat("b", 64) || p.RecoveryGrant != strings.Repeat("c", 64) {
@@ -184,10 +214,10 @@ func TestPersonalCredentialPendingRecoveryDialog(t *testing.T) {
 			if err := disk.Load(); err != nil {
 				t.Fatal(err)
 			}
-			success := mode == "fresh-grant" || mode == "already-committed" || mode == "local-owner" || mode == "local-admin"
+			success := mode == "fresh-grant" || mode == "already-committed" || mode == "local-owner" || mode == "local-admin" || strings.HasPrefix(mode, "retrust-")
 			if success {
 				token := p.Candidate
-				if strings.HasPrefix(mode, "local-") {
+				if strings.HasPrefix(mode, "local-") || mode == "retrust-local" {
 					token = "operator-recovered"
 				}
 				if len(disk.PendingCredentials) != 0 || disk.Bookmarks[0].Token != token {

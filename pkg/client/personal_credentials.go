@@ -112,6 +112,44 @@ func (bs *BookmarkStore) RecoverPendingPersonalCredential(p PendingPersonalCrede
 	return q, bs.savePersonalCredential(q, false, &p, (*BookmarkStore).Save)
 }
 
+// RetrustPendingPersonalCredential requires explicit out-of-band fingerprint
+// confirmation. Trust and the exact pending attempt move together in one private
+// save; no credential is tried, promoted, discarded or regenerated here.
+func (bs *BookmarkStore) RetrustPendingPersonalCredential(p PendingPersonalCredential, identity string) error {
+	return bs.retrustPendingPersonalCredential(p, identity, (*BookmarkStore).Save)
+}
+
+func (bs *BookmarkStore) retrustPendingPersonalCredential(p PendingPersonalCredential, identity string, persist func(*BookmarkStore) error) error {
+	if !p.valid() || identity == "" || identity == p.ServerIdentity {
+		return fmt.Errorf("changed server identity required")
+	}
+	next, err := bs.credentialDiskCopy()
+	if err != nil {
+		return err
+	}
+	for i, pending := range next.PendingCredentials {
+		if pending.ControlAddr != p.ControlAddr || pending.Username != p.Username {
+			continue
+		}
+		if pending != p {
+			return fmt.Errorf("stale pending trust confirmation")
+		}
+		p.ServerIdentity = identity
+		p.Attempt, err = crypto.GenerateToken()
+		if err != nil {
+			return err
+		}
+		next.PendingCredentials[i] = p
+		next.TrustServer(p.ControlAddr, identity)
+		if err := persist(next); err != nil {
+			return err
+		}
+		*bs = *next
+		return nil
+	}
+	return fmt.Errorf("credential attempt is no longer pending")
+}
+
 func (bs *BookmarkStore) savePersonalCredential(p PendingPersonalCredential, consentUnsaved bool, expected *PendingPersonalCredential, persist func(*BookmarkStore) error) error {
 	if !p.valid() {
 		return fmt.Errorf("invalid pending credential")

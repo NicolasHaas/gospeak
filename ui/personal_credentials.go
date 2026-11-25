@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -64,8 +65,12 @@ func (a *App) showPersonalCredentialDialog() {
 		}
 		return client.PendingPersonalCredential{}, fmt.Errorf("no saved attempt for this server/account")
 	}
-	runPending := func(p client.PendingPersonalCredential, retry bool) {
+	var runPending func(client.PendingPersonalCredential, bool)
+	runPending = func(p client.PendingPersonalCredential, retry bool) {
 		if a.credentialBusy {
+			return
+		}
+		if a.confirmCredentialDisconnect(func() { runPending(p, retry) }) {
 			return
 		}
 		// A previous Save may have failed after rename. Re-establish successful
@@ -94,6 +99,9 @@ func (a *App) showPersonalCredentialDialog() {
 			fyne.Do(func() {
 				a.credentialBusy = false
 				if err != nil {
+					if a.confirmPendingCredentialTrust(err, p, status) {
+						return
+					}
 					status.SetText("Outcome not verified. Saved candidate retained. Check trust/network, check again, or explicitly retry the saved operation.")
 					return
 				}
@@ -109,8 +117,12 @@ func (a *App) showPersonalCredentialDialog() {
 			})
 		}()
 	}
-	start := func(recovery bool) {
+	var start func(bool)
+	start = func(recovery bool) {
 		if a.credentialBusy {
+			return
+		}
+		if a.confirmCredentialDisconnect(func() { start(recovery) }) {
 			return
 		}
 		addr, _, err := normalizeAddr(address.Text, defaultControlPort)
@@ -196,6 +208,9 @@ func (a *App) showPersonalCredentialDialog() {
 			fyne.Do(func() {
 				a.credentialBusy = false
 				if preflightErr != nil {
+					if existing != nil && a.confirmPendingCredentialTrust(preflightErr, *existing, status) {
+						return
+					}
 					status.SetText(preflightErr.Error())
 					return
 				}
@@ -241,8 +256,12 @@ func (a *App) showPersonalCredentialDialog() {
 		}
 		runPending(p, true)
 	})
-	recovered := widget.NewButton("Verify operator-recovered credential", func() {
+	var verifyRecovered func()
+	verifyRecovered = func() {
 		if a.credentialBusy {
+			return
+		}
+		if a.confirmCredentialDisconnect(verifyRecovered) {
 			return
 		}
 		p, err := findPending()
@@ -270,6 +289,9 @@ func (a *App) showPersonalCredentialDialog() {
 			fyne.Do(func() {
 				a.credentialBusy = false
 				if err != nil {
+					if a.confirmPendingCredentialTrust(err, p, status) {
+						return
+					}
 					status.SetText("Credential not verified; pending candidate retained.")
 					return
 				}
@@ -284,7 +306,8 @@ func (a *App) showPersonalCredentialDialog() {
 				status.SetText("Recovered credential verified and privately saved. Reconnect using the bookmark.")
 			})
 		}()
-	})
+	}
+	recovered := widget.NewButton("Verify operator-recovered credential", verifyRecovered)
 	body := container.NewVBox(widget.NewLabel("Saved pending attempt"), selected, widget.NewLabel("Server"), address, widget.NewLabel("Exact username"), username,
 		widget.NewLabel("Current or operator-recovered personal credential"), old, consent, rotate, recovered,
 		widget.NewLabel("A fresh recovery grant replaces the saved operation, retaining its candidate."),
@@ -293,6 +316,60 @@ func (a *App) showPersonalCredentialDialog() {
 	d := dialog.NewCustom("Personal Credential", "Close", container.NewVScroll(body), a.window)
 	d.Resize(fyne.NewSize(580, 600))
 	d.Show()
+}
+
+// Dedicated credential requests must not require an extra account session. Keep
+// their single-owner reader, but explicitly release this client's slot first.
+func (a *App) confirmCredentialDisconnect(retry func()) bool {
+	if a.connectPending {
+		dialog.ShowInformation("Connection pending", "Wait for the current connection attempt before managing credentials.", a.window)
+		return true
+	}
+	if a.engine.GetState() == client.StateDisconnected {
+		return false
+	}
+	attempt := a.connectAttempt
+	dialog.ShowConfirm("Disconnect for credential management", "Disconnect this client before opening a dedicated credential connection? This frees its account session slot. Reconnect manually afterwards, even if the operation fails.", func(ok bool) {
+		if !ok || attempt != a.connectAttempt || a.credentialBusy {
+			return
+		}
+		a.credentialBusy = true
+		done := a.engine.DisconnectAsync()
+		go func() {
+			if done != nil {
+				<-done
+			}
+			fyne.Do(func() {
+				a.credentialBusy = false
+				if attempt == a.connectAttempt {
+					retry()
+				}
+			})
+		}()
+	}, a.window)
+	return true
+}
+
+func (a *App) confirmPendingCredentialTrust(err error, p client.PendingPersonalCredential, status *widget.Label) bool {
+	var screenTLS *client.ScreenTLSError
+	var changed *client.ServerIdentityChangedError
+	if errors.As(err, &screenTLS) || !errors.As(err, &changed) || changed.Addr != p.ControlAddr || changed.Expected != p.ServerIdentity {
+		return false
+	}
+	attempt := a.connectAttempt
+	message := fmt.Sprintf("WARNING: server identity changed. Verify the new fingerprint through a trusted channel before confirming. No credential will be sent automatically. The saved candidate and account remain bound.\n\nServer: %s\nAccount: #%d %s\nPrevious: %s\nNew: %s", p.ControlAddr, p.AccountID, p.Username, p.ServerIdentity, changed.Received)
+	dialog.NewCustomConfirm("Pending credential server trust changed", "Re-trust pending server", "Cancel", widget.NewLabel(message), func(ok bool) {
+		if !ok || attempt != a.connectAttempt || a.credentialBusy {
+			return
+		}
+		if err := a.bookmarks.RetrustPendingPersonalCredential(p, changed.Received); err != nil {
+			_ = a.bookmarks.ReloadPersonalCredentialState()
+			status.SetText("Private trust update uncertain; candidate retained. Reload and check again.")
+			return
+		}
+		status.SetText("Confirmed trust saved with the retained candidate. Check again or explicitly retry the saved operation.")
+	}, a.window).Show()
+	return true
 }
 
 func (a *App) showPersonalTokenAdminDialog() {
@@ -310,8 +387,12 @@ func (a *App) showPersonalTokenAdminDialog() {
 	closed := false
 	var revoke, issue, revokeGrant *widget.Button
 	disableActions := func() { revoke.Disable(); issue.Disable(); revokeGrant.Disable() }
-	exchange := func(request *pb.ControlMessage, done func(*pb.ControlMessage, error)) {
+	var exchange func(*pb.ControlMessage, func(*pb.ControlMessage, error))
+	exchange = func(request *pb.ControlMessage, done func(*pb.ControlMessage, error)) {
 		if a.credentialBusy {
+			return
+		}
+		if a.confirmCredentialDisconnect(func() { exchange(request, done) }) {
 			return
 		}
 		a.credentialBusy = true

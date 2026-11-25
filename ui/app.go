@@ -1165,7 +1165,7 @@ func (a *App) showConnectDialog() {
 			if !ok {
 				return
 			}
-			if a.connectPending || a.engine.GetState() != client.StateDisconnected {
+			if a.connectPending || a.credentialBusy || a.engine.GetState() != client.StateDisconnected {
 				return
 			}
 			controlAddr, controlHost, err := normalizeAddr(serverEntry.Text, defaultControlPort)
