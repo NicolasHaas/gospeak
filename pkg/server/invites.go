@@ -62,12 +62,14 @@ func (s *Server) manageInvites(sessionID uint32, msg, response *pb.ControlMessag
 	if err != nil || banned {
 		return "permission denied"
 	}
-	if conn.RemoteAddr() != nil {
-		if ip, _, splitErr := net.SplitHostPort(conn.RemoteAddr().String()); splitErr == nil {
-			banned, err = tx.IsIPBanned(ip)
-			if err != nil || banned {
-				return "permission denied"
-			}
+	owner, err := tx.IsBootstrapUser(user.ID)
+	if err != nil {
+		return "permission denied"
+	}
+	if ip, err := canonicalControlPeerIP(conn.RemoteAddr()); err == nil && ip != "" {
+		banned, err := tx.IsIPBanned(ip)
+		if err != nil || (banned && !owner) {
+			return "permission denied"
 		}
 	}
 	if req := msg.ListInvitesReq; req != nil {
