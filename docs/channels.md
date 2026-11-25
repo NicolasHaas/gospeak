@@ -103,8 +103,8 @@ resolve those rows before retrying.
 All permanent and temporary channels share a serialized-state budget. Each
 channel costs `192 + 6 * (name characters + description characters)` bytes of
 that budget, counting Unicode characters rather than UTF-8 bytes. The total must
-not exceed 258048 bytes. This conservative calculation covers JSON escaping,
-field names, IDs and punctuation. It reserves another 256 bytes for each of the
+not exceed 246784 bytes. This conservative calculation covers JSON escaping,
+field names, IDs and punctuation. It reserves another 267 bytes for each of the
 1024 supported sessions and 4096 bytes for the authentication envelope, keeping
 full state and authentication messages within 512 KiB. This is a wire-size
 bound, not a throughput guarantee.

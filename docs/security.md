@@ -265,8 +265,8 @@ For each voice packet:
   original authenticated ciphertext to subscribed viewers without parsing,
   decoding, logging, or retaining frame plaintext.
 - Viewers treat authenticated frames as untrusted input. Before decoding pixels,
-  they require JPEG format, positive dimensions no larger than 8192 per axis and
-  16,777,216 pixels in total, and an exact match between the frame metadata and
+  they require JPEG format, positive dimensions no larger than 1280 per axis and
+  1,638,400 pixels in total, and an exact match between the frame metadata and
   JPEG header. Invalid frames are dropped. These checks require an updated
   client; the relay does not protect older viewers from malicious image content.
 - Relay tuning: a share with no authenticated activity for 15 seconds is expired
@@ -369,8 +369,18 @@ graph TB
   other remote actor can revoke the owner. Server Settings - Manage Personal
   Credentials issues account-bound 15-minute single-use recovery grants for
   ordinary accounts only, or revokes them; hand grants over privately so the
-  recovering user chooses their own final token. Owner/admin recovery is
-  operator-local. Already emitted network bytes cannot be recalled.
+  recovering user chooses their own final token. Grants are bound to the issuer's
+  credential version: replacing or revoking that credential invalidates its old
+  grants permanently. Upgrading a database with unversioned grants invalidates
+  those grants; issue fresh ones. Owner/admin recovery is operator-local. Already
+  emitted network bytes cannot be recalled.
+- Credential dialogs offer to disconnect this client before opening their
+  dedicated connection, so rotation and administration need no spare account
+  session slot. Reconnect manually afterwards. If TLS trust changes while a
+  credential is pending, checking it offers explicit fingerprint confirmation.
+  Verify the fingerprint out of band; confirmation privately updates trust and
+  the pending attempt together, retaining the candidate and account. Then check
+  or explicitly retry the saved operation; confirmation alone sends no token.
 - Credentials are not rotated automatically. If startup warns that an owner
   credential requires rotation, coordinate offline rotation with that owner and
   preserve the owner account and marker. The stopped-service `cmd/recover-token`
