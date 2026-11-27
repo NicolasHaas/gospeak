@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"log/slog"
-	"net"
 	"strings"
 	"testing"
 	"time"
@@ -12,23 +11,37 @@ import (
 	pb "github.com/NicolasHaas/gospeak/pkg/protocol/pb"
 )
 
-type idleDeadlineConn struct {
-	net.Conn
-	deadlines chan time.Time
+func awaitIdleDeadline(t *testing.T, conn *frameDeadlineConn) time.Time {
+	t.Helper()
+	for {
+		select {
+		case at := <-conn.deadlines:
+			if time.Until(at) > time.Minute {
+				return at
+			}
+		case <-time.After(time.Second):
+			t.Fatal("missing applied idle deadline")
+		}
+	}
 }
 
-func (c *idleDeadlineConn) SetReadDeadline(at time.Time) error {
-	if time.Until(at) > time.Minute {
-		c.deadlines <- at
+func awaitFrameDeadline(t *testing.T, conn *frameDeadlineConn) {
+	t.Helper()
+	select {
+	case at := <-conn.deadlines:
+		if left := time.Until(at); left <= 0 || left > 5*time.Second {
+			t.Fatalf("frame completion horizon = %v, want at most 5s", left)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing applied frame deadline")
 	}
-	return c.Conn.SetReadDeadline(at)
 }
 func TestControlIdleDeadlineResetsOnlyForCompleteMessage(t *testing.T) {
 	srv, st, handler := newTestServer(t)
 	srv.cfg.AllowNoToken = true
 	server, peer := newControlPipe()
 	defer peer.Close() //nolint:errcheck
-	conn := &idleDeadlineConn{server, make(chan time.Time, 4)}
+	conn := &frameDeadlineConn{server, make(chan time.Time, 8)}
 	done := make(chan struct{})
 	srv.startWorker(func() { defer close(done); srv.handleControlConn(handler, conn, st) })
 	if err := protocol.WriteControlMessage(peer, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: "idle", MediaCiphers: []string{"aes128"}}}); err != nil {
@@ -37,13 +50,9 @@ func TestControlIdleDeadlineResetsOnlyForCompleteMessage(t *testing.T) {
 	if _, err := protocol.ReadControlMessage(peer); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case at := <-conn.deadlines:
-		if left := time.Until(at); left < 4*time.Minute || left > 5*time.Minute {
-			t.Fatal("wrong idle horizon", left)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("authenticated idle deadline absent")
+	at := awaitIdleDeadline(t, conn)
+	if left := time.Until(at); left < 4*time.Minute || left > 5*time.Minute {
+		t.Fatal("wrong idle horizon", left)
 	}
 	if err := protocol.WriteControlMessage(peer, &pb.ControlMessage{Ping: &pb.Ping{Timestamp: 123}}); err != nil {
 		t.Fatal(err)
@@ -52,16 +61,14 @@ func TestControlIdleDeadlineResetsOnlyForCompleteMessage(t *testing.T) {
 	if err != nil || response.Pong == nil {
 		t.Fatal("ping failed", err)
 	}
-	select {
-	case <-conn.deadlines:
-	case <-time.After(time.Second):
-		t.Fatal("complete message did not reset deadline")
-	}
-	// A partial frame cannot advance the deadline. Expire the pipe's existing
-	// deadline directly rather than sleeping through the production horizon.
+	awaitFrameDeadline(t, conn)
+	awaitIdleDeadline(t, conn)
+	// A partial frame must install its completion deadline before we expire
+	// it, but cannot renew the authenticated idle deadline.
 	if _, err := peer.Write([]byte{0}); err != nil {
 		t.Fatal(err)
 	}
+	awaitFrameDeadline(t, conn)
 	if len(conn.deadlines) != 0 {
 		t.Fatal("partial frame reset deadline")
 	}
@@ -95,7 +102,7 @@ func TestControlIdleExpiryAccounting(t *testing.T) {
 			srv.cfg.AllowNoToken = true
 			server, peer := newControlPipe()
 			defer peer.Close() //nolint:errcheck
-			conn := &idleDeadlineConn{server, make(chan time.Time, 4)}
+			conn := &frameDeadlineConn{server, make(chan time.Time, 8)}
 			done := make(chan struct{})
 			srv.startWorker(func() { defer close(done); srv.handleControlConn(handler, conn, st) })
 			if err := protocol.WriteControlMessage(peer, &pb.ControlMessage{AuthRequest: &pb.AuthRequest{Username: "idle-accounting", MediaCiphers: []string{"aes128"}}}); err != nil {
@@ -105,15 +112,14 @@ func TestControlIdleExpiryAccounting(t *testing.T) {
 			if err != nil || response.AuthResponse == nil {
 				t.Fatal("authentication failed", err)
 			}
-			select {
-			case <-conn.deadlines:
-			case <-time.After(time.Second):
-				t.Fatal("missing idle deadline")
-			}
+			awaitIdleDeadline(t, conn)
 			if len(tc.frame) != 0 {
 				if _, err := peer.Write(tc.frame); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if len(tc.frame) != 0 && tc.name != "malformed" {
+				awaitFrameDeadline(t, conn)
 			}
 			if tc.name != "malformed" {
 				if err := server.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
